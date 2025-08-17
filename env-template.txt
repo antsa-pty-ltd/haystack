@@ -1,0 +1,32 @@
+# Haystack AI Service Environment Configuration
+# Copy this to .env and update with your values
+
+OPENAI_API_KEY=
+REDIS_URL=redis://localhost:6379
+LOG_LEVEL=INFO
+
+# SCALING CONFIGURATION - SUPPORTS THOUSANDS OF USERS
+MAX_REQUESTS_PER_USER=10          # Concurrent requests per individual user
+MAX_CONCURRENT_REQUESTS=10000     # Theoretical maximum (users * requests_per_user)
+SESSION_TIMEOUT_MINUTES=30
+HOST=0.0.0.0
+PORT=8001
+
+# NestJS API Configuration - Required for web assistant tools
+NESTJS_API_URL=http://localhost:3000
+
+# Optional: Database connection for web assistant context
+# DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/dbname
+
+# Tool Output Display (UI behaviour)
+# SHOW_TOOL_BANNER=true    # Prepend a small banner like "🔧 search_clients executed"
+# SHOW_RAW_TOOL_JSON=false # Append raw JSON in a fenced block after the natural-language summary
+
+# Production High-Scale Settings
+# MAX_REQUESTS_PER_USER=20         # Allow more concurrent requests per user
+# SESSION_TIMEOUT_MINUTES=60       # Longer sessions for better UX
+# LOG_LEVEL=WARNING                # Reduce logging overhead
+
+# Load Balancer Settings (for multiple instances)
+# INSTANCE_ID=1                    # Unique ID for each instance
+# HEALTH_CHECK_INTERVAL=30         # Health check frequency
