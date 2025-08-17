@@ -323,6 +323,22 @@ class ToolManager:
                 "implementation": self._get_loaded_sessions
             },
 
+            "get_selected_template": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_selected_template",
+                        "description": "Get the template currently selected in the UI for document generation. Use this to see what template is active for document creation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                },
+                "implementation": self._get_selected_template
+            },
+
             "get_session_content": {
                 "definition": {
                     "type": "function",
@@ -811,6 +827,7 @@ class ToolManager:
                 self.tools["suggest_navigation"]["definition"],
                 self.tools["navigate_to_page"]["definition"],
                 self.tools["get_loaded_sessions"]["definition"],
+                self.tools["get_selected_template"]["definition"],
                 self.tools["get_session_content"]["definition"],
                 self.tools["analyze_loaded_session"]["definition"],
                 self.tools["get_templates"]["definition"],
@@ -846,6 +863,7 @@ class ToolManager:
                 "suggest_navigation": self.tools["suggest_navigation"]["implementation"],
                 "navigate_to_page": self.tools["navigate_to_page"]["implementation"],
                 "get_loaded_sessions": self.tools["get_loaded_sessions"]["implementation"],
+                "get_selected_template": self.tools["get_selected_template"]["implementation"],
                 "get_session_content": self.tools["get_session_content"]["implementation"],
                 "analyze_loaded_session": self.tools["analyze_loaded_session"]["implementation"],
                 "get_templates": self.tools["get_templates"]["implementation"],
@@ -1918,6 +1936,60 @@ class ToolManager:
             logger.error(f"Error in get_loaded_sessions: {e}")
             return {
                 "error": f"Failed to get loaded sessions: {str(e)}",
+                "status": "error"
+            }
+
+    async def _get_selected_template(self) -> Dict[str, Any]:
+        """Get the template currently selected in the UI for document generation"""
+        try:
+            logger.info("🔍 get_selected_template called")
+            
+            # Get UI state from the UI state manager
+            from ui_state_manager import ui_state_manager
+            
+            # Get all sessions summary to find active UI states
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            
+            if not all_sessions_summary:
+                return {
+                    "selected_template": None,
+                    "message": "No active UI session found. Template selection requires an active browser session.",
+                    "status": "no_active_session"
+                }
+            
+            # Get the most recent session's UI state
+            latest_session_id = max(all_sessions_summary.keys(), 
+                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
+            
+            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            
+            if not selected_template or not selected_template.get("templateId"):
+                return {
+                    "selected_template": None,
+                    "message": "No template is currently selected in the UI. Use set_selected_template or select one manually in the interface.",
+                    "status": "no_template_selected"
+                }
+            
+            logger.info(f"📄 Found selected template: {selected_template.get('templateName', 'Unknown')}")
+            
+            return {
+                "selected_template": {
+                    "template_id": selected_template.get("templateId", "unknown"),
+                    "template_name": selected_template.get("templateName", "Unknown Template"),
+                    "template_description": selected_template.get("templateDescription", ""),
+                    "has_content": bool(selected_template.get("templateContent", "")),
+                    "content_preview": (selected_template.get("templateContent", "")[:200] + "..." 
+                                      if len(selected_template.get("templateContent", "")) > 200 
+                                      else selected_template.get("templateContent", ""))
+                },
+                "message": f"Template '{selected_template.get('templateName', 'Unknown')}' is currently selected.",
+                "status": "success"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in get_selected_template: {e}")
+            return {
+                "error": f"Failed to get selected template: {str(e)}",
                 "status": "error"
             }
 

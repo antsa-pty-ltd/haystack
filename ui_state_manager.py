@@ -53,6 +53,11 @@ class UIStateManager:
         ui_state = self.get_state(session_id)
         return ui_state.get("activeTab")
     
+    def get_selected_template(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get currently selected template for a session"""
+        ui_state = self.get_state(session_id)
+        return ui_state.get("selectedTemplate")
+    
     def get_session_count(self, session_id: str) -> int:
         """Get number of loaded sessions for a session"""
         ui_state = self.get_state(session_id)
@@ -103,10 +108,17 @@ class UIStateManager:
             if active_tab and isinstance(active_tab, dict):
                 active_tab_id = active_tab.get("activeTabId", "None")
             
+            # Safely get selected template name
+            selected_template = ui_state.get("selectedTemplate")
+            selected_template_name = "None"
+            if selected_template and isinstance(selected_template, dict) and selected_template.get("templateId"):
+                selected_template_name = selected_template.get("templateName", "None")
+            
             summary[session_id] = {
                 "session_count": ui_state.get("sessionCount", 0),
                 "current_client": current_client_name,
                 "active_tab": active_tab_id,
+                "selected_template": selected_template_name,
                 "last_updated": ui_state.get("last_updated", "Unknown")
             }
         return summary

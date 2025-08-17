@@ -309,7 +309,7 @@ class PipelineManager:
                                 except Exception:
                                     pass
 
-                                executing_msg = f"\n\n🔧 {tool_name} executing..."
+                                executing_msg = f"\n\n🔧 {tool_name} executing...\n\n"
                                 full_response += executing_msg
                                 yield executing_msg
 
@@ -386,7 +386,7 @@ class PipelineManager:
                                     else:
                                         quick_feedback = f" ✅ Completed successfully"
 
-                                    executed_msg = f"\n🔧 {tool_name} executed{quick_feedback}"
+                                    executed_msg = f"\n🔧 {tool_name} executed{quick_feedback}\n\n"
                                     full_response += executed_msg
                                     yield executed_msg
 
@@ -396,7 +396,7 @@ class PipelineManager:
                                 else:
                                     embedded_error = result_data.get('error') if isinstance(result_data, dict) else None
                                     error_text = tool_result.get('error') or embedded_error or 'Failed'
-                                    error_msg = f"\n🔧 {tool_name} executed ❌ {error_text}"
+                                    error_msg = f"\n🔧 {tool_name} executed ❌ {error_text}\n\n"
                                     full_response += error_msg
                                     yield error_msg
                                     tool_content = json.dumps({"error": tool_result.get("error", "Failed")}, ensure_ascii=False)
