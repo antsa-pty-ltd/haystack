@@ -653,6 +653,27 @@ class ToolManager:
                 "implementation": self._generate_document_from_loaded
             },
 
+            "generate_document_auto": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "generate_document_auto",
+                        "description": "Automatically generate a document using the currently selected template and loaded sessions from the UI. This is the preferred tool when user asks to 'generate a document' - it will discover what's loaded automatically.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "document_name": {
+                                    "type": "string",
+                                    "description": "Optional custom name for the generated document"
+                                }
+                            },
+                            "required": []
+                        }
+                    }
+                },
+                "implementation": self._generate_document_auto
+            },
+
             # Navigation Tools
             "suggest_navigation": {
                 "definition": {
@@ -832,7 +853,8 @@ class ToolManager:
                 self.tools["analyze_loaded_session"]["definition"],
                 self.tools["get_templates"]["definition"],
                 self.tools["set_selected_template"]["definition"],
-                self.tools["generate_document_from_loaded"]["definition"]
+                self.tools["generate_document_from_loaded"]["definition"],
+                self.tools["generate_document_auto"]["definition"]
             ]
         elif persona_type == "jaimee_therapist":
             return [
@@ -868,7 +890,8 @@ class ToolManager:
                 "analyze_loaded_session": self.tools["analyze_loaded_session"]["implementation"],
                 "get_templates": self.tools["get_templates"]["implementation"],
                 "set_selected_template": self.tools["set_selected_template"]["implementation"],
-                "generate_document_from_loaded": self.tools["generate_document_from_loaded"]["implementation"]
+                "generate_document_from_loaded": self.tools["generate_document_from_loaded"]["implementation"],
+                "generate_document_auto": self.tools["generate_document_auto"]["implementation"]
             }
         elif persona_type == "jaimee_therapist":
             return {
@@ -1140,6 +1163,79 @@ class ToolManager:
                 "error": f"Failed to generate document: {str(e)}",
                 "status": "error"
             }
+
+    async def _generate_document_auto(self, document_name: str = None) -> Dict[str, Any]:
+        """Automatically generate a document using currently selected template and loaded sessions"""
+        try:
+            logger.info("🔍 generate_document_auto called - discovering current UI state")
+            
+            # Get the full template content directly from UI state (not just preview)
+            from ui_state_manager import ui_state_manager
+            
+            # Get all sessions summary to find active UI states
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            if not all_sessions_summary:
+                return {
+                    "error": "No active UI session found. Template selection requires an active browser session.",
+                    "status": "no_active_session"
+                }
+            
+            # Get the most recent session's UI state  
+            latest_session_id = max(all_sessions_summary.keys(), 
+                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
+            
+            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            if not selected_template or not selected_template.get("templateId"):
+                return {
+                    "error": "No template is currently selected. Please select a template first or use set_selected_template.",
+                    "status": "no_template_selected",
+                    "suggestion": "Use get_templates to see available templates, then set_selected_template to choose one."
+                }
+            
+            # Get the FULL template content (not truncated preview)
+            template_content = selected_template.get("templateContent", "")
+            template_name = selected_template.get("templateName", "Template")
+            template_id = selected_template.get("templateId", "")
+            
+            # Check what sessions are currently loaded
+            loaded_sessions_result = await self._get_loaded_sessions()
+            if loaded_sessions_result.get("status") != "success" or loaded_sessions_result.get("session_count", 0) == 0:
+                return {
+                    "error": "No sessions are currently loaded. Please load one or more sessions first.",
+                    "status": "no_sessions_loaded",
+                    "suggestion": "Use load_session_direct to load a specific session, or manually load sessions in the UI."
+                }
+            
+            # Extract session information
+            loaded_sessions = loaded_sessions_result["loaded_sessions"]
+            client_name = loaded_sessions_result.get("current_client", {}).get("clientName", "Client") if loaded_sessions_result.get("current_client") else "Client"
+            
+            # Generate a smart document name if not provided
+            if not document_name:
+                session_count = len(loaded_sessions)
+                if session_count == 1:
+                    document_name = f"{template_name} - {client_name}"
+                else:
+                    document_name = f"{template_name} - {client_name} ({session_count} sessions)"
+            
+            logger.info(f"📄 Auto-generating document: '{document_name}' using template '{template_name}' with {len(loaded_sessions)} sessions")
+            
+            # Call the existing generate_document_from_loaded with discovered information
+            return await self._generate_document_from_loaded(
+                template_content=template_content,
+                template_name=template_name,
+                document_name=document_name,
+                sessions=None,  # Let it use UI sessions
+                page_context={"auto_discovery": True}
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in generate_document_auto: {e}")
+            return {
+                "error": f"Failed to auto-generate document: {str(e)}",
+                "status": "error"
+            }
+
     async def _get_client_summary(self, client_id: str, include_recent_sessions: bool = True) -> Dict[str, Any]:
         """Get client summary from API"""
         try:
