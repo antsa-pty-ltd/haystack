@@ -690,6 +690,51 @@ class ToolManager:
                 "implementation": self._check_document_readiness
             },
 
+            "get_generated_documents": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_generated_documents",
+                        "description": "Get list of documents that have been generated and are available in the UI. Use this to see what documents can be refined or modified.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                },
+                "implementation": self._get_generated_documents
+            },
+
+            "refine_document": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "refine_document",
+                        "description": "Refine or modify an existing generated document with specific instructions (e.g., make it sound Australian, add more detail, change tone). This will create a new version of the document.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {
+                                    "type": "string",
+                                    "description": "The ID of the document to refine"
+                                },
+                                "refinement_instructions": {
+                                    "type": "string",
+                                    "description": "Detailed instructions for how to refine the document (e.g., 'make it sound like outback Australian with slang')"
+                                },
+                                "new_document_name": {
+                                    "type": "string",
+                                    "description": "Optional new name for the refined document"
+                                }
+                            },
+                            "required": ["document_id", "refinement_instructions"]
+                        }
+                    }
+                },
+                "implementation": self._refine_document
+            },
+
             # Navigation Tools
             "suggest_navigation": {
                 "definition": {
@@ -871,7 +916,9 @@ class ToolManager:
                 self.tools["set_selected_template"]["definition"],
                 self.tools["check_document_readiness"]["definition"],
                 self.tools["generate_document_from_loaded"]["definition"],
-                self.tools["generate_document_auto"]["definition"]
+                self.tools["generate_document_auto"]["definition"],
+                self.tools["get_generated_documents"]["definition"],
+                self.tools["refine_document"]["definition"]
             ]
         elif persona_type == "jaimee_therapist":
             return [
@@ -909,7 +956,9 @@ class ToolManager:
                 "set_selected_template": self.tools["set_selected_template"]["implementation"],
                 "check_document_readiness": self.tools["check_document_readiness"]["implementation"],
                 "generate_document_from_loaded": self.tools["generate_document_from_loaded"]["implementation"],
-                "generate_document_auto": self.tools["generate_document_auto"]["implementation"]
+                "generate_document_auto": self.tools["generate_document_auto"]["implementation"],
+                "get_generated_documents": self.tools["get_generated_documents"]["implementation"],
+                "refine_document": self.tools["refine_document"]["implementation"]
             }
         elif persona_type == "jaimee_therapist":
             return {
@@ -1380,6 +1429,172 @@ class ToolManager:
             guidance_parts.append("❌ Client: No client selected. This is optional but recommended for better document naming")
         
         return " | ".join(guidance_parts)
+
+    async def _get_generated_documents(self) -> Dict[str, Any]:
+        """Get list of documents that have been generated and are available in the UI"""
+        try:
+            logger.info("🔍 get_generated_documents called")
+            
+            # Get UI state from the UI state manager
+            from ui_state_manager import ui_state_manager
+            
+            # Get all sessions summary to find active UI states
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            
+            if not all_sessions_summary:
+                return {
+                    "generated_documents": [],
+                    "document_count": 0,
+                    "message": "No active UI session found. Document access requires an active browser session.",
+                    "status": "no_active_session"
+                }
+            
+            # Get the most recent session's UI state
+            latest_session_id = max(all_sessions_summary.keys(), 
+                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
+            
+            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            
+            if not generated_documents:
+                return {
+                    "generated_documents": [],
+                    "document_count": 0,
+                    "message": "No documents have been generated yet. Generate some documents first.",
+                    "status": "no_documents"
+                }
+            
+            logger.info(f"📄 Found {len(generated_documents)} generated documents in UI")
+            
+            # Format documents for user-friendly display
+            document_summaries = []
+            for i, doc in enumerate(generated_documents, 1):
+                document_summaries.append({
+                    "index": i,
+                    "document_id": doc.get("documentId", "unknown"),
+                    "document_name": doc.get("documentName", "Unknown Document"),
+                    "template_used": doc.get("templateUsed", "Unknown Template"),
+                    "generated_at": doc.get("generatedAt", "Unknown"),
+                    "has_content": bool(doc.get("documentContent", "")),
+                    "content_preview": (doc.get("documentContent", "")[:200] + "..." 
+                                      if len(doc.get("documentContent", "")) > 200 
+                                      else doc.get("documentContent", "")),
+                    "is_generated": doc.get("isGenerated", True)
+                })
+            
+            return {
+                "generated_documents": document_summaries,
+                "document_count": len(generated_documents),
+                "message": f"Found {len(generated_documents)} generated document(s) available for refinement.",
+                "status": "success"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in get_generated_documents: {e}")
+            return {
+                "error": f"Failed to get generated documents: {str(e)}",
+                "status": "error"
+            }
+
+    async def _refine_document(self, document_id: str, refinement_instructions: str, new_document_name: str = None) -> Dict[str, Any]:
+        """Refine or modify an existing generated document with specific instructions"""
+        try:
+            logger.info(f"🔍 refine_document called for document {document_id}")
+            
+            # Get UI state from the UI state manager
+            from ui_state_manager import ui_state_manager
+            
+            # Get all sessions summary to find active UI states
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            
+            if not all_sessions_summary:
+                return {
+                    "error": "No active UI session found. Document refinement requires an active browser session.",
+                    "status": "no_active_session"
+                }
+            
+            # Get the most recent session's UI state
+            latest_session_id = max(all_sessions_summary.keys(), 
+                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
+            
+            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            
+            # Find the document to refine
+            target_document = None
+            for doc in generated_documents:
+                if doc.get("documentId") == document_id:
+                    target_document = doc
+                    break
+            
+            if not target_document:
+                return {
+                    "error": f"Document with ID '{document_id}' not found. Use get_generated_documents to see available documents.",
+                    "status": "document_not_found"
+                }
+            
+            document_content = target_document.get("documentContent", "")
+            document_name = target_document.get("documentName", "Unknown Document")
+            
+            if not document_content:
+                return {
+                    "error": f"Document '{document_name}' has no content to refine.",
+                    "status": "no_content"
+                }
+            
+            # Generate refined document name
+            if not new_document_name:
+                new_document_name = f"{document_name} - Refined"
+            
+            logger.info(f"📄 Refining document '{document_name}' with instructions: {refinement_instructions[:100]}...")
+            
+            # Create refinement prompt for the AI generation
+            refinement_prompt = f"""Please refine the following document according to these instructions:
+
+**Refinement Instructions:** {refinement_instructions}
+
+**Original Document:**
+{document_content}
+
+**Instructions for refinement:**
+- Follow the user's specific instructions carefully
+- Maintain the document's professional purpose while applying the requested changes
+- Keep the same general structure unless instructed otherwise
+- Ensure the refined version is still suitable for its intended clinical/professional use
+"""
+            
+            # Build UI action payload for document refinement (using the regeneration flow)
+            action_payload = {
+                "templateContent": refinement_prompt,
+                "templateName": "Document Refinement",
+                "documentName": new_document_name,
+                "originalContent": document_content,
+                "targetDocumentId": document_id,
+                "targetDocumentName": new_document_name,
+                "isRegeneration": True,
+                "refinementInstructions": refinement_instructions
+            }
+
+            return {
+                "ui_action": {
+                    "type": "generate_document_from_loaded",
+                    "target": "live_transcribe_page",
+                    "payload": action_payload
+                },
+                "status": "ui_action_requested",
+                "user_message": f"Refining document '{document_name}' as '{new_document_name}'. The refined document will open shortly.",
+                "original_document": {
+                    "id": document_id,
+                    "name": document_name,
+                    "content_preview": document_content[:200] + "..." if len(document_content) > 200 else document_content
+                },
+                "refinement_instructions": refinement_instructions
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in refine_document: {e}")
+            return {
+                "error": f"Failed to refine document: {str(e)}",
+                "status": "error"
+            }
 
     async def _get_client_summary(self, client_id: str, include_recent_sessions: bool = True) -> Dict[str, Any]:
         """Get client summary from API"""

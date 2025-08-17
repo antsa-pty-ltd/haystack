@@ -58,6 +58,11 @@ class UIStateManager:
         ui_state = self.get_state(session_id)
         return ui_state.get("selectedTemplate")
     
+    def get_generated_documents(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get generated documents for a session"""
+        ui_state = self.get_state(session_id)
+        return ui_state.get("generatedDocuments", [])
+    
     def get_session_count(self, session_id: str) -> int:
         """Get number of loaded sessions for a session"""
         ui_state = self.get_state(session_id)
@@ -114,8 +119,13 @@ class UIStateManager:
             if selected_template and isinstance(selected_template, dict) and selected_template.get("templateId"):
                 selected_template_name = selected_template.get("templateName", "None")
             
+            # Safely get generated documents count
+            generated_documents = ui_state.get("generatedDocuments", [])
+            document_count = len(generated_documents) if isinstance(generated_documents, list) else 0
+            
             summary[session_id] = {
                 "session_count": ui_state.get("sessionCount", 0),
+                "document_count": document_count,
                 "current_client": current_client_name,
                 "active_tab": active_tab_id,
                 "selected_template": selected_template_name,
