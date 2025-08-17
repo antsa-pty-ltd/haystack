@@ -658,7 +658,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "generate_document_auto",
-                        "description": "Automatically generate a document using the currently selected template and loaded sessions from the UI. This is the preferred tool when user asks to 'generate a document' - it will discover what's loaded automatically.",
+                        "description": "Automatically generate a document using the currently selected template and loaded sessions from the UI. Use this when you're confident template and sessions are ready (after checking with check_document_readiness).",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -672,6 +672,22 @@ class ToolManager:
                     }
                 },
                 "implementation": self._generate_document_auto
+            },
+
+            "check_document_readiness": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "check_document_readiness",
+                        "description": "Check what template, sessions, and client are currently loaded in the UI to provide intelligent guidance for document generation. ALWAYS use this FIRST when user asks to 'generate a document' or similar requests - it will tell you exactly what's loaded and whether you can auto-generate or what's missing.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                },
+                "implementation": self._check_document_readiness
             },
 
             # Navigation Tools
@@ -853,6 +869,7 @@ class ToolManager:
                 self.tools["analyze_loaded_session"]["definition"],
                 self.tools["get_templates"]["definition"],
                 self.tools["set_selected_template"]["definition"],
+                self.tools["check_document_readiness"]["definition"],
                 self.tools["generate_document_from_loaded"]["definition"],
                 self.tools["generate_document_auto"]["definition"]
             ]
@@ -890,6 +907,7 @@ class ToolManager:
                 "analyze_loaded_session": self.tools["analyze_loaded_session"]["implementation"],
                 "get_templates": self.tools["get_templates"]["implementation"],
                 "set_selected_template": self.tools["set_selected_template"]["implementation"],
+                "check_document_readiness": self.tools["check_document_readiness"]["implementation"],
                 "generate_document_from_loaded": self.tools["generate_document_from_loaded"]["implementation"],
                 "generate_document_auto": self.tools["generate_document_auto"]["implementation"]
             }
@@ -1235,6 +1253,133 @@ class ToolManager:
                 "error": f"Failed to auto-generate document: {str(e)}",
                 "status": "error"
             }
+
+    async def _check_document_readiness(self) -> Dict[str, Any]:
+        """Check current UI state to provide guidance for document generation"""
+        try:
+            logger.info("🔍 check_document_readiness called - analyzing current state")
+            
+            # Get UI state manager
+            from ui_state_manager import ui_state_manager
+            
+            # Get all sessions summary to find active UI states
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            if not all_sessions_summary:
+                return {
+                    "ready_to_generate": False,
+                    "status": "no_active_session",
+                    "message": "No active UI session found. Please ensure the web interface is open and active.",
+                    "missing": ["active_session"],
+                    "guidance": "Please open the web interface and navigate to the transcribe page to get started."
+                }
+            
+            # Get the most recent session's UI state  
+            latest_session_id = max(all_sessions_summary.keys(), 
+                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
+            
+            # Check template status
+            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            template_ready = bool(selected_template and selected_template.get("templateId"))
+            
+            # Check sessions status
+            loaded_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
+            sessions_ready = bool(loaded_sessions)
+            session_count = len(loaded_sessions) if loaded_sessions else 0
+            
+            # Check client status
+            current_client = ui_state_manager.get_current_client(latest_session_id)
+            client_ready = bool(current_client and current_client.get("clientName"))
+            
+            # Determine readiness and build response
+            missing_items = []
+            if not template_ready:
+                missing_items.append("template")
+            if not sessions_ready:
+                missing_items.append("sessions")
+            if not client_ready:
+                missing_items.append("client")
+            
+            ready_to_generate = template_ready and sessions_ready
+            
+            # Build status response
+            result = {
+                "ready_to_generate": ready_to_generate,
+                "current_state": {
+                    "template": {
+                        "selected": template_ready,
+                        "name": selected_template.get("templateName") if selected_template else None,
+                        "id": selected_template.get("templateId") if selected_template else None
+                    },
+                    "sessions": {
+                        "loaded": sessions_ready,
+                        "count": session_count,
+                        "sessions": [
+                            {
+                                "client_name": s.get("clientName"),
+                                "session_id": s.get("sessionId"),
+                                "date": s.get("metadata", {}).get("recordingDate")
+                            } for s in (loaded_sessions or [])
+                        ]
+                    },
+                    "client": {
+                        "selected": client_ready,
+                        "name": current_client.get("clientName") if current_client else None,
+                        "id": current_client.get("clientId") if current_client else None
+                    }
+                }
+            }
+            
+            if ready_to_generate:
+                result.update({
+                    "status": "ready",
+                    "message": f"✅ Ready to generate document! You have the '{selected_template.get('templateName')}' template selected with {session_count} loaded session(s).",
+                    "next_action": "You can generate the document right now, or specify a custom document name if desired.",
+                    "can_auto_generate": True
+                })
+            else:
+                result.update({
+                    "status": "missing_requirements", 
+                    "missing": missing_items,
+                    "message": f"❌ Cannot generate document yet. Missing: {', '.join(missing_items)}.",
+                    "guidance": self._build_readiness_guidance(template_ready, sessions_ready, client_ready, selected_template, loaded_sessions, current_client),
+                    "can_auto_generate": False
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in check_document_readiness: {e}")
+            return {
+                "ready_to_generate": False,
+                "error": f"Failed to check document readiness: {str(e)}",
+                "status": "error"
+            }
+    
+    def _build_readiness_guidance(self, template_ready, sessions_ready, client_ready, selected_template, loaded_sessions, current_client):
+        """Build contextual guidance based on current state"""
+        guidance_parts = []
+        
+        if template_ready:
+            guidance_parts.append(f"✅ Template: '{selected_template.get('templateName')}' is selected")
+        else:
+            guidance_parts.append("❌ Template: No template selected. Use get_templates to see options, then select one manually or use set_selected_template")
+        
+        if sessions_ready:
+            session_count = len(loaded_sessions)
+            if session_count == 1:
+                client_name = loaded_sessions[0].get("clientName", "Unknown")
+                guidance_parts.append(f"✅ Sessions: 1 session loaded for {client_name}")
+            else:
+                guidance_parts.append(f"✅ Sessions: {session_count} sessions loaded")
+        else:
+            guidance_parts.append("❌ Sessions: No sessions loaded. Load sessions manually or use load_session_direct")
+        
+        if client_ready:
+            guidance_parts.append(f"✅ Client: {current_client.get('clientName')} is selected")
+        else:
+            guidance_parts.append("❌ Client: No client selected. This is optional but recommended for better document naming")
+        
+        return " | ".join(guidance_parts)
 
     async def _get_client_summary(self, client_id: str, include_recent_sessions: bool = True) -> Dict[str, Any]:
         """Get client summary from API"""
