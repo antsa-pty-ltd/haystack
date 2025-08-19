@@ -1,0 +1,33 @@
+version: 0.2
+
+run-as: root
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - echo Installing Python dependencies...
+      - python -m pip install --upgrade pip
+      - pip install -r requirements.txt
+  pre_build:
+    commands:
+      - echo Preparing for build...
+      - echo "Python version:"
+      - python --version
+      - echo "Pip version:"
+      - pip --version
+  build:
+    commands:
+      - echo Building the project...
+      - echo "No build step required for FastAPI service"
+
+artifacts:
+  files:
+    - '**/*'  # Include all files and subdirectories in the root directory
+  exclude-paths: 
+    - ./**/venv
+    - ./**/node_modules
+    - ./**/buildspec.yml
+    - ./**/__pycache__
+    - ./**/.git
