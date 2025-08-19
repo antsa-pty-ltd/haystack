@@ -2,7 +2,7 @@ name: Deploy Haystack AI Service to Azure (Multi-Country)
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ main, develop ]
   workflow_dispatch:
     inputs:
       country:
@@ -38,8 +38,8 @@ jobs:
         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
           # Manual trigger - deploy specific country
           echo "countries=[\"${{ github.event.inputs.country }}\"]" >> $GITHUB_OUTPUT
-        elif [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-          # Master branch - deploy to Australia only for now
+        elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          # Main branch - deploy to Australia only for now
           echo "countries=[\"au\"]" >> $GITHUB_OUTPUT
         else
           # Develop branch - deploy to staging
