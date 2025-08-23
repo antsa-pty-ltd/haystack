@@ -3,7 +3,6 @@ import json
 from typing import Dict, List, Optional, Any, AsyncGenerator
 import logging
 from datetime import datetime
-import openai
 from openai import AsyncOpenAI
 
 from config import settings
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineManager:
     def __init__(self):
-        self.openai_client: Optional[AsyncOpenAI] = None
+        self.openai_client = None
         self.active_requests: Dict[str, asyncio.Task] = {}
         # Remove global semaphore bottleneck - use per-user rate limiting instead
         self.user_semaphores: Dict[str, asyncio.Semaphore] = {}
@@ -49,14 +48,11 @@ class PipelineManager:
             return
         
         try:
-            self.openai_client = AsyncOpenAI(
-                api_key=settings.openai_api_key
-            )
-            
+            self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
             self._initialized = True
-            logger.info("✅ OpenAI client initialized successfully")
+            logger.info("✅ OpenAI (new SDK) configured successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+            logger.error(f"❌ Failed to configure OpenAI: {e}")
             raise
     
     async def generate_response(
@@ -153,7 +149,7 @@ class PipelineManager:
                 while iterations < max_iterations:
                     iterations += 1
                     
-                    # Stream the response from OpenAI
+                    # Stream the response from OpenAI 1.0+
                     stream = await self.openai_client.chat.completions.create(
                         messages=openai_messages,
                         stream=True,
@@ -235,6 +231,15 @@ class PipelineManager:
                                     arguments = json.loads(args_text)
                                 except Exception:
                                     arguments = {}
+                                # If user gave immediate style guidance (e.g., slang, tone) in the last user_message, pass it to doc generation tools
+                                if tool_name in {"generate_document_auto", "generate_document_from_loaded"}:
+                                    # Always pass the user's latest message as generation instructions, unless already provided
+                                    if isinstance(user_message, str) and not arguments.get("generation_instructions"):
+                                        logger.info(f"🎨 [DEBUG] Injecting generation_instructions for {tool_name}: '{user_message}'")
+                                        arguments["generation_instructions"] = user_message
+                                    else:
+                                        logger.info(f"🎨 [DEBUG] NOT injecting generation_instructions for {tool_name} - already provided: {arguments.get('generation_instructions', 'N/A')}")
+
 
                                 # If the model supplied a short/missing client_id for convo tools, patch it using the last found full client_id
                                 if tool_name in {"get_latest_conversation", "get_conversations", "get_conversation_messages", "get_client_summary"}:
@@ -309,20 +314,29 @@ class PipelineManager:
                                 except Exception:
                                     pass
 
-                                executing_msg = f"\n\n🔧 {tool_name} executing...\n\n"
+                                executing_msg = f"\n\n[tool] {tool_name} executing...\n\n"
                                 full_response += executing_msg
                                 yield executing_msg
 
                                 tool_result = await tool_manager.execute_tool(tool_name, arguments)
                                 last_tool_signature = tool_signature
 
+                                # Debug logging for templates issue
+                                if tool_name == "get_templates":
+                                    logger.info(f"🔍 DEBUG get_templates tool_result: {tool_result}")
+
                                 result_data = tool_result.get("result") if tool_result.get("success") else None
                                 has_embedded_error = isinstance(result_data, dict) and bool(result_data.get("error"))
+                                
+                                if tool_name == "get_templates":
+                                    logger.info(f"🔍 DEBUG get_templates result_data: {result_data}")
+                                    logger.info(f"🔍 DEBUG get_templates success: {tool_result.get('success')}")
+                                    logger.info(f"🔍 DEBUG get_templates has_embedded_error: {has_embedded_error}")
                                 if tool_result.get("success") and not has_embedded_error:
                                     # Check for UI actions in tool result
                                     if isinstance(result_data, dict) and result_data.get("ui_action"):
                                         ui_action_msg = result_data.get('user_message', 'Performing UI action...')
-                                        yield f"\n🎬 {ui_action_msg}\n"
+                                        yield f"\n[ui] {ui_action_msg}\n"
                                         # Store UI action(s) for WebSocket layer to handle
                                         if not hasattr(self, '_ui_actions'):
                                             self._ui_actions = []
@@ -357,10 +371,10 @@ class PipelineManager:
                                                 })
                                             except Exception:
                                                 pass
-                                        quick_feedback = f" ✅ Found {client_name}"
+                                        quick_feedback = f" - Found {client_name}"
                                     elif tool_name == "get_client_summary" and isinstance(result_data, dict):
                                         client_name = result_data.get('name', 'Client')
-                                        quick_feedback = f" ✅ Retrieved summary for {client_name}"
+                                        quick_feedback = f" - Retrieved summary for {client_name}"
                                     elif tool_name == "get_latest_conversation" and isinstance(result_data, dict):
                                         # Cache latest assignment id
                                         candidate = result_data.get('latest_assignment_id')
@@ -370,7 +384,7 @@ class PipelineManager:
                                                 await session_manager.update_session_context(session_id, {"last_assignment_id": candidate})
                                             except Exception:
                                                 pass
-                                        quick_feedback = f" ✅ Completed successfully"
+                                        quick_feedback = f" - Completed successfully"
                                     elif tool_name == "get_conversations" and isinstance(result_data, dict):
                                         # Cache most recent conversation's assignment id if available
                                         convos = result_data.get('conversations') or []
@@ -382,11 +396,18 @@ class PipelineManager:
                                                     await session_manager.update_session_context(session_id, {"last_assignment_id": cand})
                                                 except Exception:
                                                     pass
-                                        quick_feedback = f" ✅ Completed successfully"
+                                        quick_feedback = f" - Completed successfully"
+                                    elif tool_name == "get_templates" and isinstance(result_data, dict):
+                                        # Handle templates response
+                                        template_count = result_data.get('count', 0)
+                                        if template_count > 0:
+                                            quick_feedback = f" - Found {template_count} templates"
+                                        else:
+                                            quick_feedback = f" - No templates found"
                                     else:
-                                        quick_feedback = f" ✅ Completed successfully"
+                                        quick_feedback = f" - Completed successfully"
 
-                                    executed_msg = f"\n🔧 {tool_name} executed{quick_feedback}\n\n"
+                                    executed_msg = f"\n[tool] {tool_name} executed{quick_feedback}\n\n"
                                     full_response += executed_msg
                                     yield executed_msg
 
@@ -396,7 +417,7 @@ class PipelineManager:
                                 else:
                                     embedded_error = result_data.get('error') if isinstance(result_data, dict) else None
                                     error_text = tool_result.get('error') or embedded_error or 'Failed'
-                                    error_msg = f"\n🔧 {tool_name} executed ❌ {error_text}\n\n"
+                                    error_msg = f"\n[tool] {tool_name} executed [error] {error_text}\n\n"
                                     full_response += error_msg
                                     yield error_msg
                                     tool_content = json.dumps({"error": tool_result.get("error", "Failed")}, ensure_ascii=False)
@@ -408,7 +429,7 @@ class PipelineManager:
                                     "content": tool_content,
                                 })
                             except Exception as e:
-                                error_msg = f"\n\n❌ Tool execution error: {str(e)}"
+                                error_msg = f"\n\n[error] Tool execution error: {str(e)}"
                                 full_response += error_msg
                                 yield error_msg
                         # Continue the loop so the model can use tool outputs
@@ -429,6 +450,20 @@ class PipelineManager:
                 error_msg = "I apologize, but I encountered an error processing your request. Please try again."
                 await session_manager.add_message(session_id, "assistant", error_msg)
                 yield error_msg
+
+    def pop_ui_actions(self) -> List[Dict[str, Any]]:
+        """Return and clear any accumulated UI actions from the last run."""
+        actions: List[Dict[str, Any]] = []
+        try:
+            actions = getattr(self, '_ui_actions', []) or []
+        except Exception:
+            actions = []
+        # Clear after reading to avoid repeating
+        try:
+            self._ui_actions = []
+        except Exception:
+            pass
+        return actions
     
     async def generate_non_streaming_response(
         self,
@@ -481,9 +516,7 @@ class PipelineManager:
         
         self.active_requests.clear()
         
-        # Close OpenAI client
-        if self.openai_client:
-            await self.openai_client.close()
+        # No explicit close for openai 0.28
         
         self._initialized = False
         

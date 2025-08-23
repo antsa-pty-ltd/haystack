@@ -17,9 +17,6 @@ from pydantic import BaseModel
 import uvicorn
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
-from pipeline_manager import PipelineManager
-from personas import PersonaType
-from session_manager import session_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,27 +47,12 @@ def load_templates_safely():
 # Try to load tools
 tool_manager = load_templates_safely()
 
-# Pipeline manager for tool-enabled conversations with history
-pipeline_manager = PipelineManager()
-
 # Create FastAPI app
 app = FastAPI(
     title="Haystack AU Service",
     description="AI Assistant Service with Template Support",
     version="3.0.0"
 )
-
-# Startup: initialize session store and pipeline
-@app.on_event("startup")
-async def on_startup():
-    try:
-        await session_manager.initialize()
-    except Exception as e:
-        logger.warning(f"Session manager init warning: {e}")
-    try:
-        await pipeline_manager.initialize()
-    except Exception as e:
-        logger.warning(f"Pipeline manager init warning: {e}")
 
 # CORS configuration
 app.add_middleware(
@@ -81,7 +63,8 @@ app.add_middleware(
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
 )
 
-# In-memory UI state only (sessions are persisted via SessionManager)
+# In-memory session storage
+sessions: Dict[str, Dict[str, Any]] = {}
 websocket_connections: Dict[str, WebSocket] = {}
 ui_states: Dict[str, Dict[str, Any]] = {}
 
@@ -136,31 +119,12 @@ def _build_page_context_from_ui_state(ui_state: Dict[str, Any]) -> Dict[str, Any
         return {}
 
     capabilities: List[str] = []
-
-    # Detect page type and URL from UI state
-    page_url = ui_state.get("page_url") or ui_state.get("pageUrl") or ui_state.get("route") or ""
-    page_type = ui_state.get("page_type") or ui_state.get("pageType") or ""
-
-    # Heuristics: determine if on sessions/transcribe page
-    is_sessions_page = False
-    if page_type:
-        is_sessions_page = page_type in ["transcribe_page", "sessions_page", "live_transcribe", "live-transcribe"]
-    if not is_sessions_page and isinstance(page_url, str):
-        is_sessions_page = ("/live-transcribe" in page_url) or ("/sessions" in page_url)
-
-    # Capabilities inferred from UI state
     if isinstance(ui_state.get("loadedSessions"), list) and len(ui_state.get("loadedSessions")) > 0:
         capabilities.extend(["get_loaded_sessions", "get_session_content", "analyze_loaded_session", "generate_document_from_loaded"])
     if isinstance(ui_state.get("selectedTemplate"), dict):
         capabilities.append("set_selected_template")
 
-    # If on sessions page, enable client/session actions
-    if is_sessions_page:
-        capabilities.extend(["set_client_selection", "load_session_direct", "load_multiple_sessions"]) 
-
-    # Default page type if still unknown
-    if not page_type:
-        page_type = "transcribe_page" if is_sessions_page else "unknown"
+    page_type = ui_state.get("page_type") or ui_state.get("pageType") or "transcribe_page"
 
     return {
         "page_type": page_type,
@@ -177,14 +141,10 @@ def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     incoming_token = message_data.get("auth_token") or message_data.get("token")
     token = incoming_token or ui_state_manager.get_auth_token(session_id)
 
-    logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, stored_token={bool(ui_state_manager.get_auth_token(session_id))}, final_token={bool(token)}")
-
     if token:
         profile_id = message_data.get("profile_id") or message_data.get("profileId")
-        logger.info(f"🔍 Debug profile_id extraction: from_message={profile_id}")
         try:
             tool_manager.set_auth_token(token, profile_id)
-            logger.info(f"🔍 Debug: set auth token, profile_id={tool_manager.profile_id}")
         except Exception:
             # Non-fatal; tool calls will fail clearly if required
             pass
@@ -192,7 +152,6 @@ def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     # Set profile id explicitly if provided
     profile_id = message_data.get("profile_id") or message_data.get("profileId")
     if profile_id:
-        logger.info(f"🔍 Debug: explicitly setting profile_id={profile_id}")
         try:
             tool_manager.set_profile_id(profile_id)
         except Exception:
@@ -232,14 +191,17 @@ async def health_check():
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(request: CreateSessionRequest):
     try:
-        # Create persisted session
-        session_id = await session_manager.create_session(
-            persona_type=request.persona_type,
-            context=request.context or {},
-            auth_token=None,
-            profile_id=request.profile_id,
-        )
+        session_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
+        
+        sessions[session_id] = {
+            "persona_type": request.persona_type,
+            "context": request.context,
+            "profile_id": request.profile_id,
+            "created_at": created_at,
+            "messages": []
+        }
+        
         logger.info(f"Session created: {session_id} for persona {request.persona_type}")
         return SessionResponse(session_id=session_id, persona_type=request.persona_type, created_at=created_at)
         
@@ -301,70 +263,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             try:
                 # Ensure tools have context (auth/page/profile) before handling
                 _ensure_tools_context(session_id, message_data)
-
-                # Build context for pipeline
-                ui_state = ui_states.get(session_id) or {}
-                derived = _build_page_context_from_ui_state(ui_state)
-                context_for_pipeline: Dict[str, Any] = {
-                    "page_url": ui_state.get("page_url"),
-                    "ui_capabilities": derived.get("capabilities", []),
-                    "client_id": ui_state.get("client_id"),
-                    "active_tab": ui_state.get("active_tab"),
-                    "page_context": derived.get("page_type"),
-                }
-
-                # Resolve persona and auth token
-                sess = await session_manager.get_session(session_id)
-                persona_str = (sess.persona_type if sess else "web_assistant")
-                try:
-                    persona_enum = PersonaType(persona_str)
-                except Exception:
-                    persona_enum = PersonaType.WEB_ASSISTANT
-                auth_token = message_data.get("auth_token") or message_data.get("token") or ui_state_manager.get_auth_token(session_id)
-
-                # Stream via pipeline manager (tool-enabled, history-aware)
-                full_content = ""
-                async for out_chunk in pipeline_manager.generate_response(
-                    session_id=session_id,
-                    persona_type=persona_enum,
-                    user_message=message,
-                    context=context_for_pipeline,
-                    auth_token=auth_token,
-                ):
-                    if not isinstance(out_chunk, str):
-                        continue
-                    full_content += out_chunk
-                    await websocket.send_text(json.dumps({
-                        "type": "message_chunk",
-                        "content": out_chunk,
-                        "full_content": full_content,
-                        "session_id": session_id
-                    }))
-
-                # Persist assistant reply
-                try:
-                    from session_manager import session_manager as _sm
-                    await _sm.add_message(session_id, "assistant", full_content)
-                except Exception:
-                    pass
-
-                # Deliver any collected UI actions to the frontend
-                try:
-                    ui_actions = pipeline_manager.pop_ui_actions()
-                    for action in ui_actions:
-                        await websocket.send_text(json.dumps({
-                            "type": "ui_action",
-                            "action": action,
-                            "session_id": session_id
-                        }))
-                except Exception as e:
-                    logger.warning(f"Failed to deliver UI actions: {e}")
-
-                # Signal completion to the UI
-                await websocket.send_text(json.dumps({
-                    "type": "message_complete",
-                    "session_id": session_id
-                }))
+                # Check for template requests first
+                if tool_manager and "template" in message.lower():
+                    response_text = await handle_template_request(message, session_id)
+                    await send_streaming_response(websocket, session_id, response_text)
+                else:
+                    # Regular OpenAI chat
+                    await handle_openai_chat(websocket, session_id, message, message_data)
                     
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
@@ -393,27 +298,23 @@ async def handle_template_request(message: str, session_id: str) -> str:
     
     try:
         if "get" in message_lower or "show" in message_lower or "what" in message_lower:
-            # Get templates via tool wrapper to receive a success flag consistently
-            if not tool_manager:
-                return "Templates are unavailable right now."
-
-            tool_result = await tool_manager.execute_tool("get_templates", {})
-            if tool_result.get("success"):
-                result_payload = tool_result.get("result") or {}
-                templates = result_payload.get("templates", [])
+            # Get templates
+            result = await tool_manager._get_templates()
+            if result.get("success"):
+                templates = result.get("templates", [])
                 if templates:
                     response = "Here are your available templates:\n\n"
                     for i, template in enumerate(templates[:10], 1):
                         name = template.get('name', 'Unnamed')
                         description = template.get('description', 'No description')
                         response += f"**{i}. {name}**\n   {description}\n\n"
-
+                    
                     response += "\nTo load a template, just tell me which one you'd like to use!"
                     return response
                 else:
                     return "No templates are currently available."
             else:
-                return f"I couldn't access templates: {tool_result.get('error', 'Unknown error')}"
+                return f"I couldn't access templates: {result.get('error', 'Unknown error')}"
         
         elif "load" in message_lower or "select" in message_lower:
             return "To load a template, I'll need to know which template you'd like to use. Please ask me to 'show templates' first to see what's available."
@@ -430,8 +331,8 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
     
     try:
         # Get session info
-        sess = await session_manager.get_session(session_id)
-        persona_type = (sess.persona_type if sess else "web_assistant")
+        session = sessions.get(session_id, {})
+        persona_type = session.get("persona_type", "web_assistant")
         ui_state = ui_states.get(session_id, {})
         
         system_prompt = get_enhanced_system_prompt(persona_type, ui_state)

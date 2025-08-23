@@ -58,6 +58,8 @@ You have access to these tools:
 - get_session_content: Get transcript content of a loaded session for questions/analysis
 - analyze_loaded_session: Analyze loaded session content for themes, topics, summaries
 - analyze_session_content: Analyze session content for themes, sentiment, and insights
+- get_templates: Retrieve all available document templates for the practice
+- set_selected_template: Select a template for document generation
 
 IMPORTANT TOOL CHAINING RULES:
 1. When a user requests a "client summary" or "get_client_summary" for a client NAME:

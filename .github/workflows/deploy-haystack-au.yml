@@ -26,24 +26,50 @@ jobs:
     - name: 'Create deployment package'
       run: |
         mkdir deploy
-        cp *.py deploy/ || true
+        # Copy full FastAPI Haystack service
+        cp main.py deploy/
+        cp config.py deploy/
+        cp personas.py deploy/
+        cp session_manager.py deploy/
+        cp pipeline_manager.py deploy/
+        cp haystack_pipeline.py deploy/
+        cp ui_state_manager.py deploy/
+        cp tools.py deploy/
         cp requirements.txt deploy/
-        cp -r venv/lib/python3.*/site-packages/* deploy/ || true
+        cp startup.sh deploy/
         
-        # Create startup script
-        cat > deploy/startup.sh << 'EOF'
-#!/bin/bash
-cd /home/site/wwwroot
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
-EOF
-        chmod +x deploy/startup.sh
+        # Verify main.py is present (critical for service)
+        if [ ! -f deploy/main.py ]; then
+          echo "ERROR: main.py not found - Service will not work!"
+          exit 1
+        fi
+        
+        # Provide a Python entrypoint that invokes our startup.sh (robust quoting)
+        printf '%s\n' '#!/usr/bin/env python3' 'import subprocess' 'subprocess.run(["bash", "startup.sh"], check=True)' > deploy/startup.py
+        chmod +x deploy/startup.py
+        
+        echo "✅ Full FastAPI Haystack service with WebSocket support packaged"
+        ls -la deploy/
+
+    - name: 'Validate startup.py'
+      run: |
+        echo "--- startup.py ---"
+        sed -n '1,120p' deploy/startup.py
+        echo "---------------"
+        python -c "import ast,sys,pathlib;code=pathlib.Path('deploy/startup.py').read_text(encoding='utf-8');ast.parse(code);print('startup.py syntax OK')"
+
+    - name: 'Azure Login'
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_AU }}
 
     - name: 'Deploy to Azure Web App'
       uses: azure/webapps-deploy@v2
       with:
         app-name: 'antsa-haystack-au-production'
-        publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_AU_PRODUCTION }}
         package: './deploy'
+        slot-name: 'production'
+        startup-command: 'python startup.py'
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_AU }}
         REDIS_URL: ${{ secrets.REDIS_URL_AU }}
@@ -52,6 +78,8 @@ EOF
         LOG_LEVEL: 'INFO'
         HOST: '0.0.0.0'
         PORT: '8000'
+        SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'
+        ENABLE_ORYX_BUILD: 'true'
         SHOW_TOOL_BANNER: 'true'
         SHOW_RAW_TOOL_JSON: 'false'
         MAX_REQUESTS_PER_USER: '10'

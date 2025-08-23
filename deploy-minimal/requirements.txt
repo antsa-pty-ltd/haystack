@@ -1,0 +1,16 @@
+# FastAPI and web framework
+fastapi==0.110.0
+uvicorn[standard]==0.27.0
+websockets==12.0
+
+# Core dependencies
+pydantic==2.7.1
+
+# AI/ML dependencies - Direct OpenAI
+openai==0.28.1
+
+# General utilities
+python-multipart==0.0.9
+# Tool dependencies
+aiohttp==3.9.5
+PyJWT==2.8.0

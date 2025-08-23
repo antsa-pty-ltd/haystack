@@ -632,6 +632,10 @@ class ToolManager:
                                     "type": "string",
                                     "description": "Optional target document name"
                                 },
+                                "generation_instructions": {
+                                    "type": "string",
+                                    "description": "Optional style or content instructions to apply during generation (e.g., heavy Australian slang)"
+                                },
                                 "sessions": {
                                     "type": "array",
                                     "description": "Optional array of sessions. If omitted, the tool will use sessions currently loaded in the UI",
@@ -658,13 +662,17 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "generate_document_auto",
-                        "description": "Automatically generate a document using the currently selected template and loaded sessions from the UI. Use this when you're confident template and sessions are ready (after checking with check_document_readiness).",
+                        "description": "Automatically generate a document using the currently selected template and loaded sessions from the UI. Optionally apply style/content instructions.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "document_name": {
                                     "type": "string",
                                     "description": "Optional custom name for the generated document"
+                                },
+                                "generation_instructions": {
+                                    "type": "string",
+                                    "description": "Optional style or content instructions to apply during generation (e.g., heavy Australian slang)"
                                 }
                             },
                             "required": []
@@ -1018,12 +1026,17 @@ class ToolManager:
         # Add profile ID header if available
         if hasattr(self, 'profile_id') and self.profile_id:
             headers['profileid'] = self.profile_id
+            logger.info(f"🔍 API call headers include profileid: {self.profile_id}")
+        else:
+            logger.warning(f"🔍 API call missing profileid header")
         
         # Add api/v1 prefix to match NestJS global prefix
         endpoint_clean = endpoint.lstrip('/')
         if not endpoint_clean.startswith('api/v1/'):
             endpoint_clean = f"api/v1/{endpoint_clean}"
         url = f"{self.api_base_url}/{endpoint_clean}"
+        
+        logger.info(f"🔍 Making API request: {method} {url} with headers: {list(headers.keys())}")
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -1184,7 +1197,7 @@ class ToolManager:
                 "status": "error"
             }
 
-    async def _generate_document_from_loaded(self, template_content: str, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None) -> Dict[str, Any]:
+    async def _generate_document_from_loaded(self, template_content: str, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None, generation_instructions: str = None) -> Dict[str, Any]:
         """Generate a document in the UI using template content and loaded sessions"""
         try:
             # If sessions not provided, read from UI state
@@ -1208,8 +1221,22 @@ class ToolManager:
             ]
 
             # Build UI action payload
+            # If generation instructions are provided, prepend them verbatim and request an applied-notes section
+            effective_template_content = template_content
+            if generation_instructions and isinstance(generation_instructions, str) and generation_instructions.strip():
+                logger.info(f"🎨 [DEBUG] _generate_document_from_loaded received generation_instructions: '{generation_instructions.strip()}'")
+                header = (
+                    "INSTRUCTIONS: Apply the following user-provided guidance throughout the document generation. Use the existing template structure; keep mandatory clinical sections. If style guidance conflicts with clinical clarity, prefer clarity while reflecting style.\n\n"
+                    "User Guidance (verbatim):\n" + generation_instructions.strip() + "\n\n"
+                )
+                footer = "\n\n---\nApplied Style Notes: Briefly summarize how the above guidance was applied."
+                effective_template_content = header + template_content + footer
+                logger.info(f"🎨 [DEBUG] Template content modified with instructions (length: {len(effective_template_content)} chars)")
+            else:
+                logger.info(f"🎨 [DEBUG] _generate_document_from_loaded NO generation_instructions provided: {generation_instructions}")
+
             action_payload = {
-                "templateContent": template_content,
+                "templateContent": effective_template_content,
                 "templateName": template_name or "Template",
                 "documentName": document_name or template_name or "Generated Document",
                 "sessions": selected_sessions
@@ -1231,10 +1258,10 @@ class ToolManager:
                 "status": "error"
             }
 
-    async def _generate_document_auto(self, document_name: str = None) -> Dict[str, Any]:
+    async def _generate_document_auto(self, document_name: str = None, generation_instructions: str = None) -> Dict[str, Any]:
         """Automatically generate a document using currently selected template and loaded sessions"""
         try:
-            logger.info("🔍 generate_document_auto called - discovering current UI state")
+            logger.info(f"🔍 generate_document_auto called - discovering current UI state with generation_instructions: '{generation_instructions}'")
             
             # Get the full template content directly from UI state (not just preview)
             from ui_state_manager import ui_state_manager
@@ -1293,7 +1320,8 @@ class ToolManager:
                 template_name=template_name,
                 document_name=document_name,
                 sessions=None,  # Let it use UI sessions
-                page_context={"auto_discovery": True}
+                page_context={"auto_discovery": True},
+                generation_instructions=generation_instructions
             )
             
         except Exception as e:

@@ -101,3 +101,5 @@ uvicorn main:app --reload --port 8001
 # Run tests (TODO)
 pytest
 ```# Deployment trigger Wed Aug 20 08:46:15 AEST 2025
+# Trigger workflow with fresh publishing profile
+# Trigger new deployment with updated secrets
