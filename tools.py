@@ -79,6 +79,172 @@ class ToolManager:
                 "implementation": self._search_clients
             },
             
+            "get_clinic_profile": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_clinic_profile",
+                        "description": "Fetch the clinic's profile including name, contact info, locations, timezone, owner, and settings.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "include_contacts": {
+                                    "type": "boolean",
+                                    "description": "Whether to include clinic contact details (phone, email)",
+                                    "default": True
+                                },
+                                "include_locations": {
+                                    "type": "boolean",
+                                    "description": "Whether to include location details if available",
+                                    "default": True
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_clinic_profile
+            },
+
+            "list_practitioners": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "list_practitioners",
+                        "description": "List clinic practitioners with optional filters (status, role).",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["all", "active", "inactive"],
+                                    "description": "Filter practitioners by status",
+                                    "default": "active"
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "description": "Filter by practitioner role/title (e.g., psychologist, admin)",
+                                    "default": ""
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of practitioners to return",
+                                    "default": 50
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._list_practitioners
+            },
+
+            "get_clinic_stats": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_clinic_stats",
+                        "description": "Fetch high-level clinic stats (clients, sessions, practitioners) with optional date range and billing/appointments toggles.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "date_range": {
+                                    "type": "object",
+                                    "properties": {
+                                        "start_date": {"type": "string", "format": "date"},
+                                        "end_date": {"type": "string", "format": "date"}
+                                    }
+                                },
+                                "include_billing": {
+                                    "type": "boolean",
+                                    "description": "Include billing-related metrics if available",
+                                    "default": False
+                                },
+                                "include_appointments": {
+                                    "type": "boolean",
+                                    "description": "Include appointment-related metrics if available",
+                                    "default": False
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_clinic_stats
+            },
+
+            "search_specific_clients": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "search_specific_clients",
+                        "description": "Search for specific clients with detailed information including demographics, assignment stats, and recent activity.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query (name, partial name, or client ID)"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results to return (max 50)",
+                                    "default": 10,
+                                    "maximum": 50
+                                },
+                                "include_demographics": {
+                                    "type": "boolean",
+                                    "description": "Include demographic information (age, gender, occupation)",
+                                    "default": True
+                                },
+                                "include_assignments": {
+                                    "type": "boolean",
+                                    "description": "Include assignment statistics",
+                                    "default": True
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                },
+                "implementation": self._search_specific_clients
+            },
+
+            "get_client_homework_status": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_client_homework_status",
+                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "The unique identifier for the client (UUID)",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "status_filter": {
+                                    "type": "string",
+                                    "enum": ["all", "active", "completed", "expired"],
+                                    "description": "Filter assignments by status",
+                                    "default": "all"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of assignments to return",
+                                    "default": 20
+                                },
+                                "include_messages": {
+                                    "type": "boolean",
+                                    "description": "Include message count and timing details",
+                                    "default": True
+                                }
+                            },
+                            "required": ["client_id"]
+                        }
+                    }
+                },
+                "implementation": self._get_client_homework_status
+            },
+            
             "generate_report": {
                 "definition": {
                     "type": "function",
@@ -903,6 +1069,11 @@ class ToolManager:
             return [
                 self.tools["get_client_summary"]["definition"],
                 self.tools["search_clients"]["definition"], 
+                self.tools["search_specific_clients"]["definition"],
+                self.tools["get_client_homework_status"]["definition"],
+                self.tools["get_clinic_profile"]["definition"],
+                self.tools["list_practitioners"]["definition"],
+                self.tools["get_clinic_stats"]["definition"],
                 self.tools["generate_report"]["definition"],
                 self.tools["get_conversations"]["definition"],
                 self.tools["get_conversation_messages"]["definition"],
@@ -943,6 +1114,11 @@ class ToolManager:
             return {
                 "get_client_summary": self.tools["get_client_summary"]["implementation"],
                 "search_clients": self.tools["search_clients"]["implementation"],
+                "search_specific_clients": self.tools["search_specific_clients"]["implementation"],
+                "get_client_homework_status": self.tools["get_client_homework_status"]["implementation"],
+                "get_clinic_profile": self.tools["get_clinic_profile"]["implementation"],
+                "list_practitioners": self.tools["list_practitioners"]["implementation"],
+                "get_clinic_stats": self.tools["get_clinic_stats"]["implementation"],
                 "generate_report": self.tools["generate_report"]["implementation"],
                 "get_conversations": self.tools["get_conversations"]["implementation"],
                 "get_conversation_messages": self.tools["get_conversation_messages"]["implementation"],
@@ -1062,6 +1238,328 @@ class ToolManager:
         except Exception as e:
             logger.error(f"Error making API request to {url}: {e}")
             raise
+    
+    async def _get_clinic_profile(self, include_contacts: bool = True, include_locations: bool = True) -> Dict[str, Any]:
+        """Get clinic profile details from API (resolve clinicId from account)."""
+        try:
+            # Resolve timezone from context/env with sensible default
+            tz = None
+            if isinstance(self.current_page_context, dict):
+                tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
+            if not tz:
+                tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+
+            # 1) Get account info
+            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            profiles = me.get('profiles') or []
+            selected_profile = None
+            if isinstance(profiles, list) and profiles:
+                if self.profile_id:
+                    selected_profile = next((p for p in profiles if p.get('id') == self.profile_id), None)
+                if not selected_profile:
+                    selected_profile = profiles[0]
+            clinic_obj = None
+            if selected_profile:
+                clinic_field = selected_profile.get('clinic')
+                if isinstance(clinic_field, list):
+                    clinic_obj = clinic_field[0] if clinic_field else None
+                elif isinstance(clinic_field, dict):
+                    clinic_obj = clinic_field
+            clinic_id = (clinic_obj or {}).get('id')
+            timezone = me.get('timezone') or (clinic_obj or {}).get('timezone') or tz
+
+            # Extract contact info from the right places
+            profile_email = me.get('email')  # Account level email
+            profile_phone = (selected_profile or {}).get('phone')  # Profile level phone
+            clinic_email = (clinic_obj or {}).get('email')  # Clinic level email (likely null)
+            clinic_phone = (clinic_obj or {}).get('phone')  # Clinic level phone (likely null)
+            
+            # Use profile/account data as fallback for clinic contacts
+            effective_email = clinic_email or profile_email
+            effective_phone = clinic_phone or profile_phone
+
+            # Compose response based solely on account/me payload
+            result: Dict[str, Any] = {
+                "clinic_id": clinic_id,
+                "name": (clinic_obj or {}).get('name'),
+                "type": (clinic_obj or {}).get('type'),
+                "status": (clinic_obj or {}).get('paymentStatus'),
+                "abn": (clinic_obj or {}).get('abn'),
+                "email": effective_email,
+                "phone": effective_phone,
+                "address": (clinic_obj or {}).get('address') or (selected_profile or {}).get('address'),
+                "owner": {
+                    "title": (selected_profile or {}).get('title'),
+                    "firstName": (selected_profile or {}).get('firstName'),
+                    "lastName": (selected_profile or {}).get('lastName'),
+                    "role": (selected_profile or {}).get('role'),
+                    "practitionerType": ((selected_profile or {}).get('practitionerType') or {}).get('name'),
+                    "dob": (selected_profile or {}).get('dob'),
+                    "phone": profile_phone,
+                    "address": (selected_profile or {}).get('address')
+                },
+                "timezone": timezone,
+            }
+            if include_contacts:
+                result["contacts"] = {
+                    "email": effective_email,
+                    "phone": effective_phone
+                }
+            if include_locations:
+                result["locations"] = (clinic_obj or {}).get('locations', [])
+
+            # Include raw for inspection/debug
+            result["raw"] = me
+
+            return result
+        except Exception as e:
+            logger.error(f"Error getting clinic profile: {e}")
+            return {"error": f"Failed to fetch clinic profile: {str(e)}"}
+
+    async def _list_practitioners(self, status: str = "active", role: str = "", limit: int = 50) -> Dict[str, Any]:
+        """List clinic practitioners via API"""
+        try:
+            # Get account info to extract practitioner data
+            tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            profiles = me.get('profiles') or []
+            
+            practitioners = []
+            for profile in profiles:
+                # Filter by status if specified
+                profile_status = profile.get('status', 'ACTIVE').lower()
+                if status != "all" and status.lower() != profile_status:
+                    continue
+                    
+                # Filter by role if specified
+                profile_role = profile.get('role', '').lower()
+                if role and role.lower() not in profile_role:
+                    continue
+                
+                practitioner_type = profile.get('practitionerType') or {}
+                practitioners.append({
+                    "practitioner_id": profile.get('id'),
+                    "name": f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
+                    "email": me.get('email'),  # Account level email
+                    "phone": profile.get('phone'),
+                    "role": profile.get('role'),
+                    "title": profile.get('title'),
+                    "practitioner_type": practitioner_type.get('name'),
+                    "address": profile.get('address'),
+                    "status": profile_status.upper(),
+                    "avatar": profile.get('avatar'),
+                    "is_completed": profile.get('isCompleted', False)
+                })
+            
+            return {
+                "count": len(practitioners),
+                "practitioners": practitioners[:limit]  # Apply limit
+            }
+        except Exception as e:
+            logger.error(f"Error listing practitioners: {e}")
+            return {"error": f"Failed to list practitioners: {str(e)}", "practitioners": []}
+
+    async def _get_clinic_stats(self, date_range: Optional[Dict] = None, include_billing: bool = False, include_appointments: bool = False) -> Dict[str, Any]:
+        """Get high-level clinic statistics from API using haystack search-clients and account data."""
+        try:
+            # Resolve timezone from context/env with sensible default
+            tz = None
+            if isinstance(self.current_page_context, dict):
+                tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
+            if not tz:
+                tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+
+            # Get account info for practitioner data
+            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            profiles = me.get('profiles') or []
+            
+            # Get client data from haystack search (API limit is 50)
+            clients_response = await self._make_api_request('GET', '/haystack/search-clients', params={ 'query': '', 'limit': 50 })
+            clients = clients_response.get('clients', [])
+            total_clients = clients_response.get('total', len(clients))
+            
+            # Calculate client stats
+            active_clients = len([c for c in clients if c.get('status') == 'ACTIVE'])
+            total_assignments = sum(c.get('assignments', {}).get('total', 0) for c in clients)
+            completed_assignments = sum(c.get('assignments', {}).get('completed', 0) for c in clients)
+            recent_messages = sum(c.get('recent_messages', 0) for c in clients)
+            
+            # Calculate practitioner stats
+            active_practitioners = len([p for p in profiles if p.get('status', 'ACTIVE') == 'ACTIVE'])
+            
+            # Get owner/primary practitioner info
+            primary_profile = profiles[0] if profiles else {}
+            
+            result: Dict[str, Any] = {
+                "clients": {
+                    "total": total_clients,
+                    "active": active_clients,
+                    "total_assignments": total_assignments,
+                    "completed_assignments": completed_assignments,
+                    "recent_messages": recent_messages
+                },
+                "practitioners": {
+                    "total": len(profiles),
+                    "active": active_practitioners
+                },
+                "clinic": {
+                    "name": (primary_profile.get('clinic') or {}).get('name'),
+                    "type": (primary_profile.get('clinic') or {}).get('type'),
+                    "status": (primary_profile.get('clinic') or {}).get('paymentStatus')
+                },
+                "owner": {
+                    "firstName": primary_profile.get('firstName'),
+                    "lastName": primary_profile.get('lastName'),
+                    "role": primary_profile.get('role'),
+                    "email": me.get('email')
+                },
+                "timezone": tz
+            }
+
+            # Optional fields placeholders (backend endpoints not identified yet)
+            if include_appointments:
+                result["appointments"] = {"note": "Appointment data not available via current API endpoints"}
+            if include_billing:
+                result["billing"] = {"note": "Billing data not available via current API endpoints"}
+
+            if date_range:
+                result["date_range"] = {
+                    "start_date": date_range.get('start_date'),
+                    "end_date": date_range.get('end_date'),
+                    "note": "Date filtering not implemented - showing all-time stats"
+                }
+
+            return result
+        except Exception as e:
+            logger.error(f"Error getting clinic stats: {e}")
+            return {"error": f"Failed to fetch clinic stats: {str(e)}"}
+
+    async def _search_specific_clients(self, query: str, limit: int = 10, include_demographics: bool = True, include_assignments: bool = True) -> Dict[str, Any]:
+        """Search for specific clients with detailed information"""
+        try:
+            # Ensure limit doesn't exceed API maximum
+            limit = min(limit, 50)
+            
+            params = {
+                'query': query,
+                'limit': limit
+            }
+            
+            response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
+            clients = response.get('clients', [])
+            total = response.get('total', len(clients))
+            
+            # Enhance client data with additional details
+            enhanced_clients = []
+            for client in clients:
+                enhanced_client = {
+                    "client_id": client.get("client_id"),
+                    "name": client.get("name"),
+                    "status": client.get("status"),
+                    "last_activity": client.get("last_activity"),
+                    "recent_messages": client.get("recent_messages", 0)
+                }
+                
+                if include_assignments:
+                    assignments = client.get("assignments", {})
+                    enhanced_client["assignments"] = {
+                        "total": assignments.get("total", 0),
+                        "active": assignments.get("active", 0),
+                        "completed": assignments.get("completed", 0),
+                        "completion_rate": round((assignments.get("completed", 0) / max(assignments.get("total", 1), 1)) * 100, 1)
+                    }
+                
+                if include_demographics:
+                    demographics = client.get("demographics", {})
+                    enhanced_client["demographics"] = {
+                        "age": demographics.get("age"),
+                        "gender": demographics.get("gender"),
+                        "occupation": demographics.get("occupation")
+                    }
+                
+                enhanced_clients.append(enhanced_client)
+            
+            return {
+                "query": query,
+                "total": total,
+                "returned": len(enhanced_clients),
+                "clients": enhanced_clients
+            }
+            
+        except Exception as e:
+            logger.error(f"Error searching specific clients: {e}")
+            return {"error": f"Failed to search clients: {str(e)}", "clients": []}
+
+    async def _get_client_homework_status(self, client_id: str, status_filter: str = "all", limit: int = 20, include_messages: bool = True) -> Dict[str, Any]:
+        """Get homework/assignment status for a specific client"""
+        try:
+            params = {
+                'client_id': client_id
+            }
+            
+            response = await self._make_api_request('GET', '/haystack/conversations', params=params)
+            
+            client_name = response.get("client_name", "Unknown Client")
+            conversations = response.get("conversations", [])
+            total_assignments = response.get("total", len(conversations))
+            
+            # Filter by status if specified
+            if status_filter != "all":
+                conversations = [c for c in conversations if c.get("status", "").lower() == status_filter.lower()]
+            
+            # Apply limit
+            conversations = conversations[:limit]
+            
+            # Enhance conversation data
+            enhanced_assignments = []
+            for conv in conversations:
+                assignment = {
+                    "assignment_id": conv.get("assignment_id"),
+                    "homework_id": conv.get("homework_id"),
+                    "title": conv.get("title"),
+                    "status": conv.get("status"),
+                    "start_date": conv.get("start_date"),
+                    "end_date": conv.get("end_date")
+                }
+                
+                if include_messages:
+                    assignment["messages"] = {
+                        "count": conv.get("message_count", 0),
+                        "first_message": conv.get("first_message"),
+                        "last_message": conv.get("last_message"),
+                        "has_activity": conv.get("message_count", 0) > 0
+                    }
+                
+                enhanced_assignments.append(assignment)
+            
+            # Calculate summary statistics
+            status_counts = {}
+            for conv in conversations:
+                status = conv.get("status", "unknown").lower()
+                status_counts[status] = status_counts.get(status, 0) + 1
+            
+            total_messages = sum(conv.get("message_count", 0) for conv in conversations)
+            active_assignments = len([c for c in conversations if c.get("status", "").lower() == "active"])
+            completed_assignments = len([c for c in conversations if c.get("status", "").lower() == "completed"])
+            
+            return {
+                "client_id": client_id,
+                "client_name": client_name,
+                "summary": {
+                    "total_assignments": total_assignments,
+                    "returned_assignments": len(enhanced_assignments),
+                    "active_assignments": active_assignments,
+                    "completed_assignments": completed_assignments,
+                    "total_messages": total_messages,
+                    "status_breakdown": status_counts
+                },
+                "assignments": enhanced_assignments,
+                "filter_applied": status_filter
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting client homework status: {e}")
+            return {"error": f"Failed to get homework status: {str(e)}", "assignments": []}
     
     async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool function"""
