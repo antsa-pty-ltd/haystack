@@ -1,88 +1,178 @@
-name: Deploy Haystack to Azure AU
+name: Deploy NestJS API to Azure Web App (Multi-Country)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   workflow_dispatch:
+    inputs:
+      country:
+        description: 'Country to deploy to (au, us, uk)'
+        required: true
+        default: 'au'
+        type: choice
+        options:
+        - au
+        - us
+        - uk
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  NODE_VERSION: '22'
 
 jobs:
-  build-and-deploy:
+  determine-deployments:
     runs-on: ubuntu-latest
+    outputs:
+      countries: ${{ steps.set-countries.outputs.countries }}
+    steps:
+    - name: Determine countries to deploy
+      id: set-countries
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          # Manual trigger - deploy specific country
+          echo "countries=[\"${{ github.event.inputs.country }}\"]" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+          # Master branch - deploy to Australia only for now
+          echo "countries=[\"au\"]" >> $GITHUB_OUTPUT
+        else
+          # Develop branch - deploy to staging
+          echo "countries=[\"au\"]" >> $GITHUB_OUTPUT
+        fi
+
+  build-and-deploy:
+    needs: determine-deployments
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        country: ${{ fromJson(needs.determine-deployments.outputs.countries) }}
     
     steps:
     - name: 'Checkout code'
       uses: actions/checkout@v4
 
-    - name: 'Setup Python'
-      uses: actions/setup-python@v4
+    - name: 'Setup Node.js'
+      uses: actions/setup-node@v4
       with:
-        python-version: '3.11'
-
-    - name: 'Install dependencies'
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: 'Create deployment package'
-      run: |
-        mkdir deploy
-        # Copy full FastAPI Haystack service
-        cp main.py deploy/
-        cp config.py deploy/
-        cp personas.py deploy/
-        cp session_manager.py deploy/
-        cp pipeline_manager.py deploy/
-        cp haystack_pipeline.py deploy/
-        cp ui_state_manager.py deploy/
-        cp tools.py deploy/
-        cp requirements.txt deploy/
-        cp startup.sh deploy/
-        
-        # Verify main.py is present (critical for service)
-        if [ ! -f deploy/main.py ]; then
-          echo "ERROR: main.py not found - Service will not work!"
-          exit 1
-        fi
-        
-        # Provide a Python entrypoint that invokes our startup.sh (robust quoting)
-        printf '%s\n' '#!/usr/bin/env python3' 'import subprocess' 'subprocess.run(["bash", "startup.sh"], check=True)' > deploy/startup.py
-        chmod +x deploy/startup.py
-        
-        echo "✅ Full FastAPI Haystack service with WebSocket support packaged"
-        ls -la deploy/
-
-    - name: 'Validate startup.py'
-      run: |
-        echo "--- startup.py ---"
-        sed -n '1,120p' deploy/startup.py
-        echo "---------------"
-        python -c "import ast,sys,pathlib;code=pathlib.Path('deploy/startup.py').read_text(encoding='utf-8');ast.parse(code);print('startup.py syntax OK')"
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
 
     - name: 'Azure Login'
-      uses: azure/login@v2
+      uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS_AU }}
+        creds: ${{ secrets[format('AZURE_CREDENTIALS_{0}', matrix.country)] }}
+
+    - name: 'Set environment variables'
+      run: |
+        # Force production environment for now
+        ENV="production"
+        
+        echo "DEPLOY_ENV=${ENV}" >> $GITHUB_ENV
+        echo "COUNTRY_CODE=${{ matrix.country }}" >> $GITHUB_ENV
+        echo "APP_NAME=antsa-api-${{ matrix.country }}-${ENV}" >> $GITHUB_ENV
+
+    - name: 'Install build tools and dependencies'
+      run: |
+        sudo apt-get update && sudo apt-get install -y python3 make g++
+        npm ci --ignore-scripts
+        npm run build
+
+    - name: 'Create deployment package with production dependencies'
+      run: |
+        mkdir deploy
+        cp -r dist/ deploy/
+        # Include static assets so routes like /assets/images/* resolve in production
+        cp -r public/ deploy/
+        cp -r node_modules/ deploy/
+        cp package*.json deploy/
+        cp web.config deploy/ 2>/dev/null || true
+        cp startup.js deploy/ 2>/dev/null || true
+        cd deploy
+        # Force rebuild bcrypt with Azure's exact architecture
+        cd node_modules/bcrypt && npm run install || true
+        cd ../..
+        # Rebuild all native modules for correct architecture
+        npm rebuild
+        # Remove unnecessary files to reduce package size
+        find node_modules -name "*.md" -type f -delete 2>/dev/null || true
+        find node_modules -name "*.txt" -type f -delete 2>/dev/null || true
+        find node_modules -name "test" -type d -exec rm -rf {} + 2>/dev/null || true
+        find node_modules -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
+        find node_modules -name "*.test.js" -type f -delete 2>/dev/null || true
+        find node_modules -name "*.spec.js" -type f -delete 2>/dev/null || true
+        echo "Production dependencies built with Azure architecture"
+        echo "Bcrypt binding check: $(ls -la node_modules/bcrypt/lib/binding/ 2>/dev/null || echo 'not found')"
 
     - name: 'Deploy to Azure Web App'
       uses: azure/webapps-deploy@v2
       with:
-        app-name: 'antsa-haystack-au-production'
+        app-name: ${{ env.APP_NAME }}
+        publish-profile: ${{ secrets[format('AZUREAPPSERVICE_API_PUBLISHPROFILE_{0}_PRODUCTION', matrix.country)] }}
         package: './deploy'
-        slot-name: 'production'
-        startup-command: 'python startup.py'
       env:
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_AU }}
-        REDIS_URL: ${{ secrets.REDIS_URL_AU }}
-        DATABASE_URL: ${{ secrets.DATABASE_URL_AU }}
-        NESTJS_API_URL: 'https://au.api.antsa.ai'
-        LOG_LEVEL: 'INFO'
-        HOST: '0.0.0.0'
-        PORT: '8000'
-        SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'
-        ENABLE_ORYX_BUILD: 'true'
-        SHOW_TOOL_BANNER: 'true'
-        SHOW_RAW_TOOL_JSON: 'false'
-        MAX_REQUESTS_PER_USER: '10'
-        SESSION_TIMEOUT_MINUTES: '240'
-        MAX_CONCURRENT_REQUESTS: '10000'
-        COUNTRY_CODE: 'au'
+        # Country-specific environment variables
+        COUNTRY_CODE: ${{ matrix.country }}
+        NODE_ENV: ${{ env.DEPLOY_ENV }}
+        
+        # Database configuration
+        DB_HOST: ${{ secrets[format('DB_HOST_{0}', matrix.country)] }}
+        DB_PORT: ${{ secrets[format('DB_PORT_{0}', matrix.country)] }}
+        DB_USERNAME: ${{ secrets[format('DB_USERNAME_{0}', matrix.country)] }}
+        DB_PASSWORD: ${{ secrets[format('DB_PASSWORD_{0}', matrix.country)] }}
+        DB_NAME: ${{ secrets[format('DB_NAME_{0}', matrix.country)] }}
+        
+        # JWT configuration
+        JWT_SECRET: ${{ secrets[format('JWT_SECRET_{0}', matrix.country)] }}
+        JWT_EXPIRE_IN: ${{ secrets[format('JWT_EXPIRE_IN_{0}', matrix.country)] || '12h' }}
+        
+        # Email configuration
+        ADMIN_EMAIL: ${{ secrets[format('ADMIN_EMAIL_{0}', matrix.country)] }}
+        ADMIN_EMAIL_PASSWORD: ${{ secrets[format('ADMIN_EMAIL_PASSWORD_{0}', matrix.country)] }}
+        EMAIL_SUPPORT: ${{ secrets[format('EMAIL_SUPPORT_{0}', matrix.country)] }}
+        
+        # S3 configuration
+        S3_REGION: ${{ secrets[format('S3_REGION_{0}', matrix.country)] }}
+        S3_BUCKET_NAME: ${{ secrets[format('S3_BUCKET_NAME_{0}', matrix.country)] }}
+        S3_ACCESS_KEY: ${{ secrets[format('S3_ACCESS_KEY_{0}', matrix.country)] }}
+        S3_SECRET_KEY: ${{ secrets[format('S3_SECRET_KEY_{0}', matrix.country)] }}
+        S3_MEDIA_PREFIX: ${{ matrix.country }}
+        
+        # Stripe configuration
+        STRIPE_SECRET_KEY: ${{ secrets[format('STRIPE_SECRET_KEY_{0}', matrix.country)] }}
+        STRIPE_PUBLISHABLE_KEY: ${{ secrets[format('STRIPE_PUBLISHABLE_KEY_{0}', matrix.country)] }}
+        STRIPE_WEBHOOK: ${{ secrets[format('STRIPE_WEBHOOK_{0}', matrix.country)] }}
+        STRIPE_CURRENCY: ${{ matrix.country == 'au' && 'aud' || matrix.country == 'us' && 'usd' || 'gbp' }}
+        
+        # Firebase configuration
+        FIREBASE_PROJECT_ID: ${{ secrets[format('FIREBASE_PROJECT_ID_{0}', matrix.country)] }}
+        FIREBASE_PRIVATE_KEY: ${{ secrets[format('FIREBASE_PRIVATE_KEY_{0}', matrix.country)] }}
+        FIREBASE_CLIENT_EMAIL: ${{ secrets[format('FIREBASE_CLIENT_EMAIL_{0}', matrix.country)] }}
+        
+        # AWS configuration (DEPRECATED - Migrating to Azure Maps)
+        AWS_REGION: ${{ secrets[format('AWS_REGION_{0}', matrix.country)] }}
+        AWS_ACCESS_KEY_ID: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', matrix.country)] }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', matrix.country)] }}
+        AWS_PLACE_INDEX: ${{ secrets[format('AWS_PLACE_INDEX_{0}', matrix.country)] }}
+        
+        # Azure Maps configuration
+        AZURE_MAPS_SUBSCRIPTION_KEY: ${{ secrets[format('AZURE_MAPS_SUBSCRIPTION_KEY_{0}', matrix.country)] }}
+        AZURE_MAPS_CLIENT_ID: ${{ secrets[format('AZURE_MAPS_CLIENT_ID_{0}', matrix.country)] }}
+        
+        # OpenAI configuration
+        OPENAI_API_KEY: ${{ secrets[format('OPENAI_API_KEY_{0}', matrix.country)] }}
+        
+        # Country-specific features
+        ALLOW_DELETE_ACCOUNT: ${{ secrets[format('ALLOW_DELETE_ACCOUNT_{0}', matrix.country)] || 'false' }}
+        TIME_CLIENT_ACTIVE_AFTER_DISCHARGE: ${{ secrets[format('TIME_CLIENT_ACTIVE_AFTER_DISCHARGE_{0}', matrix.country)] || '24' }}
+        
+        # Timezone configuration
+        DEFAULT_TIMEZONE: ${{ matrix.country == 'au' && 'Australia/Sydney' || matrix.country == 'us' && 'America/New_York' || 'Europe/London' }}
+        
+        # App URL
+        APP_URL: https://${{ matrix.country }}.api.antsa.ai
