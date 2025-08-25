@@ -13,5 +13,8 @@ openai==1.57.2
 # Auth / JWT
 PyJWT==2.10.1
 
+# Redis for session management
+redis==5.2.0
+
 # General utilities
 python-multipart==0.0.12
