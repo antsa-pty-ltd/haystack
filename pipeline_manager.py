@@ -82,6 +82,15 @@ class PipelineManager:
                 # Get conversation history
                 messages = await session_manager.get_messages(session_id, limit=20)
                 
+                # Check if this is the first user message for jaimee_therapist (auto-preload context)
+                is_first_jaimee_message = False
+                if persona_type == PersonaType.JAIMEE_THERAPIST:
+                    # Count user messages (excluding the just-added one)
+                    user_message_count = sum(1 for msg in messages[:-1] if msg.role == "user")
+                    is_first_jaimee_message = user_message_count == 0
+                    if is_first_jaimee_message:
+                        logger.info(f"🌟 First interaction with jAImee - will preload user context")
+                
                 # Get system prompt with context
                 system_prompt = persona_manager.get_system_prompt(
                     persona_type, 
@@ -121,6 +130,31 @@ class PipelineManager:
                 
                 # Add the current user message
                 openai_messages.append({"role": "user", "content": user_message})
+                
+                # Auto-preload context for jAImee's first interaction
+                if is_first_jaimee_message and persona_config.tools:
+                    logger.info(f"🌟 Auto-preloading jAImee context with mood and profile data")
+                    try:
+                        # Preload mood and profile context
+                        mood_profile_result = await tool_manager.execute_tool("get_client_mood_profile", {
+                            "include_mood_history": True,
+                            "include_profile_details": True
+                        })
+                        
+                        if mood_profile_result.get("success"):
+                            # Add the preloaded context as a hidden assistant message for context
+                            context_summary = self._create_context_summary(mood_profile_result.get("result", {}))
+                            
+                            # Add a system-style message with the context (invisible to user)
+                            openai_messages.append({
+                                "role": "assistant", 
+                                "content": f"[Internal Context] {context_summary}"
+                            })
+                            logger.info(f"✅ Successfully preloaded jAImee context")
+                        else:
+                            logger.warning(f"⚠️ Failed to preload jAImee context: {mood_profile_result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        logger.error(f"❌ Error preloading jAImee context: {e}")
                 
                 # Agent loop with tool-use: let the model plan tool calls, execute, and iterate
                 full_response = ""
@@ -314,9 +348,11 @@ class PipelineManager:
                                 except Exception:
                                     pass
 
-                                executing_msg = f"\n\n[tool] {tool_name} executing...\n\n"
-                                full_response += executing_msg
-                                yield executing_msg
+                                # Only show tool execution messages for web_assistant, not jaimee_therapist
+                                if persona_type == PersonaType.WEB_ASSISTANT:
+                                    executing_msg = f"\n\n[tool] {tool_name} executing...\n\n"
+                                    full_response += executing_msg
+                                    yield executing_msg
 
                                 tool_result = await tool_manager.execute_tool(tool_name, arguments)
                                 last_tool_signature = tool_signature
@@ -336,7 +372,9 @@ class PipelineManager:
                                     # Check for UI actions in tool result
                                     if isinstance(result_data, dict) and result_data.get("ui_action"):
                                         ui_action_msg = result_data.get('user_message', 'Performing UI action...')
-                                        yield f"\n[ui] {ui_action_msg}\n"
+                                        # Only show UI action messages for web_assistant, not jaimee_therapist  
+                                        if persona_type == PersonaType.WEB_ASSISTANT:
+                                            yield f"\n[ui] {ui_action_msg}\n"
                                         # Store UI action(s) for WebSocket layer to handle
                                         if not hasattr(self, '_ui_actions'):
                                             self._ui_actions = []
@@ -407,9 +445,11 @@ class PipelineManager:
                                     else:
                                         quick_feedback = f" - Completed successfully"
 
-                                    executed_msg = f"\n[tool] {tool_name} executed{quick_feedback}\n\n"
-                                    full_response += executed_msg
-                                    yield executed_msg
+                                    # Only show tool completion messages for web_assistant, not jaimee_therapist
+                                    if persona_type == PersonaType.WEB_ASSISTANT:
+                                        executed_msg = f"\n[tool] {tool_name} executed{quick_feedback}\n\n"
+                                        full_response += executed_msg
+                                        yield executed_msg
 
                                     # Do not override last_found_client_id from generic result payloads to avoid drift
 
@@ -417,9 +457,11 @@ class PipelineManager:
                                 else:
                                     embedded_error = result_data.get('error') if isinstance(result_data, dict) else None
                                     error_text = tool_result.get('error') or embedded_error or 'Failed'
-                                    error_msg = f"\n[tool] {tool_name} executed [error] {error_text}\n\n"
-                                    full_response += error_msg
-                                    yield error_msg
+                                    # Only show tool error messages for web_assistant, not jaimee_therapist
+                                    if persona_type == PersonaType.WEB_ASSISTANT:
+                                        error_msg = f"\n[tool] {tool_name} executed [error] {error_text}\n\n"
+                                        full_response += error_msg
+                                        yield error_msg
                                     tool_content = json.dumps({"error": tool_result.get("error", "Failed")}, ensure_ascii=False)
 
                                 # Feed tool result back to the model
@@ -502,6 +544,101 @@ class PipelineManager:
             }
         
         return status
+
+    def _create_context_summary(self, mood_profile_data: Dict[str, Any]) -> str:
+        """Create a concise context summary for jAImee from mood and profile data"""
+        try:
+            summary_parts = []
+            
+            # Profile information
+            profile = mood_profile_data.get("profile", {})
+            if profile and not profile.get("error"):
+                name = profile.get("name", "the user")
+                if name != "Unknown Client":
+                    summary_parts.append(f"Client name: {name}")
+                
+                # Add comprehensive profile details
+                personal_details = []
+                if profile.get("age"):
+                    personal_details.append(f"age {profile['age']}")
+                if profile.get("gender"):
+                    personal_details.append(f"gender: {profile['gender']}")
+                if profile.get("occupation"):
+                    personal_details.append(f"occupation: {profile['occupation']}")
+                
+                if personal_details:
+                    summary_parts.append(f"Personal details: {', '.join(personal_details)}")
+                
+                # Add status and role info
+                status_details = []
+                if profile.get("role"):
+                    status_details.append(f"role: {profile['role']}")
+                if profile.get("status"):
+                    status_details.append(f"status: {profile['status']}")
+                
+                if status_details:
+                    summary_parts.append(f"Account: {', '.join(status_details)}")
+                
+                # Add clinic context if available
+                clinic_info = profile.get("clinic_info", {})
+                if clinic_info and clinic_info.get("name"):
+                    clinic_name = clinic_info["name"]
+                    clinic_timezone = clinic_info.get("timezone", "")
+                    if clinic_timezone:
+                        summary_parts.append(f"Clinic: {clinic_name} ({clinic_timezone})")
+                    else:
+                        summary_parts.append(f"Clinic: {clinic_name}")
+            
+            # Mood data information
+            mood_data = mood_profile_data.get("mood_data", {})
+            if mood_data and not mood_data.get("error"):
+                mood_summary = mood_data.get("mood_summary", "")
+                if mood_summary and mood_summary != "No recent mood tracking data found for this user":
+                    summary_parts.append(f"Mood status: {mood_summary}")
+                
+                # Recent mood entry
+                last_entry = mood_data.get("last_mood_entry", {})
+                if last_entry and last_entry.get("mood_label"):
+                    mood_label = last_entry["mood_label"]
+                    created_at = last_entry.get("createdAt", "")
+                    if created_at:
+                        try:
+                            from datetime import datetime
+                            created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            time_str = created_time.strftime("%B %d")
+                            summary_parts.append(f"Most recent mood: {mood_label} on {time_str}")
+                        except:
+                            summary_parts.append(f"Most recent mood: {mood_label}")
+                    else:
+                        summary_parts.append(f"Most recent mood: {mood_label}")
+                
+                # Total mood entries
+                total_entries = mood_data.get("total_entries", 0)
+                if total_entries > 0:
+                    summary_parts.append(f"Total mood entries: {total_entries}")
+            
+            # Therapeutic insights
+            insights = mood_profile_data.get("therapeutic_insights", {})
+            if insights:
+                focus_areas = insights.get("therapeutic_focus_areas", [])
+                if focus_areas:
+                    summary_parts.append(f"Focus areas: {', '.join(focus_areas)}")
+                
+                suggested_approaches = insights.get("suggested_approaches", [])
+                if suggested_approaches:
+                    # Only include first 2 suggestions to keep summary concise
+                    approaches = suggested_approaches[:2]
+                    summary_parts.append(f"Suggested approaches: {'; '.join(approaches)}")
+            
+            # Create final summary
+            if summary_parts:
+                return ". ".join(summary_parts) + "."
+            else:
+                return "User context loaded but no specific data available."
+                
+        except Exception as e:
+            logger.error(f"Error creating context summary: {e}")
+            return "User context partially loaded."
     
     async def shutdown(self):
         """Shutdown OpenAI client and cancel active requests"""

@@ -6,7 +6,7 @@ import logging
 import aiohttp
 import os
 import jwt
-from typing import Dict, Any, List, Callable, Optional
+from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -1060,6 +1060,47 @@ class ToolManager:
                     }
                 },
                 "implementation": self._breathing_exercise
+            },
+
+            "get_client_mood_profile": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_client_mood_profile",
+                        "description": "Get comprehensive information about the current authenticated user including their latest mood tracking data and profile details for personalized therapeutic support. This tool is exclusive to jAImee and works with the user's authenticated session context.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "include_mood_history": {
+                                    "type": "boolean",
+                                    "description": "Whether to include recent mood tracking history and trends",
+                                    "default": True
+                                },
+                                "include_profile_details": {
+                                    "type": "boolean", 
+                                    "description": "Whether to include detailed user profile information",
+                                    "default": True
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_client_mood_profile
+            },
+
+            "get_user_profile": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_user_profile",
+                        "description": "Get the current authenticated user's profile information (name, age, gender, occupation, etc.) for personalized conversation. This tool is exclusive to jAImee and provides quick access to user details during conversation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    }
+                },
+                "implementation": self._get_user_profile
             }
         }
     
@@ -1103,7 +1144,9 @@ class ToolManager:
             return [
                 self.tools["mood_check_in"]["definition"],
                 self.tools["coping_strategies"]["definition"],
-                self.tools["breathing_exercise"]["definition"]
+                self.tools["breathing_exercise"]["definition"],
+                self.tools["get_client_mood_profile"]["definition"],
+                self.tools["get_user_profile"]["definition"]
             ]
         else:
             return []
@@ -1148,7 +1191,9 @@ class ToolManager:
             return {
                 "mood_check_in": self.tools["mood_check_in"]["implementation"],
                 "coping_strategies": self.tools["coping_strategies"]["implementation"], 
-                "breathing_exercise": self.tools["breathing_exercise"]["implementation"]
+                "breathing_exercise": self.tools["breathing_exercise"]["implementation"],
+                "get_client_mood_profile": self.tools["get_client_mood_profile"]["implementation"],
+                "get_user_profile": self.tools["get_user_profile"]["implementation"]
             }
         else:
             return {}
@@ -1250,7 +1295,7 @@ class ToolManager:
                 tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
 
             # 1) Get account info
-            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
             profiles = me.get('profiles') or []
             selected_profile = None
             if isinstance(profiles, list) and profiles:
@@ -1321,7 +1366,7 @@ class ToolManager:
         try:
             # Get account info to extract practitioner data
             tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
-            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
             profiles = me.get('profiles') or []
             
             practitioners = []
@@ -1370,7 +1415,7 @@ class ToolManager:
                 tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
 
             # Get account info for practitioner data
-            me = await self._make_api_request('GET', '/account/me', params={ 'timezone': tz })
+            me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
             profiles = me.get('profiles') or []
             
             # Get client data from haystack search (API limit is 50)
@@ -2446,6 +2491,421 @@ class ToolManager:
             ],
             "benefits": "This exercise can help reduce stress, anxiety, and promote relaxation"
         }
+
+    async def _get_client_mood_profile(self, include_mood_history: bool = True, 
+                                     include_profile_details: bool = True) -> Dict[str, Any]:
+        """Get comprehensive client mood and profile information for jAImee's personalized support"""
+        try:
+            logger.info(f"🌟 jAImee accessing current user's mood and profile data (authenticated context)")
+            
+            result = {
+                "timestamp": datetime.now().isoformat(),
+                "data_source": "jAImee Therapeutic Tool",
+                "context_note": "Using authenticated user context"
+            }
+            
+            # Get recent mood data using authenticated context (like mobile app does)
+            if include_mood_history:
+                try:
+                    # Call the mood API exactly like the mobile app does - no client_id parameter
+                    mood_response = await self._make_api_request('GET', '/api/v1/client-mood/recent')
+                    
+                    if mood_response and isinstance(mood_response, list) and len(mood_response) > 0:
+                        # Translate mood entries to human-readable format
+                        translated_entries = self._translate_mood_entries(mood_response)
+                        
+                        result["mood_data"] = {
+                            "recent_entries": translated_entries,  # Now includes mood_label, mood_category, etc.
+                            "raw_entries": mood_response,  # Keep original data for debugging
+                            "mood_summary": self._analyze_mood_data(mood_response),
+                            "last_mood_entry": translated_entries[0] if translated_entries else None,
+                            "total_entries": len(mood_response)
+                        }
+                        logger.info(f"✅ Successfully retrieved and translated {len(mood_response)} mood entries")
+                    else:
+                        result["mood_data"] = {
+                            "recent_entries": [],
+                            "mood_summary": "No recent mood tracking data found for this user",
+                            "last_mood_entry": None,
+                            "total_entries": 0
+                        }
+                        logger.info("ℹ️ No mood data available for current user")
+                        
+                except Exception as e:
+                    logger.warning(f"Could not fetch mood data: {e}")
+                    result["mood_data"] = {"error": f"Mood data unavailable: {str(e)}"}
+            
+            # Try to get basic profile info from account/me endpoint (which works with auth context)
+            if include_profile_details:
+                try:
+                    # Get account info using authenticated context
+                    tz = 'UTC'  # Default timezone
+                    if hasattr(self, 'current_page_context') and self.current_page_context:
+                        tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone') or 'UTC'
+                    
+                    account_response = await self._make_api_request('GET', '/account/v2/me', params={'timezone': tz})
+                    
+                    if account_response:
+                        # Extract relevant profile information from /account/v2/me
+                        profiles = account_response.get('profiles', [])
+                        user_role = account_response.get('role', 'CLIENT')
+                        
+                        if isinstance(profiles, list) and profiles:
+                            # User is a practitioner - use profile data
+                            selected_profile = profiles[0]  # Use first profile
+                            if self.profile_id:
+                                selected_profile = next((p for p in profiles if p.get('id') == self.profile_id), profiles[0])
+                            
+                            result["profile"] = {
+                                "name": f"{selected_profile.get('firstName', '')} {selected_profile.get('lastName', '')}".strip() or "Unknown Practitioner",
+                                "profile_id": selected_profile.get("id"),
+                                "role": selected_profile.get("role", "practitioner"),
+                                "status": selected_profile.get("status"),
+                                "clinic_info": {
+                                    "name": selected_profile.get("clinic", {}).get("name"),
+                                    "timezone": selected_profile.get("clinic", {}).get("timezone")
+                                }
+                            }
+                        else:
+                            # User is a client - extract from top-level response
+                            client_data = account_response.get('client', {})
+                            result["profile"] = {
+                                "name": f"{client_data.get('firstName', '')} {client_data.get('lastName', '')}".strip() or "Unknown Client",
+                                "profile_id": account_response.get('id'),  # Use account ID
+                                "role": user_role.lower(),
+                                "status": account_response.get('status', 'ACTIVE'),
+                                "age": self._calculate_age_from_dob(client_data.get('dob')),
+                                "gender": client_data.get('gender'),
+                                "occupation": client_data.get('occupation'),
+                                "dob": client_data.get('dob'),
+                                "phone": client_data.get('phone'),
+                                "email": account_response.get('email')
+                            }
+                    else:
+                        result["profile"] = {"error": "Could not access account information"}
+                        
+                except Exception as e:
+                    logger.warning(f"Could not fetch profile data: {e}")
+                    result["profile"] = {"error": f"Profile data unavailable: {str(e)}"}
+            
+            # Add therapeutic insights for jAImee
+            result["therapeutic_insights"] = self._generate_therapeutic_insights(result)
+            
+            logger.info(f"✅ Successfully retrieved user mood and profile data for jAImee")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in jAImee's client mood profile tool: {e}")
+            return {
+                "error": f"Failed to retrieve client data: {str(e)}",
+                "status": "error",
+                "suggestion": "Please ensure you are properly authenticated and have appropriate permissions."
+            }
+    
+    def _calculate_age_from_dob(self, dob_str: str) -> Optional[int]:
+        """Calculate age from date of birth string"""
+        if not dob_str:
+            return None
+        
+        try:
+            from datetime import datetime
+            # Parse the date of birth
+            dob = datetime.fromisoformat(dob_str.replace('Z', '+00:00'))
+            today = datetime.now(dob.tzinfo)
+            
+            # Calculate age
+            age = today.year - dob.year
+            if today.month < dob.month or (today.month == dob.month and today.day < dob.day):
+                age -= 1
+            
+            return age if age >= 0 else None
+        except:
+            return None
+
+    def _get_mood_translation(self, mood_flag: int) -> Dict[str, Any]:
+        """Translate mood integer flag to human-readable format (matches mobile app FEELING_LIST)"""
+        mood_translations = {
+            1: {"label": "Angry", "category": "negative", "intensity": "high"},
+            2: {"label": "Sad", "category": "negative", "intensity": "medium"}, 
+            3: {"label": "Okay", "category": "neutral", "intensity": "low"},
+            4: {"label": "Good", "category": "positive", "intensity": "medium"},
+            5: {"label": "Happy", "category": "positive", "intensity": "high"},
+            6: {"label": "Anxious", "category": "negative", "intensity": "medium"},
+            7: {"label": "Overwhelmed", "category": "negative", "intensity": "high"},
+            8: {"label": "Joyful", "category": "positive", "intensity": "high"},  # TEARS_OF_JOY_FACE
+            9: {"label": "Worried", "category": "negative", "intensity": "medium"},
+            10: {"label": "Confused", "category": "neutral", "intensity": "medium"},
+            11: {"label": "Numb", "category": "neutral", "intensity": "low"},
+            12: {"label": "Depressed", "category": "negative", "intensity": "high"},
+            13: {"label": "Nervous", "category": "negative", "intensity": "medium"},
+            14: {"label": "Stressed", "category": "negative", "intensity": "high"}
+        }
+        
+        return mood_translations.get(mood_flag, {
+            "label": f"Unknown mood ({mood_flag})", 
+            "category": "unknown", 
+            "intensity": "unknown"
+        })
+
+    def _translate_mood_entries(self, mood_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Add human-readable translations to mood entries"""
+        translated_entries = []
+        
+        for entry in mood_entries:
+            if isinstance(entry, dict):
+                translated_entry = entry.copy()
+                mood_flag = entry.get('flag')
+                
+                if mood_flag is not None:
+                    mood_info = self._get_mood_translation(int(mood_flag))
+                    translated_entry['mood_translation'] = mood_info
+                    translated_entry['mood_label'] = mood_info['label']
+                    translated_entry['mood_category'] = mood_info['category']
+                
+                translated_entries.append(translated_entry)
+        
+        return translated_entries
+
+    def _analyze_mood_data(self, mood_entries: List[Dict[str, Any]]) -> str:
+        """Analyze mood data and provide summary for therapeutic context"""
+        if not mood_entries:
+            return "No mood data available for analysis"
+        
+        try:
+            # Extract and translate mood flags/ratings from entries
+            recent_moods = []
+            mood_labels = []
+            categories = {"positive": 0, "negative": 0, "neutral": 0}
+            
+            for entry in mood_entries[:7]:  # Last 7 entries
+                if isinstance(entry, dict):
+                    mood_flag = entry.get('flag') or entry.get('rating') or entry.get('mood_scale')
+                    if mood_flag is not None:
+                        mood_value = int(mood_flag)
+                        recent_moods.append(mood_value)
+                        
+                        # Get mood translation
+                        mood_info = self._get_mood_translation(mood_value)
+                        mood_labels.append(mood_info['label'])
+                        
+                        # Count categories
+                        category = mood_info.get('category', 'unknown')
+                        if category in categories:
+                            categories[category] += 1
+            
+            if not recent_moods:
+                return "Mood data structure not recognized"
+            
+            # Calculate trend
+            trend = "stable"
+            if len(recent_moods) > 1:
+                recent_trend = recent_moods[:3]  # Last 3 entries
+                older_trend = recent_moods[3:6]  # Previous 3 entries
+                
+                if older_trend:
+                    recent_avg = sum(recent_trend) / len(recent_trend)
+                    older_avg = sum(older_trend) / len(older_trend)
+                    
+                    if recent_avg > older_avg + 0.8:
+                        trend = "improving"
+                    elif recent_avg < older_avg - 0.8:
+                        trend = "concerning decline"
+            
+            # Create summary with mood labels
+            most_recent = mood_labels[0] if mood_labels else "Unknown"
+            mood_pattern = ", ".join(mood_labels[:3]) if len(mood_labels) >= 3 else ", ".join(mood_labels)
+            
+            # Category analysis
+            total_entries = sum(categories.values())
+            category_summary = []
+            if categories["negative"] > total_entries * 0.6:
+                category_summary.append("predominantly challenging emotions")
+            elif categories["positive"] > total_entries * 0.6:
+                category_summary.append("mostly positive emotions")
+            else:
+                category_summary.append("mixed emotional states")
+            
+            return (f"Recent mood: {most_recent}. "
+                   f"Pattern: {mood_pattern}. "
+                   f"Trend: {trend}. "
+                   f"Overall: {category_summary[0]} over {len(recent_moods)} entries.")
+            
+        except Exception as e:
+            return f"Could not analyze mood data: {str(e)}"
+    
+    def _generate_therapeutic_insights(self, client_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate therapeutic insights for jAImee based on client data"""
+        insights = {
+            "personalization_notes": [],
+            "therapeutic_focus_areas": [],
+            "suggested_approaches": []
+        }
+        
+        # Analyze profile data
+        profile = client_data.get("profile", {})
+        if profile.get("age"):
+            age = profile["age"]
+            if age < 25:
+                insights["personalization_notes"].append("Young adult - consider developmental milestones and identity formation")
+            elif age > 65:
+                insights["personalization_notes"].append("Older adult - consider life transitions and legacy concerns")
+        
+        if profile.get("diagnosis"):
+            diagnosis = profile["diagnosis"].lower() if profile["diagnosis"] else ""
+            if "anxiety" in diagnosis:
+                insights["therapeutic_focus_areas"].append("anxiety management")
+                insights["suggested_approaches"].append("breathing exercises and grounding techniques")
+            if "depression" in diagnosis:
+                insights["therapeutic_focus_areas"].append("mood stabilization")
+                insights["suggested_approaches"].append("behavioral activation and cognitive restructuring")
+        
+        # Analyze mood data with translated entries
+        mood_data = client_data.get("mood_data", {})
+        if mood_data.get("mood_summary"):
+            summary = mood_data["mood_summary"].lower()
+            if "decline" in summary:
+                insights["therapeutic_focus_areas"].append("crisis prevention")
+                insights["suggested_approaches"].append("safety planning and immediate coping strategies")
+            elif "improving" in summary:
+                insights["suggested_approaches"].append("reinforcement of positive coping strategies")
+        
+        # Analyze specific mood patterns from recent entries
+        recent_entries = mood_data.get("recent_entries", [])
+        if recent_entries:
+            # Look at mood categories in recent entries
+            negative_moods = []
+            positive_moods = []
+            
+            for entry in recent_entries[:5]:  # Last 5 entries
+                mood_label = entry.get("mood_label", "")
+                mood_category = entry.get("mood_category", "")
+                
+                if mood_category == "negative":
+                    negative_moods.append(mood_label)
+                elif mood_category == "positive":
+                    positive_moods.append(mood_label)
+            
+            # Provide specific insights based on mood patterns
+            if len(negative_moods) >= 3:
+                insights["therapeutic_focus_areas"].append("mood stabilization")
+                
+                # Specific recommendations based on mood types
+                if "Anxious" in negative_moods or "Worried" in negative_moods:
+                    insights["suggested_approaches"].append("anxiety management techniques and grounding exercises")
+                if "Depressed" in negative_moods or "Sad" in negative_moods:
+                    insights["suggested_approaches"].append("behavioral activation and mood lifting activities")
+                if "Stressed" in negative_moods or "Overwhelmed" in negative_moods:
+                    insights["suggested_approaches"].append("stress reduction and time management strategies")
+                if "Angry" in negative_moods:
+                    insights["suggested_approaches"].append("anger management and emotional regulation techniques")
+            
+            elif len(positive_moods) >= 3:
+                insights["suggested_approaches"].append("maintain current positive practices and build resilience")
+                insights["personalization_notes"].append("Client showing positive mood trend - focus on sustaining progress")
+            
+            # Add most recent mood context
+            if recent_entries:
+                latest_mood = recent_entries[0].get("mood_label", "")
+                if latest_mood:
+                    insights["personalization_notes"].append(f"Current mood state: {latest_mood} - tailor conversation accordingly")
+        
+        return insights
+
+    async def _get_user_profile(self) -> Dict[str, Any]:
+        """Get lightweight user profile information for jAImee's reference during conversation"""
+        try:
+            logger.info(f"🌟 jAImee accessing user profile information")
+            
+            result = {
+                "timestamp": datetime.now().isoformat(),
+                "data_source": "jAImee Profile Tool"
+            }
+            
+            # Get user profile information from account/me endpoint
+            try:
+                # Get account info using authenticated context
+                tz = 'UTC'  # Default timezone
+                if hasattr(self, 'current_page_context') and self.current_page_context:
+                    tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone') or 'UTC'
+                
+                account_response = await self._make_api_request('GET', '/account/v2/me', params={'timezone': tz})
+
+                if account_response:
+                    # Extract relevant profile information from /account/v2/me
+                    profiles = account_response.get('profiles', [])
+                    user_role = account_response.get('role', 'CLIENT')
+                    
+                    if isinstance(profiles, list) and profiles:
+                        # User is a practitioner - use profile data
+                        selected_profile = profiles[0]  # Use first profile
+                        if self.profile_id:
+                            selected_profile = next((p for p in profiles if p.get('id') == self.profile_id), profiles[0])
+                        
+                        result["profile"] = {
+                            "name": f"{selected_profile.get('firstName', '')} {selected_profile.get('lastName', '')}".strip() or "Unknown Practitioner",
+                            "profile_id": selected_profile.get("id"),
+                            "role": selected_profile.get("role", "practitioner"),
+                            "status": selected_profile.get("status"),
+                            "clinic_info": {
+                                "name": selected_profile.get("clinic", {}).get("name"),
+                                "timezone": selected_profile.get("clinic", {}).get("timezone")
+                            }
+                        }
+                    else:
+                        # User is a client - extract from top-level response
+                        client_data = account_response.get('client', {})
+                        result["profile"] = {
+                            "name": f"{client_data.get('firstName', '')} {client_data.get('lastName', '')}".strip() or "Unknown Client",
+                            "profile_id": account_response.get('id'),  # Use account ID
+                            "role": user_role.lower(),
+                            "status": account_response.get('status', 'ACTIVE'),
+                            "age": self._calculate_age_from_dob(client_data.get('dob')),
+                            "gender": client_data.get('gender'),
+                            "occupation": client_data.get('occupation'),
+                            "dob": client_data.get('dob'),
+                            "phone": client_data.get('phone'),
+                            "email": account_response.get('email')
+                        }
+                        
+                        # Create a friendly summary for jAImee
+                        name = result["profile"].get("name", "the user")
+                        age = result["profile"].get("age")
+                        gender = result["profile"].get("gender")
+                        occupation = result["profile"].get("occupation")
+                        
+                        summary_parts = [f"User name: {name}"]
+                        
+                        personal_details = []
+                        if age:
+                            personal_details.append(f"age {age}")
+                        if gender:
+                            personal_details.append(f"gender {gender}")
+                        if occupation:
+                            personal_details.append(f"occupation: {occupation}")
+                        
+                        if personal_details:
+                            summary_parts.append(f"Details: {', '.join(personal_details)}")
+                        
+                        result["summary"] = ". ".join(summary_parts) + "."
+                else:
+                    result["profile"] = {"error": "Could not access account information"}
+                    result["summary"] = "Unable to access user profile at this time."
+                    
+            except Exception as e:
+                logger.warning(f"Could not fetch user profile: {e}")
+                result["profile"] = {"error": f"Profile data unavailable: {str(e)}"}
+                result["summary"] = "Profile information temporarily unavailable."
+            
+            logger.info(f"✅ Successfully retrieved user profile for jAImee")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in jAImee's user profile tool: {e}")
+            return {
+                "error": f"Failed to retrieve profile data: {str(e)}",
+                "status": "error",
+                "summary": "Unable to access user information right now."
+            }
 
     # Session Management Tool Implementations
     async def _search_sessions(self, client_name: str = None, client_id: str = None, date_from: str = None, 
