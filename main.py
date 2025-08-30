@@ -105,6 +105,12 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
     elif persona_type == "data_assistant":
         base_prompt = "You are a data analysis AI assistant. Your primary goal is to help users understand and interpret their data."
     
+    # Add current page context if available
+    if ui_state:
+        derived_context = _build_page_context_from_ui_state(ui_state)
+        if derived_context.get('page_display_name'):
+            base_prompt += f"\n\nCURRENT PAGE: You are currently viewing the {derived_context['page_display_name']} page."
+    
     # Add template capabilities if available
     capabilities = "\n\n🛠️ Available Capabilities:"
     
@@ -129,6 +135,26 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
     
     return base_prompt + capabilities
 
+
+def _get_human_readable_page_name(technical_name: str) -> str:
+    """Convert technical page names to human-readable names"""
+    page_name_map = {
+        'dashboard': 'Dashboard',
+        'clients_list': 'Clients',
+        'client_details': 'Client Details', 
+        'messages_page': 'Messages',
+        'homework_page': 'Homework',
+        'files_page': 'Files',
+        'profile_page': 'Profile',
+        'practitioners_page': 'Practitioners',
+        'transcribe_page': 'Live Transcribe',
+        'session_viewer': 'Session Viewer',
+        'sessions_list': 'Sessions',
+        'settings': 'Settings',
+        'reports': 'Reports',
+        'unknown': 'Unknown Page'
+    }
+    return page_name_map.get(technical_name, technical_name.replace('_', ' ').title())
 
 def _build_page_context_from_ui_state(ui_state: Dict[str, Any]) -> Dict[str, Any]:
     """Derive a minimal page context for tools based on UI state."""
@@ -164,6 +190,7 @@ def _build_page_context_from_ui_state(ui_state: Dict[str, Any]) -> Dict[str, Any
 
     return {
         "page_type": page_type,
+        "page_display_name": _get_human_readable_page_name(page_type),
         "capabilities": capabilities,
     }
 

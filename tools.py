@@ -1255,7 +1255,8 @@ class ToolManager:
     def set_page_context(self, page_context: Dict[str, Any]):
         """Set the current page context for tool execution"""
         self.current_page_context = page_context
-        logger.info(f"📄 Page context set: {page_context.get('page_type', 'unknown')} with capabilities: {page_context.get('capabilities', [])}")
+        display_name = page_context.get('page_display_name') or page_context.get('page_type', 'unknown')
+        logger.info(f"📄 Page context set: {display_name} with capabilities: {page_context.get('capabilities', [])}")
     
     def set_profile_id(self, profile_id: str):
         """Set the profile ID for API calls"""

@@ -128,15 +128,37 @@ class PipelineManager:
                 
                 # Set page context for tool manager if available
                 if context and (context.get('page_context') or context.get('page_url')):
+                    page_type = context.get('page_context', 'unknown')  # Frontend sends as 'page_context'
+                    
+                    # Add human-readable page name
+                    page_name_map = {
+                        'dashboard': 'Dashboard',
+                        'clients_list': 'Clients',
+                        'client_details': 'Client Details', 
+                        'messages_page': 'Messages',
+                        'homework_page': 'Homework',
+                        'files_page': 'Files',
+                        'profile_page': 'Profile',
+                        'practitioners_page': 'Practitioners',
+                        'transcribe_page': 'Live Transcribe',
+                        'session_viewer': 'Session Viewer',
+                        'sessions_list': 'Sessions',
+                        'settings': 'Settings',
+                        'reports': 'Reports',
+                        'unknown': 'Unknown Page'
+                    }
+                    page_display_name = page_name_map.get(page_type, page_type.replace('_', ' ').title())
+                    
                     page_context = {
-                        'page_type': context.get('page_context', 'unknown'),  # Frontend sends as 'page_context'
+                        'page_type': page_type,
+                        'page_display_name': page_display_name,
                         'page_url': context.get('page_url', ''),
                         'capabilities': context.get('ui_capabilities', []),
                         'client_id': context.get('client_id'),
                         'active_tab': context.get('active_tab')
                     }
                     tool_manager.set_page_context(page_context)
-                    logger.info(f"📄 Pipeline: Set page context - {page_context.get('page_type')} with capabilities: {page_context.get('capabilities', [])}")
+                    logger.info(f"📄 Pipeline: Set page context - {page_display_name} ({page_type}) with capabilities: {page_context.get('capabilities', [])}")
                 
                 # Build messages for OpenAI API
                 openai_messages = [{"role": "system", "content": system_prompt}]
