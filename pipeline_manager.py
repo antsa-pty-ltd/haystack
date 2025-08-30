@@ -74,7 +74,31 @@ class PipelineManager:
                 # Get session and add user message
                 session = await session_manager.get_session(session_id)
                 if not session:
-                    raise ValueError(f"Session {session_id} not found")
+                    # Session not found - create a new one instead of failing
+                    logger.info(f"Session {session_id} not found, creating new session")
+                    
+                    # Extract profile_id from context if available
+                    profile_id = None
+                    if context:
+                        profile_id = context.get('profile_id') or context.get('profileId')
+                    
+                    # Create a new session with the same session_id to maintain consistency
+                    new_session_id = await session_manager.create_session(
+                        persona_type=persona_type.value,
+                        context=context or {},
+                        auth_token=auth_token,
+                        profile_id=profile_id
+                    )
+                    
+                    # Replace the session_id with the new one for internal consistency
+                    # But we'll keep using the original session_id for the response
+                    logger.info(f"Created new session {new_session_id} to replace missing session {session_id}")
+                    
+                    # Get the newly created session
+                    session = await session_manager.get_session(new_session_id)
+                    
+                    # Update the session_id to the new one for the rest of this request
+                    session_id = new_session_id
                 
                 # Add user message to session
                 await session_manager.add_message(session_id, "user", user_message)
