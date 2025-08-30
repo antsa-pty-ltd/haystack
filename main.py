@@ -305,12 +305,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Build context for pipeline
                 ui_state = ui_states.get(session_id) or {}
                 derived = _build_page_context_from_ui_state(ui_state)
+                
+                # Extract profile_id for session recovery
+                profile_id = message_data.get("profile_id") or message_data.get("profileId")
+                
                 context_for_pipeline: Dict[str, Any] = {
                     "page_url": ui_state.get("page_url"),
                     "ui_capabilities": derived.get("capabilities", []),
                     "client_id": ui_state.get("client_id"),
                     "active_tab": ui_state.get("active_tab"),
                     "page_context": derived.get("page_type"),
+                    "profile_id": profile_id,  # Include profile_id for session recovery
                 }
 
                 # Resolve persona and auth token
