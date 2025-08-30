@@ -78,6 +78,33 @@ class ToolManager:
                 },
                 "implementation": self._search_clients
             },
+
+            "get_client_base": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_client_base",
+                        "description": "Get the complete client base information including names, emails, genders, and phone numbers for all clients in the clinic.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of clients to return (default 100, max 500)",
+                                    "default": 100,
+                                    "maximum": 500
+                                },
+                                "include_inactive": {
+                                    "type": "boolean",
+                                    "description": "Whether to include inactive clients",
+                                    "default": False
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_client_base
+            },
             
             "get_clinic_profile": {
                 "definition": {
@@ -2261,6 +2288,97 @@ class ToolManager:
                     "last_session": None
                 }
             ]
+    
+    async def _get_client_base(self, limit: int = 100, include_inactive: bool = False) -> Dict[str, Any]:
+        """Get complete client base information including names, emails, genders, and phone numbers"""
+        try:
+            # Use search-clients with empty query to get all clients
+            params = {
+                'query': '',  # Empty query returns all clients
+                'limit': min(limit, 500)  # Respect API limits
+            }
+            
+            response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
+            clients = response.get('clients', [])
+            total_clients = response.get('total', len(clients))
+            
+            # Process each client to get detailed information
+            client_base = []
+            active_count = 0
+            inactive_count = 0
+            
+            for client in clients:
+                client_status = client.get('status', '').upper()
+                is_active = client_status == 'ACTIVE'
+                
+                # Skip inactive clients if not requested
+                if not include_inactive and not is_active:
+                    inactive_count += 1
+                    continue
+                
+                if is_active:
+                    active_count += 1
+                else:
+                    inactive_count += 1
+                
+                # Try to get additional client details including email
+                client_details = {
+                    "client_id": client.get("client_id"),
+                    "name": client.get("name", "Unknown Client"),
+                    "gender": client.get("gender", "Not specified"),
+                    "status": client_status,
+                    "phone": client.get("phone"),  # May be None
+                    "email": None,  # Will try to get from detailed call
+                    "age": client.get("age"),
+                    "occupation": client.get("occupation"),
+                    "last_activity": client.get("last_activity"),
+                    "total_assignments": client.get("total_assignments", 0),
+                    "active_assignments": client.get("active_assignments", 0)
+                }
+                
+                # Attempt to get email from detailed client info if available
+                try:
+                    if client.get("client_id"):
+                        # Make a call to get more detailed client info including email
+                        detailed_response = await self._make_api_request('GET', f'/clients/{client.get("client_id")}')
+                        if detailed_response and 'email' in detailed_response:
+                            client_details["email"] = detailed_response.get("email")
+                        elif detailed_response and 'account' in detailed_response:
+                            client_details["email"] = detailed_response.get("account", {}).get("email")
+                except Exception as e:
+                    logger.debug(f"Could not fetch detailed info for client {client.get('client_id')}: {e}")
+                    # Email will remain None
+                
+                client_base.append(client_details)
+            
+            return {
+                "success": True,
+                "client_base": client_base,
+                "summary": {
+                    "total_returned": len(client_base),
+                    "total_in_system": total_clients,
+                    "active_clients": active_count,
+                    "inactive_clients": inactive_count,
+                    "included_inactive": include_inactive
+                },
+                "fields_included": ["client_id", "name", "email", "gender", "phone", "status", "age", "occupation", "last_activity", "assignments"],
+                "note": "Email addresses may not be available for all clients depending on API permissions and data availability"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting client base: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to retrieve client base: {str(e)}",
+                "client_base": [],
+                "summary": {
+                    "total_returned": 0,
+                    "total_in_system": 0,
+                    "active_clients": 0,
+                    "inactive_clients": 0,
+                    "included_inactive": include_inactive
+                }
+            }
     
     async def _generate_report(self, report_type: str, client_id: str, date_range: Optional[Dict] = None) -> Dict[str, Any]:
         """Generate report via API"""
