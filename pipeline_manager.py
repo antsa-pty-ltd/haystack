@@ -75,30 +75,26 @@ class PipelineManager:
                 session = await session_manager.get_session(session_id)
                 if not session:
                     # Session not found - create a new one instead of failing
-                    logger.info(f"Session {session_id} not found, creating new session")
+                    logger.info(f"Session {session_id} not found, creating replacement session with same ID")
                     
                     # Extract profile_id from context if available
                     profile_id = None
                     if context:
                         profile_id = context.get('profile_id') or context.get('profileId')
                     
-                    # Create a new session with the same session_id to maintain consistency
-                    new_session_id = await session_manager.create_session(
+                    # Create a new session with the SAME session_id to maintain frontend consistency
+                    recovered_session_id = await session_manager.create_session(
                         persona_type=persona_type.value,
                         context=context or {},
                         auth_token=auth_token,
-                        profile_id=profile_id
+                        profile_id=profile_id,
+                        session_id=session_id  # Use original session_id, not a new UUID
                     )
                     
-                    # Replace the session_id with the new one for internal consistency
-                    # But we'll keep using the original session_id for the response
-                    logger.info(f"Created new session {new_session_id} to replace missing session {session_id}")
+                    logger.info(f"Created replacement session {recovered_session_id} (should match original {session_id})")
                     
                     # Get the newly created session
-                    session = await session_manager.get_session(new_session_id)
-                    
-                    # Update the session_id to the new one for the rest of this request
-                    session_id = new_session_id
+                    session = await session_manager.get_session(session_id)
                 
                 # Add user message to session
                 await session_manager.add_message(session_id, "user", user_message)

@@ -111,10 +111,12 @@ class SessionManager:
         persona_type: str, 
         context: Optional[Dict[str, Any]] = None,
         auth_token: Optional[str] = None,
-        profile_id: Optional[str] = None
+        profile_id: Optional[str] = None,
+        session_id: Optional[str] = None
     ) -> str:
         """Create a new chat session"""
-        session_id = str(uuid.uuid4())
+        if session_id is None:
+            session_id = str(uuid.uuid4())
         now = datetime.utcnow()
         
         session = ChatSession(
