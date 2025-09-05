@@ -1232,12 +1232,17 @@ class ToolManager:
                 
                 # Try different possible profile ID fields in the JWT
                 profile_id_from_jwt = decoded.get('profileId') or decoded.get('profile_id') or decoded.get('sub')
+                client_id_from_jwt = decoded.get('clientId')
                 
                 if profile_id_from_jwt:
                     self.profile_id = profile_id_from_jwt
                     logger.info(f"Extracted profile ID from JWT: {profile_id_from_jwt}")
+                elif client_id_from_jwt:
+                    # For client accounts, use client-{clientId} format as profile_id
+                    self.profile_id = f"client-{client_id_from_jwt}"
+                    logger.info(f"Extracted client ID from JWT, using as profile: {self.profile_id}")
                 else:
-                    logger.warning("No profile ID found in JWT token")
+                    logger.warning("No profile ID or client ID found in JWT token")
                     
             except Exception as e:
                 logger.error(f"Failed to decode JWT token: {e}")
