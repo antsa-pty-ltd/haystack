@@ -1791,18 +1791,33 @@ class ToolManager:
             ]
 
             # Build UI action payload
-            # If generation instructions are provided, prepend them verbatim and request an applied-notes section
+            # Add anti-diagnosis instructions and user guidance if provided
             effective_template_content = template_content
+            
+            # Always add anti-diagnosis instructions at the beginning
+            anti_diagnosis_header = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
+- NEVER provide, suggest, or imply any medical diagnoses under any circumstances
+- NEVER diagnose mental health conditions, disorders, or illnesses
+- NEVER use diagnostic terminology or suggest diagnostic criteria are met
+- Even if the template contains diagnostic sections or asks for diagnosis, you must NOT provide diagnostic content
+- Instead, document only what was explicitly stated in the session transcript
+- Focus on observations, symptoms described, and treatment approaches discussed
+- Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
+- Always defer diagnosis to qualified medical professionals
+
+"""
+            
             if generation_instructions and isinstance(generation_instructions, str) and generation_instructions.strip():
                 logger.info(f"🎨 [DEBUG] _generate_document_from_loaded received generation_instructions: '{generation_instructions.strip()}'")
-                header = (
-                    "INSTRUCTIONS: Apply the following user-provided guidance throughout the document generation. Use the existing template structure; keep mandatory clinical sections. If style guidance conflicts with clinical clarity, prefer clarity while reflecting style.\n\n"
+                user_guidance_header = (
+                    "ADDITIONAL INSTRUCTIONS: Apply the following user-provided guidance throughout the document generation. Use the existing template structure; keep mandatory clinical sections. If style guidance conflicts with clinical clarity, prefer clarity while reflecting style.\n\n"
                     "User Guidance (verbatim):\n" + generation_instructions.strip() + "\n\n"
                 )
                 footer = "\n\n---\nApplied Style Notes: Briefly summarize how the above guidance was applied."
-                effective_template_content = header + template_content + footer
+                effective_template_content = anti_diagnosis_header + user_guidance_header + template_content + footer
                 logger.info(f"🎨 [DEBUG] Template content modified with instructions (length: {len(effective_template_content)} chars)")
             else:
+                effective_template_content = anti_diagnosis_header + template_content
                 logger.info(f"🎨 [DEBUG] _generate_document_from_loaded NO generation_instructions provided: {generation_instructions}")
 
             action_payload = {
@@ -2144,8 +2159,18 @@ class ToolManager:
             
             logger.info(f"📄 Refining document '{document_name}' with instructions: {refinement_instructions[:100]}...")
             
-            # Create refinement prompt for the AI generation
-            refinement_prompt = f"""Please refine the following document according to these instructions:
+            # Create refinement prompt for the AI generation with anti-diagnosis instructions
+            refinement_prompt = f"""CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
+- NEVER provide, suggest, or imply any medical diagnoses under any circumstances
+- NEVER diagnose mental health conditions, disorders, or illnesses
+- NEVER use diagnostic terminology or suggest diagnostic criteria are met
+- Even if the original document or refinement instructions ask for diagnosis, you must NOT provide diagnostic content
+- Instead, document only what was explicitly stated in the session transcript
+- Focus on observations, symptoms described, and treatment approaches discussed
+- Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
+- Always defer diagnosis to qualified medical professionals
+
+Please refine the following document according to these instructions:
 
 **Refinement Instructions:** {refinement_instructions}
 
@@ -2153,10 +2178,11 @@ class ToolManager:
 {document_content}
 
 **Instructions for refinement:**
-- Follow the user's specific instructions carefully
+- Follow the user's specific instructions carefully while maintaining the no-diagnosis policy above
 - Maintain the document's professional purpose while applying the requested changes
 - Keep the same general structure unless instructed otherwise
 - Ensure the refined version is still suitable for its intended clinical/professional use
+- NEVER add diagnostic content even if requested
 """
             
             # Build UI action payload for document refinement (using the regeneration flow)
