@@ -176,27 +176,34 @@ class PipelineManager:
                 # Auto-preload context for jAImee's first interaction
                 if is_first_jaimee_message and persona_config.tools:
                     logger.info(f"🌟 Auto-preloading jAImee context with mood and profile data")
-                    try:
-                        # Preload mood and profile context
-                        mood_profile_result = await tool_manager.execute_tool("get_client_mood_profile", {
-                            "include_mood_history": True,
-                            "include_profile_details": True
-                        })
-                        
-                        if mood_profile_result.get("success"):
-                            # Add the preloaded context as a hidden assistant message for context
-                            context_summary = self._create_context_summary(mood_profile_result.get("result", {}))
-                            
-                            # Add a system-style message with the context (invisible to user)
-                            openai_messages.append({
-                                "role": "assistant", 
-                                "content": f"[Internal Context] {context_summary}"
+                    
+                    # Check if we have authentication before attempting to preload
+                    has_auth = (auth_token is not None) or (session.auth_token is not None)
+                    if not has_auth:
+                        logger.warning(f"⚠️ Cannot preload jAImee context: No authentication token available")
+                        logger.info(f"🔍 Auth debug: auth_token={bool(auth_token)}, session.auth_token={bool(session.auth_token)}")
+                    else:
+                        try:
+                            # Preload mood and profile context
+                            mood_profile_result = await tool_manager.execute_tool("get_client_mood_profile", {
+                                "include_mood_history": True,
+                                "include_profile_details": True
                             })
-                            logger.info(f"✅ Successfully preloaded jAImee context")
-                        else:
-                            logger.warning(f"⚠️ Failed to preload jAImee context: {mood_profile_result.get('error', 'Unknown error')}")
-                    except Exception as e:
-                        logger.error(f"❌ Error preloading jAImee context: {e}")
+
+                            if mood_profile_result.get("success"):
+                                # Add the preloaded context as a hidden assistant message for context
+                                context_summary = self._create_context_summary(mood_profile_result.get("result", {}))
+                                
+                                # Add a system-style message with the context (invisible to user)
+                                openai_messages.append({
+                                    "role": "assistant", 
+                                    "content": f"[Internal Context] {context_summary}"
+                                })
+                                logger.info(f"✅ Successfully preloaded jAImee context")
+                            else:
+                                logger.warning(f"⚠️ Failed to preload jAImee context: {mood_profile_result.get('error', 'Unknown error')}")
+                        except Exception as e:
+                            logger.error(f"❌ Error preloading jAImee context: {e}")
                 
                 # Agent loop with tool-use: let the model plan tool calls, execute, and iterate
                 full_response = ""

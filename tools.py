@@ -1094,21 +1094,11 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_mood_profile",
-                        "description": "Get comprehensive information about the current authenticated user including their latest mood tracking data and profile details for personalized therapeutic support. This tool is exclusive to jAImee and works with the user's authenticated session context.",
+                        "description": "Get the user's recent mood tracking data and emotional state to provide personalized therapeutic support. Use this to understand their current emotional context and tailor your responses accordingly.",
                         "parameters": {
                             "type": "object",
-                            "properties": {
-                                "include_mood_history": {
-                                    "type": "boolean",
-                                    "description": "Whether to include recent mood tracking history and trends",
-                                    "default": True
-                                },
-                                "include_profile_details": {
-                                    "type": "boolean", 
-                                    "description": "Whether to include detailed user profile information",
-                                    "default": True
-                                }
-                            }
+                            "properties": {},
+                            "required": []
                         }
                     }
                 },
@@ -1272,12 +1262,16 @@ class ToolManager:
             'Content-Type': 'application/json'
         }
         
-        # Add profile ID header if available
+        # Add profile ID header if available (but not for client contexts)
         if hasattr(self, 'profile_id') and self.profile_id:
-            headers['profileid'] = self.profile_id
-            logger.info(f"🔍 API call headers include profileid: {self.profile_id}")
+            # Only add profileid header for practitioner contexts, not client contexts
+            if isinstance(self.profile_id, str) and not self.profile_id.startswith("client-"):
+                headers['profileid'] = self.profile_id
+                logger.info(f"🔍 API call headers include profileid: {self.profile_id}")
+            else:
+                logger.info(f"🔍 API call skipping profileid header for client context: {self.profile_id}")
         else:
-            logger.warning(f"🔍 API call missing profileid header")
+            logger.info(f"🔍 API call with no profileid header (client auth context)")
         
         # Add api/v1 prefix to match NestJS global prefix
         endpoint_clean = endpoint.lstrip('/')
@@ -2611,11 +2605,31 @@ class ToolManager:
             "benefits": "This exercise can help reduce stress, anxiety, and promote relaxation"
         }
 
-    async def _get_client_mood_profile(self, include_mood_history: bool = True, 
-                                     include_profile_details: bool = True) -> Dict[str, Any]:
+    async def _get_client_mood_profile(self, **kwargs) -> Dict[str, Any]:
         """Get comprehensive client mood and profile information for jAImee's personalized support"""
+        # Extract parameters with defaults
+        include_mood_history = kwargs.get('include_mood_history', True)
+        include_profile_details = kwargs.get('include_profile_details', True)
+        
         try:
             logger.info(f"🌟 jAImee accessing current user's mood and profile data (authenticated context)")
+            
+            # Check authentication first
+            if not self.auth_token:
+                logger.warning(f"⚠️ jAImee mood profile tool called without authentication token")
+                return {
+                    "timestamp": datetime.now().isoformat(),
+                    "data_source": "jAImee Therapeutic Tool",
+                    "context_note": "Authentication required but not available",
+                    "error": "No authentication token available for API requests",
+                    "mood_data": {"error": "Authentication required"},
+                    "profile": {"error": "Authentication required"},
+                    "therapeutic_insights": {
+                        "personalization_notes": ["Authentication required to access user data"],
+                        "therapeutic_focus_areas": [],
+                        "suggested_approaches": ["Please ensure user is properly authenticated"]
+                    }
+                }
             
             result = {
                 "timestamp": datetime.now().isoformat(),

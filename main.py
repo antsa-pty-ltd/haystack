@@ -11,15 +11,19 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
 from pipeline_manager import PipelineManager
 from personas import PersonaType
 from session_manager import session_manager
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -195,35 +199,52 @@ def _build_page_context_from_ui_state(ui_state: Dict[str, Any]) -> Dict[str, Any
     }
 
 
-def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
+async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     """Ensure ToolManager has auth, profile and page context for this session."""
     if not tool_manager:
         return
 
-    # Prefer token from incoming message, else from stored UI state manager
+    # Prefer token from incoming message, else from stored UI state manager, else from stored session
     incoming_token = message_data.get("auth_token") or message_data.get("token")
-    token = incoming_token or ui_state_manager.get_auth_token(session_id)
+    ui_state_token = ui_state_manager.get_auth_token(session_id)
+    
+    # Also check the stored session for auth token
+    session_token = None
+    try:
+        sess = await session_manager.get_session(session_id)
+        if sess:
+            session_token = sess.auth_token
+    except Exception:
+        pass
+    
+    token = incoming_token or ui_state_token or session_token
 
-    logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, stored_token={bool(ui_state_manager.get_auth_token(session_id))}, final_token={bool(token)}")
+    logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, ui_state_token={bool(ui_state_token)}, session_token={bool(session_token)}, final_token={bool(token)}")
 
     if token:
         profile_id = message_data.get("profile_id") or message_data.get("profileId")
         logger.info(f"🔍 Debug profile_id extraction: from_message={profile_id}")
         try:
-            tool_manager.set_auth_token(token, profile_id)
-            logger.info(f"🔍 Debug: set auth token, profile_id={tool_manager.profile_id}")
+            # Only attach profile_id for practitioner contexts; clients use JWT clientId, not profile header
+            if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
+                tool_manager.set_auth_token(token, profile_id)
+            else:
+                tool_manager.set_auth_token(token)
+            logger.info(f"🔍 Debug: set auth token, profile_id={getattr(tool_manager, 'profile_id', None)}")
         except Exception:
             # Non-fatal; tool calls will fail clearly if required
             pass
 
-    # Set profile id explicitly if provided
+    # Set profile id explicitly only for practitioner contexts (avoid client-* IDs)
     profile_id = message_data.get("profile_id") or message_data.get("profileId")
-    if profile_id:
+    if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
         logger.info(f"🔍 Debug: explicitly setting profile_id={profile_id}")
         try:
             tool_manager.set_profile_id(profile_id)
         except Exception:
             pass
+    elif profile_id and isinstance(profile_id, str) and profile_id.startswith("client-"):
+        logger.info("🔍 Debug: skipping explicit profile_id set for client context")
 
     # Attach page context derived from latest UI state for this session
     ui_state = ui_states.get(session_id) or {}
@@ -257,14 +278,26 @@ async def health_check():
     }
 
 @app.post("/sessions", response_model=SessionResponse)
-async def create_session(request: CreateSessionRequest):
+async def create_session(request: CreateSessionRequest, authorization: str = Header(None), profileid: str = Header(None)):
     try:
+        logger.info(f"🔐 Received headers - Authorization: {authorization[:20] + '...' if authorization else 'None'}, ProfileID: {profileid}")
+        
+        # Extract auth token from Authorization header
+        auth_token = None
+        if authorization and authorization.startswith("Bearer "):
+            auth_token = authorization[7:]  # Remove "Bearer " prefix
+        
+        # Use profileid from header if not provided in request
+        profile_id = request.profile_id or profileid
+        
+        logger.info(f"Creating session with auth_token: {bool(auth_token)}, profile_id: {profile_id}")
+        
         # Create persisted session
         session_id = await session_manager.create_session(
             persona_type=request.persona_type,
             context=request.context or {},
-            auth_token=None,
-            profile_id=request.profile_id,
+            auth_token=auth_token,
+            profile_id=profile_id,
         )
         created_at = datetime.now(timezone.utc).isoformat()
         logger.info(f"Session created: {session_id} for persona {request.persona_type}")
@@ -310,7 +343,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     logger.warning(f"Failed to persist UI state via manager: {e}")
                 logger.info(f"Updated UI state for session {session_id}")
                 # Proactively set tool context if available
-                _ensure_tools_context(session_id, message_data)
+                await _ensure_tools_context(session_id, message_data)
                 continue
             
             message = message_data.get("message", "")
@@ -327,7 +360,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             
             try:
                 # Ensure tools have context (auth/page/profile) before handling
-                _ensure_tools_context(session_id, message_data)
+                await _ensure_tools_context(session_id, message_data)
 
                 # Build context for pipeline
                 ui_state = ui_states.get(session_id) or {}
@@ -540,7 +573,7 @@ async def send_streaming_response(websocket: WebSocket, session_id: str, respons
     }))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8001))
     host = os.environ.get("HOST", "0.0.0.0")
     
     logger.info(f"Starting Haystack Service on {host}:{port}")
