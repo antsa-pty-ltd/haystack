@@ -18,7 +18,7 @@ import uvicorn
 from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
-from pipeline_manager import PipelineManager
+from haystack_pipeline import HaystackPipelineManager
 from personas import PersonaType
 from session_manager import session_manager
 
@@ -54,8 +54,8 @@ def load_templates_safely():
 # Try to load tools
 tool_manager = load_templates_safely()
 
-# Pipeline manager for tool-enabled conversations with history
-pipeline_manager = PipelineManager()
+# Pipeline manager for tool-enabled conversations with history using Haystack
+pipeline_manager = HaystackPipelineManager()
 
 # Create FastAPI app
 app = FastAPI(
@@ -214,9 +214,9 @@ def _build_page_context_from_ui_state(ui_state: Dict[str, Any]) -> Dict[str, Any
     if isinstance(ui_state.get("selectedTemplate"), dict):
         capabilities.append("set_selected_template")
 
-    # If on sessions page, enable client/session actions
+    # If on sessions page, enable client/session actions AND template selection
     if is_sessions_page:
-        capabilities.extend(["set_client_selection", "load_session_direct", "load_multiple_sessions"]) 
+        capabilities.extend(["set_client_selection", "load_session_direct", "load_multiple_sessions", "set_selected_template"]) 
 
     # Default page type if still unknown
     if not page_type:
@@ -417,9 +417,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     persona_enum = PersonaType.WEB_ASSISTANT
                 auth_token = message_data.get("auth_token") or message_data.get("token") or ui_state_manager.get_auth_token(session_id)
 
-                # Stream via pipeline manager (tool-enabled, history-aware)
+                # Stream via Haystack pipeline manager (tool-enabled, history-aware)
                 full_content = ""
-                async for out_chunk in pipeline_manager.generate_response(
+                async for out_chunk in pipeline_manager.generate_response_with_chaining(
                     session_id=session_id,
                     persona_type=persona_enum,
                     user_message=message,
@@ -446,14 +446,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Deliver any collected UI actions to the frontend
                 try:
                     ui_actions = pipeline_manager.pop_ui_actions()
+                    logger.info(f"🎯 [WEBSOCKET] Retrieved {len(ui_actions)} UI actions from pipeline")
                     for action in ui_actions:
+                        logger.info(f"🎯 [WEBSOCKET] Sending UI action to frontend: {action}")
                         await websocket.send_text(json.dumps({
                             "type": "ui_action",
                             "action": action,
                             "session_id": session_id
                         }))
+                        logger.info(f"🎯 [WEBSOCKET] UI action sent successfully")
                 except Exception as e:
-                    logger.warning(f"Failed to deliver UI actions: {e}")
+                    logger.error(f"🚨 [WEBSOCKET] Failed to deliver UI actions: {e}")
 
                 # Signal completion to the UI
                 await websocket.send_text(json.dumps({

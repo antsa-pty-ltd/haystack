@@ -7,8 +7,8 @@ websockets==13.1
 pydantic==2.10.3
 pydantic-settings==2.6.1
 
-# AI/ML dependencies - Direct OpenAI
-openai==1.57.2
+# AI/ML dependencies - Direct OpenAI (compatible with haystack-ai 2.17.1)
+openai>=1.106.1
 
 # Auth / JWT
 PyJWT==2.10.1
@@ -18,3 +18,5 @@ redis==5.2.0
 
 # General utilities
 python-multipart==0.0.12
+
+haystack-ai==2.17.1

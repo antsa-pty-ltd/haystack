@@ -803,6 +803,28 @@ class ToolManager:
                 "implementation": self._set_selected_template
             },
 
+            # Composite helper: find template by name and select it
+            "select_template_by_name": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "select_template_by_name",
+                        "description": "Find a template by name (case-insensitive, partial match allowed) and set it as the active template in the UI.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "template_name": {
+                                    "type": "string",
+                                    "description": "The name (or partial name) of the template to select. For example: 'Session Notes' or 'session notes'."
+                                }
+                            },
+                            "required": ["template_name"]
+                        }
+                    }
+                },
+                "implementation": self._select_template_by_name
+            },
+
             # Generate document from loaded sessions and a template
             "generate_document_from_loaded": {
                 "definition": {
@@ -1151,6 +1173,7 @@ class ToolManager:
                 self.tools["analyze_loaded_session"]["definition"],
                 self.tools["get_templates"]["definition"],
                 self.tools["set_selected_template"]["definition"],
+                self.tools["select_template_by_name"]["definition"],
                 self.tools["check_document_readiness"]["definition"],
                 self.tools["generate_document_from_loaded"]["definition"],
                 self.tools["generate_document_auto"]["definition"],
@@ -1164,6 +1187,12 @@ class ToolManager:
                 self.tools["breathing_exercise"]["definition"],
                 self.tools["get_client_mood_profile"]["definition"],
                 self.tools["get_user_profile"]["definition"]
+            ]
+        elif persona_type == "transcriber_agent":
+            # Single capability: generate document using currently loaded sessions and selected template
+            return [
+                self.tools["check_document_readiness"]["definition"],
+                self.tools["generate_document_auto"]["definition"]
             ]
         else:
             return []
@@ -1198,6 +1227,7 @@ class ToolManager:
                 "analyze_loaded_session": self.tools["analyze_loaded_session"]["implementation"],
                 "get_templates": self.tools["get_templates"]["implementation"],
                 "set_selected_template": self.tools["set_selected_template"]["implementation"],
+                "select_template_by_name": self.tools["select_template_by_name"]["implementation"],
                 "check_document_readiness": self.tools["check_document_readiness"]["implementation"],
                 "generate_document_from_loaded": self.tools["generate_document_from_loaded"]["implementation"],
                 "generate_document_auto": self.tools["generate_document_auto"]["implementation"],
@@ -1211,6 +1241,12 @@ class ToolManager:
                 "breathing_exercise": self.tools["breathing_exercise"]["implementation"],
                 "get_client_mood_profile": self.tools["get_client_mood_profile"]["implementation"],
                 "get_user_profile": self.tools["get_user_profile"]["implementation"]
+            }
+        elif persona_type == "transcriber_agent":
+            # Map only the document generation related tools
+            return {
+                "check_document_readiness": self.tools["check_document_readiness"]["implementation"],
+                "generate_document_auto": self.tools["generate_document_auto"]["implementation"]
             }
         else:
             return {}
@@ -1723,12 +1759,17 @@ class ToolManager:
     async def _set_selected_template(self, template_id: str, template_name: str, template_content: str, template_description: str = "", page_context: dict = None) -> Dict[str, Any]:
         """Set the active template in the UI for document generation"""
         try:
-            logger.info(f"📋 set_selected_template called: {template_name} (ID: {template_id})")
+            logger.info(f"🎯 [BACKEND] set_selected_template called: {template_name} (ID: {template_id})")
+            logger.info(f"🎯 [BACKEND] Template content length: {len(template_content)} chars")
+            logger.info(f"🎯 [BACKEND] Page context: {page_context}")
+            
             if page_context:
                 page_type = page_context.get('page_type', 'unknown')
                 available_capabilities = page_context.get('capabilities', [])
+                logger.info(f"🎯 [BACKEND] Page type: {page_type}, Available capabilities: {available_capabilities}")
+                
                 if 'set_selected_template' not in available_capabilities and page_type != 'unknown':
-                    logger.info(f"🚫 Blocking set_selected_template on page '{page_type}', suggesting navigation instead")
+                    logger.info(f"🚫 [BACKEND] Blocking set_selected_template on page '{page_type}', suggesting navigation instead")
                     sessions_url = "/live-transcribe"
                     return {
                         "template_id": template_id,
@@ -1742,30 +1783,77 @@ class ToolManager:
                         },
                         "instructions": f"Once you're on the Sessions page, ask me again to select the {template_name} template and I'll be able to help!"
                     }
-            return {
+            
+            ui_action_payload = {
+                "templateId": template_id,
+                "templateName": template_name,
+                "templateContent": template_content,
+                "templateDescription": template_description
+            }
+            
+            logger.info(f"🎯 [BACKEND] Creating UI action with payload: {ui_action_payload}")
+            
+            result = {
                 "template_id": template_id,
                 "template_name": template_name,
                 "ui_action": {
                     "type": "set_selected_template",
                     "target": "live_transcribe_page",
-                    "payload": {
-                        "templateId": template_id,
-                        "templateName": template_name,
-                        "templateContent": template_content,
-                        "templateDescription": template_description
-                    }
+                    "payload": ui_action_payload
                 },
                 "status": "ui_action_requested",
                 "user_message": f"Selected template '{template_name}' for document generation. You can now generate documents using this template."
             }
+            
+            logger.info(f"🎯 [BACKEND] Returning result: {result}")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error in set_selected_template: {e}")
+            logger.error(f"🚨 [BACKEND] Error in set_selected_template: {e}")
             return {
                 "template_id": template_id,
                 "template_name": template_name,
                 "error": f"Failed to set selected template: {str(e)}",
                 "status": "error"
             }
+
+    async def _select_template_by_name(self, template_name: str) -> Dict[str, Any]:
+        """Find a template by name (partial/case-insensitive) and select it via UI action."""
+        try:
+            logger.info(f"🎯 [BACKEND] select_template_by_name called: '{template_name}'")
+            # Fetch templates
+            templates_result = await self._get_templates()
+            templates = templates_result.get("templates", [])
+            if not templates:
+                return {"status": "error", "error": "No templates available"}
+
+            # Simple matching: case-insensitive, prefer exact, then startswith, then contains
+            norm_query = (template_name or "").strip().lower()
+            def rank(t):
+                name = (t.get("name") or "").lower()
+                if name == norm_query:
+                    return 0
+                if name.startswith(norm_query):
+                    return 1
+                if norm_query in name:
+                    return 2
+                return 3
+
+            best = sorted(templates, key=rank)[0]
+            if rank(best) == 3:
+                return {"status": "error", "error": f"Template '{template_name}' not found"}
+
+            # Call existing setter to create the UI action
+            return await self._set_selected_template(
+                template_id=best.get("id"),
+                template_name=best.get("name"),
+                template_content=best.get("content", ""),
+                template_description=best.get("description", ""),
+                page_context=self.current_page_context or {}
+            )
+        except Exception as e:
+            logger.error(f"🚨 [BACKEND] Error in select_template_by_name: {e}")
+            return {"status": "error", "error": str(e)}
 
     async def _generate_document_from_loaded(self, template_content: str, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None, generation_instructions: str = None) -> Dict[str, Any]:
         """Generate a document in the UI using template content and loaded sessions"""

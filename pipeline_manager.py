@@ -421,13 +421,14 @@ class PipelineManager:
                                     # Check for UI actions in tool result
                                     if isinstance(result_data, dict) and result_data.get("ui_action"):
                                         ui_action_msg = result_data.get('user_message', 'Performing UI action...')
+                                        logger.info(f"🎯 [PIPELINE] Found UI action in tool result: {result_data.get('ui_action')}")
                                         # Only show UI action messages for web_assistant, not jaimee_therapist  
                                         if persona_type == PersonaType.WEB_ASSISTANT:
                                             yield f"\n[ui] {ui_action_msg}\n"
                                         # Store UI action(s) for WebSocket layer to handle
                                         if not hasattr(self, '_ui_actions'):
                                             self._ui_actions = []
-                                            print(f"🔍 DEBUG: Created _ui_actions list in pipeline_manager")
+                                            logger.info(f"🎯 [PIPELINE] Created _ui_actions list in pipeline_manager")
                                         
                                         # Handle both single UI action and array of UI actions
                                         ui_action_data = result_data["ui_action"]
@@ -435,13 +436,13 @@ class PipelineManager:
                                             # Multiple UI actions (e.g., from load_multiple_sessions)
                                             for action in ui_action_data:
                                                 self._ui_actions.append(action)
-                                                print(f"🔍 DEBUG: Added UI action to pipeline_manager: {action}")
-                                            print(f"🔍 DEBUG: Added {len(ui_action_data)} UI actions, total now: {len(self._ui_actions)}")
+                                                logger.info(f"🎯 [PIPELINE] Added UI action to pipeline_manager: {action}")
+                                            logger.info(f"🎯 [PIPELINE] Added {len(ui_action_data)} UI actions, total now: {len(self._ui_actions)}")
                                         else:
                                             # Single UI action (e.g., from load_session_direct)
                                             self._ui_actions.append(ui_action_data)
-                                            print(f"🔍 DEBUG: Added UI action to pipeline_manager: {ui_action_data}")
-                                            print(f"🔍 DEBUG: Total UI actions now: {len(self._ui_actions)}")
+                                            logger.info(f"🎯 [PIPELINE] Added UI action to pipeline_manager: {ui_action_data}")
+                                            logger.info(f"🎯 [PIPELINE] Total UI actions now: {len(self._ui_actions)}")
                                     
                                     quick_feedback = ""
                                     if tool_name == "search_clients" and isinstance(result_data, list) and len(result_data) > 0:
