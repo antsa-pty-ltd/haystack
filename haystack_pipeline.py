@@ -89,40 +89,46 @@ class HaystackPipelineManager:
         self.pipelines["basic"] = basic_pipeline
     
     def _create_multi_tool_pipeline(self):
-        """Create a simplified multi-tool pipeline"""
-        # For now, use the basic pipeline approach but allow multiple iterations
-        # This is simpler and more reliable than complex routing
-        routes = [
-            {
-                "condition": "{{replies[0].tool_calls | length > 0}}",
-                "output": "{{replies}}",
-                "output_name": "tool_calls_present",
-                "output_type": List[ChatMessage],
-            },
-            {
-                "condition": "{{replies[0].tool_calls | length == 0}}",
-                "output": "{{replies}}",
-                "output_name": "final_response",
-                "output_type": List[ChatMessage],
-            },
-        ]
-        
+        """Create a simplified tool-enabled pipeline for iterative execution"""
+        # Single pipeline that we'll run iteratively for tool chaining
         multi_pipeline = Pipeline()
+        
+        # Chat generator with tool support
         multi_pipeline.add_component("generator", OpenAIChatGenerator(
             model="gpt-4o-mini",
-            api_key=Secret.from_token(settings.openai_api_key)
+            api_key=Secret.from_token(settings.openai_api_key),
         ))
-        multi_pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
+        
+        # Tool invoker for when tools are called
         multi_pipeline.add_component("tool_invoker", ToolInvoker(
             tools=self._convert_tools_to_haystack(),
             raise_on_failure=False
         ))
         
-        # Simple connection: generator -> router -> tool_invoker
+        # Simple routing: if generator has tool calls, invoke them
+        routes = [
+            {
+                "condition": "{{replies and replies[0].tool_calls | length > 0}}",
+                "output": "{{replies}}",
+                "output_name": "has_tool_calls",
+                "output_type": List[ChatMessage],
+            },
+            {
+                "condition": "{{not replies or replies[0].tool_calls | length == 0}}",
+                "output": "{{replies}}",
+                "output_name": "no_tool_calls",
+                "output_type": List[ChatMessage],
+            },
+        ]
+        
+        multi_pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
+        
+        # Connect components
         multi_pipeline.connect("generator.replies", "router")
-        multi_pipeline.connect("router.tool_calls_present", "tool_invoker")
+        multi_pipeline.connect("router.has_tool_calls", "tool_invoker")
         
         self.pipelines["multi_tool"] = multi_pipeline
+        logger.info("Created simplified multi-tool pipeline")
     
     def _get_openai_tools(self) -> List[Dict[str, Any]]:
         """Get OpenAI function definitions from tool manager"""
@@ -132,7 +138,7 @@ class HaystackPipelineManager:
         return persona_config.tools if persona_config.tools else []
 
     def _convert_tools_to_haystack(self) -> List[Tool]:
-        """Convert tool_manager tools into Haystack Tool objects (sync wrappers)."""
+        """Convert tool_manager tools into Haystack Tool objects with proper async handling."""
         haystack_tools: List[Tool] = []
 
         try:
@@ -157,13 +163,17 @@ class HaystackPipelineManager:
 
                 def _make_sync(tool_name: str):
                     def _sync_tool(**kwargs):
-                        import asyncio as _asyncio
+                        import asyncio
+                        import concurrent.futures
                         try:
-                            return _asyncio.run(tool_manager.execute_tool(tool_name, kwargs))
-                        except RuntimeError:
-                            # If we're already in an event loop, run in a new thread loop
-                            return _asyncio.get_event_loop().run_until_complete(tool_manager.execute_tool(tool_name, kwargs))
+                            # Simple approach: always use thread pool to avoid event loop issues
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(
+                                    lambda: asyncio.run(tool_manager.execute_tool(tool_name, kwargs))
+                                )
+                                return future.result(timeout=30)
                         except Exception as e:
+                            logger.error(f"Tool execution error for {tool_name}: {e}")
                             return {"success": False, "error": str(e)}
                     return _sync_tool
 
@@ -175,10 +185,135 @@ class HaystackPipelineManager:
                         function=_make_sync(tool_name),
                     )
                 )
+                logger.debug(f"Converted tool {tool_name} to Haystack format")
         except Exception as e:
             logger.warning(f"Failed to convert tools to Haystack format: {e}")
 
         return haystack_tools
+    
+    def _convert_to_haystack_messages(self, messages: List[Any], system_prompt: str) -> List[ChatMessage]:
+        """Convert session messages to Haystack ChatMessage format"""
+        haystack_messages = []
+        
+        # Add system message first
+        if system_prompt:
+            haystack_messages.append(ChatMessage.from_system(system_prompt))
+        
+        # Convert conversation history
+        for msg in messages:
+            if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                role = msg.role
+                content = msg.content
+            elif isinstance(msg, dict):
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+            else:
+                continue
+                
+            if role == 'user':
+                haystack_messages.append(ChatMessage.from_user(content))
+            elif role == 'assistant':
+                haystack_messages.append(ChatMessage.from_assistant(content))
+            elif role == 'system':
+                # Skip additional system messages to avoid conflicts
+                continue
+        
+        return haystack_messages
+    
+    def _extract_text_from_message(self, message: Any) -> Optional[str]:
+        """Best-effort extraction of text from a Haystack ChatMessage."""
+        try:
+            # 1) Direct string content
+            if hasattr(message, "content") and isinstance(getattr(message, "content"), str):
+                text = getattr(message, "content").strip()
+                return text if text else None
+
+            # 2) content as list of blocks
+            if hasattr(message, "content") and isinstance(getattr(message, "content"), list):
+                parts = []
+                for block in getattr(message, "content"):
+                    if hasattr(block, "text") and isinstance(block.text, str):
+                        parts.append(block.text)
+                    elif isinstance(block, str):
+                        parts.append(block)
+                joined = "\n".join([p for p in parts if isinstance(p, str) and p.strip()])
+                return joined.strip() if joined else None
+
+            # 3) private _content list
+            if hasattr(message, "_content") and isinstance(getattr(message, "_content"), list):
+                parts = []
+                for block in getattr(message, "_content"):
+                    if hasattr(block, "text") and isinstance(block.text, str):
+                        parts.append(block.text)
+                    elif isinstance(block, str):
+                        parts.append(block)
+                joined = "\n".join([p for p in parts if isinstance(p, str) and p.strip()])
+                return joined.strip() if joined else None
+
+            # 4) direct .text attribute
+            if hasattr(message, "text") and isinstance(getattr(message, "text"), str):
+                text = getattr(message, "text").strip()
+                return text if text else None
+        except Exception:
+            pass
+        return None
+
+    def _collect_ui_actions(self, pipeline_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract UI actions from pipeline results"""
+        ui_actions = []
+        
+        # Check tool invoker results for UI actions
+        if "tool_invoker" in pipeline_result:
+            tool_results = pipeline_result["tool_invoker"].get("tool_messages", [])
+            for tool_msg in tool_results:
+                if hasattr(tool_msg, 'content'):
+                    try:
+                        content = json.loads(tool_msg.content) if isinstance(tool_msg.content, str) else tool_msg.content
+                        if isinstance(content, dict) and content.get("ui_action"):
+                            ui_action_data = content["ui_action"]
+                            if isinstance(ui_action_data, list):
+                                ui_actions.extend(ui_action_data)
+                            else:
+                                ui_actions.append(ui_action_data)
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+        
+        return ui_actions
+    
+    async def _update_session_context_from_tools(self, session_id: str, tool_messages: List[Any]) -> None:
+        """Update session context based on tool execution results"""
+        try:
+            for tool_msg in tool_messages:
+                if not hasattr(tool_msg, 'content'):
+                    continue
+                    
+                try:
+                    content = json.loads(tool_msg.content) if isinstance(tool_msg.content, str) else tool_msg.content
+                    if not isinstance(content, dict):
+                        continue
+                    
+                    # Extract context updates based on tool results
+                    if content.get("template_name"):
+                        await session_manager.update_session_context(session_id, {
+                            "last_selected_template": content["template_name"]
+                        })
+                    
+                    if content.get("loaded_sessions"):
+                        await session_manager.update_session_context(session_id, {
+                            "last_loaded_sessions": content["loaded_sessions"]
+                        })
+                    
+                    if content.get("documents") or content.get("generated_documents"):
+                        documents = content.get("documents") or content.get("generated_documents")
+                        await session_manager.update_session_context(session_id, {
+                            "last_generated_documents": documents
+                        })
+                        
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                    
+        except Exception as e:
+            logger.warning(f"Failed to update session context from tools: {e}")
     
     async def generate_response_with_chaining(
         self,
@@ -190,9 +325,13 @@ class HaystackPipelineManager:
         pipeline_type: str = "multi_tool"
     ) -> AsyncGenerator[str, None]:
         """
-        Generate response using Haystack for chat generation with manual tool chaining
+        Generate response using Haystack pipeline for proper agent behavior with tool chaining
         """
         try:
+            # Initialize pipeline if needed
+            if not self._initialized:
+                await self.initialize()
+            
             # Get session and prepare messages
             session = await session_manager.get_session(session_id)
             if not session:
@@ -269,19 +408,8 @@ class HaystackPipelineManager:
                 tool_manager.set_page_context(page_context)
                 logger.info(f"📄 Haystack Pipeline: Set page context - {page_display_name} ({page_type})")
             
-            # Build OpenAI messages for streaming with tool support
-            from openai import AsyncOpenAI
-            openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-
-            openai_messages = [{"role": "system", "content": system_prompt}]
-            for msg in messages[:-1]:
-                openai_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
-            openai_messages.append({"role": "user", "content": user_message})
-
-            # Inject lightweight internal context memory to help resolve pronouns like "them" or "those"
+            # Add context memory for session continuity
+            enhanced_system_prompt = system_prompt
             try:
                 sess_ctx = session.context or {}
                 memory_parts: List[str] = []
@@ -307,177 +435,107 @@ class HaystackPipelineManager:
                     except Exception:
                         pass
                 if memory_parts:
-                    openai_messages.append({"role": "assistant", "content": "[Internal Context] " + " | ".join(memory_parts)})
+                    enhanced_system_prompt += f"\n\n[Session Context] {' | '.join(memory_parts)}"
             except Exception:
                 pass
 
-            # Stream with tool-use support; yield chunks as they arrive
+            # Convert to Haystack messages
+            haystack_messages = self._convert_to_haystack_messages(messages, enhanced_system_prompt)
+            
+            # Get the appropriate pipeline
+            pipeline = self.pipelines.get(pipeline_type, self.pipelines.get("multi_tool"))
+            if not pipeline:
+                logger.error(f"Pipeline {pipeline_type} not found, falling back to basic pipeline")
+                pipeline = self.pipelines.get("basic")
+            
+            if not pipeline:
+                raise Exception("No pipelines available")
+            
+            logger.info(f"🤖 Using Haystack pipeline: {pipeline_type}")
+            
+            # Initialize response tracking
             full_response = ""
-            max_iterations = 6
-            iterations = 0
+            self._ui_actions = []  # Reset UI actions for this run
+            
+            # Doc-aligned agent loop: OpenAIChatGenerator + ToolInvoker
+            max_iterations = 4
+            current_messages = haystack_messages.copy()
+            
+            # Prepare Haystack tools and components
+            haystack_tools = self._convert_tools_to_haystack()
+            chat_generator = OpenAIChatGenerator(
+                model=persona_config.model,
+                tools=haystack_tools
+            ) if haystack_tools else OpenAIChatGenerator(model=persona_config.model)
+            tool_invoker = ToolInvoker(tools=haystack_tools) if haystack_tools else ToolInvoker(tools=[])
 
-            base_params = {
-                "model": persona_config.model,
-                "temperature": persona_config.temperature,
-                "max_tokens": persona_config.max_tokens,
-            }
-            if persona_config.tools:
-                base_params["tools"] = persona_config.tools
-                base_params["tool_choice"] = "auto"
+            for iteration in range(max_iterations):
+                logger.info(f"🔄 Agent loop iteration {iteration + 1}/{max_iterations}")
+                try:
+                    gen_out = chat_generator.run(messages=current_messages)
+                    replies = gen_out.get("replies") or []
+                    if not replies:
+                        logger.warning("Generator returned no replies")
+                        break
 
-            while iterations < max_iterations:
-                iterations += 1
-                stream = await openai_client.chat.completions.create(
-                    messages=openai_messages,
-                    stream=True,
-                    **base_params
-                )
+                    # If tool calls are present, execute tools and continue
+                    if getattr(replies[0], "tool_calls", None):
+                        if persona_type == PersonaType.WEB_ASSISTANT:
+                            msg = f"\n\n[tools] Detected {len(replies[0].tool_calls)} tool call(s)...\n\n"
+                            full_response += msg
+                            yield msg
 
-                message_content = ""
-                tool_calls = []
+                        # Execute tools
+                        inv_out = tool_invoker.run(messages=replies)
+                        tool_messages = inv_out.get("tool_messages") or []
 
-                async for chunk in stream:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        message_content += delta.content
-                        yield delta.content
-                    if delta.tool_calls:
-                        for tool_call in delta.tool_calls:
-                            if len(tool_calls) <= tool_call.index:
-                                tool_calls.extend([None] * (tool_call.index + 1 - len(tool_calls)))
-                            if tool_calls[tool_call.index] is None:
-                                tool_calls[tool_call.index] = {
-                                    "id": tool_call.id,
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""}
-                                }
-                            if tool_call.function.name:
-                                tool_calls[tool_call.index]["function"]["name"] = tool_call.function.name
-                            if tool_call.function.arguments:
-                                tool_calls[tool_call.index]["function"]["arguments"] += tool_call.function.arguments
-
-                # Create message-like object from streamed content
-                class _Msg:
-                    def __init__(self, content, tool_calls):
-                        self.content = content
-                        self.tool_calls = [type('TC', (), {
-                            'id': tc["id"],
-                            'function': type('FN', (), {
-                                'name': tc["function"]["name"],
-                                'arguments': tc["function"]["arguments"]
-                            })()
-                        }) for tc in (tool_calls or [])]
-
-                message = _Msg(message_content, tool_calls if any(tool_calls) else None)
-
-                if getattr(message, "tool_calls", None):
-                    # Append assistant with tool_calls
-                    openai_messages.append({
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments or "{}",
-                                },
-                            }
-                            for tc in message.tool_calls
-                        ],
-                    })
-
-                    # Execute tools and feed results back
-                    for tc in message.tool_calls:
-                        tool_name = tc.function.name
+                        # Collect UI actions if any
                         try:
-                            args_text = tc.function.arguments or "{}"
-                            try:
-                                arguments = json.loads(args_text)
-                            except Exception:
-                                arguments = {}
-
-                            if persona_type == PersonaType.WEB_ASSISTANT:
-                                executing_msg = f"\n\n[tool] {tool_name} executing...\n\n"
-                                full_response += executing_msg
-                                yield executing_msg
-
-                            # Inject generation_instructions from the user's last message when creating docs
-                            if tool_name in {"generate_document_auto", "generate_document_from_loaded"}:
-                                if isinstance(user_message, str) and not arguments.get("generation_instructions"):
-                                    arguments["generation_instructions"] = user_message
-
-                            tool_result = await tool_manager.execute_tool(tool_name, arguments)
-                            result_data = tool_result.get("result") if tool_result.get("success") else None
-                            has_embedded_error = isinstance(result_data, dict) and bool(result_data.get("error"))
-
-                            if tool_result.get("success") and not has_embedded_error:
-                                if isinstance(result_data, dict) and result_data.get("ui_action"):
-                                    ui_action_msg = result_data.get('user_message', 'Performing UI action...')
-                                    if persona_type == PersonaType.WEB_ASSISTANT:
-                                        yield f"\n[ui] {ui_action_msg}\n"
-                                    if not hasattr(self, '_ui_actions'):
-                                        self._ui_actions = []
-                                    ui_action_data = result_data["ui_action"]
-                                    if isinstance(ui_action_data, list):
-                                        for action in ui_action_data:
-                                            self._ui_actions.append(action)
-                                    else:
-                                        self._ui_actions.append(ui_action_data)
-
+                            fake_pipeline_result = {"tool_invoker": {"tool_messages": tool_messages}}
+                            ui_actions = self._collect_ui_actions(fake_pipeline_result)
+                            if ui_actions:
+                                self._ui_actions.extend(ui_actions)
                                 if persona_type == PersonaType.WEB_ASSISTANT:
-                                    executed_msg = f"\n[tool] {tool_name} executed - Completed successfully\n\n"
-                                    full_response += executed_msg
-                                    yield executed_msg
+                                    ui_msg = f"\n[ui] Found {len(ui_actions)} UI action(s)\n"
+                                    full_response += ui_msg
+                                    yield ui_msg
+                        except Exception:
+                            pass
 
-                                tool_content = json.dumps(result_data, ensure_ascii=False)
-                                # Persist key tool outputs into session context for cross-turn memory
-                                try:
-                                    if tool_name == "select_template_by_name":
-                                        selected = result_data.get("template_name") or arguments.get("template_name")
-                                        if isinstance(selected, str) and selected:
-                                            await session_manager.update_session_context(session_id, {"last_selected_template": selected})
-                                    elif tool_name in {"load_multiple_sessions", "get_loaded_sessions"}:
-                                        loaded_sessions = result_data.get("loaded_sessions") or result_data.get("sessions")
-                                        if isinstance(loaded_sessions, list) and loaded_sessions:
-                                            await session_manager.update_session_context(session_id, {"last_loaded_sessions": loaded_sessions})
-                                    elif tool_name == "get_generated_documents":
-                                        documents = result_data.get("documents") or result_data.get("generated_documents") or result_data
-                                        if isinstance(documents, list) and documents:
-                                            await session_manager.update_session_context(session_id, {"last_generated_documents": documents})
-                                except Exception:
-                                    pass
-                            else:
-                                embedded_error = result_data.get('error') if isinstance(result_data, dict) else None
-                                error_text = tool_result.get('error') or embedded_error or 'Failed'
-                                if persona_type == PersonaType.WEB_ASSISTANT:
-                                    error_msg = f"\n[tool] {tool_name} executed [error] {error_text}\n\n"
-                                    full_response += error_msg
-                                    yield error_msg
-                                tool_content = json.dumps({"error": tool_result.get("error", "Failed")}, ensure_ascii=False)
+                        # Update session context based on tool results
+                        await self._update_session_context_from_tools(session_id, tool_messages)
 
-                            openai_messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": tool_content,
-                            })
-                        except Exception as e:
-                            error_msg = f"\n\n[error] Tool execution error: {str(e)}"
-                            full_response += error_msg
-                            yield error_msg
-                    continue
+                        # Add replies and tool messages back to the conversation and iterate again
+                        current_messages.extend(replies)
+                        current_messages.extend(tool_messages)
+                        if persona_type == PersonaType.WEB_ASSISTANT:
+                            done_msg = f"\n[tools] Completed tool execution\n\n"
+                            full_response += done_msg
+                            yield done_msg
+                        continue
 
-                # No tool calls: finalize
-                if message.content:
-                    full_response += message.content
-                break
+                    # No tools requested: stream final reply
+                    final_message = replies[-1]
+                    content = self._extract_text_from_message(final_message)
+                    if content:
+                        for i, word in enumerate(content.split(" ")):
+                            chunk = word if i == 0 else f" {word}"
+                            full_response += chunk
+                            yield chunk
+                            await asyncio.sleep(0.01)
+                    break
+                except Exception as e:
+                    logger.error(f"Error in agent loop iteration {iteration + 1}: {e}")
+                    error_msg = f"\n\n[error] Agent loop failed: {str(e)}"
+                    full_response += error_msg
+                    yield error_msg
+                    break
 
             # Save assistant message
             if full_response.strip():
                 await session_manager.add_message(session_id, "assistant", full_response)
+            
+            logger.info(f"✅ Haystack pipeline completed. Response length: {len(full_response)}, UI actions: {len(self._ui_actions)}")
                     
         except Exception as e:
             logger.error(f"Error in Haystack pipeline response generation: {e}")
