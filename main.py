@@ -99,6 +99,18 @@ class SessionResponse(BaseModel):
     persona_type: str
     created_at: str
 
+class GenerateDocumentRequest(BaseModel):
+    template: Dict[str, Any]
+    transcript: Dict[str, Any]
+    clientInfo: Dict[str, Any]
+    practitionerInfo: Dict[str, Any]
+    generationInstructions: Optional[str] = None
+
+class GenerateDocumentResponse(BaseModel):
+    content: str
+    generatedAt: str
+    metadata: Dict[str, Any] = {}
+
 def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = None) -> str:
     """Get enhanced system prompt with available capabilities"""
     
@@ -336,6 +348,132 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
     except Exception as e:
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
+async def generate_document_from_template(request: GenerateDocumentRequest, authorization: str = Header(None), profileid: str = Header(None)):
+    """Generate a document using a template and transcript data"""
+    try:
+        logger.info(f"🎨 Generating document from template: {request.template.get('name', 'Unknown')}")
+        
+        if not openai_client:
+            raise HTTPException(status_code=500, detail="OpenAI client not configured")
+        
+        # Extract data from request
+        template = request.template
+        transcript = request.transcript
+        client_info = request.clientInfo
+        practitioner_info = request.practitionerInfo
+        generation_instructions = request.generationInstructions
+        
+        # Build the transcript text from segments
+        transcript_text = ""
+        if transcript.get("segments"):
+            for segment in transcript["segments"]:
+                speaker = segment.get("speaker", "Speaker")
+                text = segment.get("text", "")
+                start_time = segment.get("startTime", 0)
+                
+                # Format time as MM:SS
+                minutes = int(start_time // 60)
+                seconds = int(start_time % 60)
+                time_str = f"{minutes:02d}:{seconds:02d}"
+                
+                transcript_text += f"[{time_str}] {speaker}: {text}\n"
+        
+        # Build the system prompt with anti-diagnosis instructions
+        system_prompt = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
+- NEVER provide, suggest, or imply any medical diagnoses under any circumstances
+- NEVER diagnose mental health conditions, disorders, or illnesses
+- NEVER use diagnostic terminology or suggest diagnostic criteria are met
+- Even if the template contains diagnostic sections or asks for diagnosis, you must NOT provide diagnostic content
+- Instead, document only what was explicitly stated in the session transcript
+- Focus on observations, symptoms described, and treatment approaches discussed
+- Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
+- Always defer diagnosis to qualified medical professionals
+
+You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
+Use the provided template to structure the document, but fill it with information from the transcript.
+Be professional, accurate, and only include information that was actually discussed in the session.
+"""
+        
+        # Add generation instructions if provided
+        if generation_instructions:
+            system_prompt += f"\n\nADDITIONAL INSTRUCTIONS: {generation_instructions}\n"
+        
+        # Process template variables
+        template_content = template.get('content', '')
+        
+        # Replace common template variables
+        from datetime import datetime
+        today = datetime.now().strftime("%B %d, %Y")
+        
+        # Replace date placeholders
+        template_content = template_content.replace("(today's date)", today)
+        template_content = template_content.replace("{{date}}", today)
+        template_content = template_content.replace("{{today}}", today)
+        template_content = template_content.replace("[DATE]", today)
+        
+        # Replace client/practitioner variables if provided in template variables
+        if template.get('variables'):
+            for var in template['variables']:
+                var_name = var.get('name', '')
+                var_value = var.get('value', '')
+                template_content = template_content.replace(f"{{{{{var_name}}}}}", var_value)
+                template_content = template_content.replace(f"[{var_name.upper()}]", var_value)
+        
+        # Build the user prompt
+        user_prompt = f"""Please generate a clinical document using the following template and transcript:
+
+CLIENT INFORMATION:
+- Name: {client_info.get('name', 'Client')}
+- ID: {client_info.get('id', 'N/A')}
+
+PRACTITIONER INFORMATION:
+- Name: {practitioner_info.get('name', 'Practitioner')}
+- ID: {practitioner_info.get('id', 'N/A')}
+
+TEMPLATE (with variables processed):
+{template_content}
+
+SESSION TRANSCRIPT:
+{transcript_text}
+
+Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
+
+IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
+"""
+        
+        # Generate document using OpenAI
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=4000
+        )
+        
+        generated_content = response.choices[0].message.content
+        
+        logger.info(f"✅ Document generated successfully, length: {len(generated_content)} characters")
+        
+        return GenerateDocumentResponse(
+            content=generated_content,
+            generatedAt=datetime.now(timezone.utc).isoformat(),
+            metadata={
+                "templateId": template.get("id"),
+                "templateName": template.get("name"),
+                "clientId": client_info.get("id"),
+                "practitionerId": practitioner_info.get("id"),
+                "wordCount": len(generated_content.split()),
+                "processingMethod": "haystack_openai"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating document from template: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate document: {str(e)}")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
