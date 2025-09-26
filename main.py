@@ -472,6 +472,8 @@ Always personalize the document by using the actual client and practitioner name
         practitioner_name = practitioner_info.get('name', 'Practitioner')
         
         logger.info(f"🏷️ Document generation with names - Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        logger.info(f"🔍 Debug client_info received: {client_info}")
+        logger.info(f"🔍 Debug practitioner_info received: {practitioner_info}")
         
         
         user_prompt = f"""Please generate a clinical document using the following template and transcript:
@@ -520,6 +522,14 @@ FINAL REMINDER BEFORE YOU START WRITING:
 - Replace ALL instances of generic terms with these specific names
 - Check your output before finalizing to ensure you used the names correctly
 
+COMPREHENSIVE OUTPUT REQUIREMENTS:
+- Provide detailed, thorough responses for each section
+- Expand on observations with specific examples from the transcript
+- Include direct quotes when relevant to support your observations
+- Provide comprehensive analysis rather than brief bullet points
+- Aim for detailed, professional clinical documentation
+- Each section should be substantive and informative
+
 Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
 
 IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
@@ -533,7 +543,7 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.3,
-            max_tokens=6000  # Increased from 4000 to allow for more comprehensive documentation
+            max_tokens=12000  # Significantly increased from 6000 to allow for much more comprehensive documentation
         )
         
         generated_content = response.choices[0].message.content
