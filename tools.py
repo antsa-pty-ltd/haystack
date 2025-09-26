@@ -1893,6 +1893,12 @@ class ToolManager:
 - Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
 - Always defer diagnosis to qualified medical professionals
 
+PERSONALIZATION INSTRUCTIONS:
+- When referring to the person in this session, use their actual name from the session content instead of generic terms
+- Replace "the client", "client", "the patient", "patient", or "the individual" with their actual name
+- Use their full name for formal references and first name for casual mentions
+- Make the document feel personalized and human-centered by using their actual name throughout
+
 """
             
             if generation_instructions and isinstance(generation_instructions, str) and generation_instructions.strip():
