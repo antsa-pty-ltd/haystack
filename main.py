@@ -542,8 +542,8 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3,
-            max_tokens=12000  # Significantly increased from 6000 to allow for much more comprehensive documentation
+            temperature=0.3
+            # No max_tokens limit - let the LLM generate as comprehensive a document as needed
         )
         
         generated_content = response.choices[0].message.content
