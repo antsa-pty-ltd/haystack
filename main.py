@@ -403,7 +403,7 @@ async def generate_document_from_template(request: GenerateDocumentRequest, auth
                 
                 transcript_text += f"[{time_str}] {speaker}: {text}\n"
         
-        # Build the system prompt with anti-diagnosis instructions
+        # Build the system prompt with anti-diagnosis instructions and intervention focus
         system_prompt = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
 - NEVER provide, suggest, or imply any medical diagnoses under any circumstances
 - NEVER diagnose mental health conditions, disorders, or illnesses
@@ -414,9 +414,31 @@ async def generate_document_from_template(request: GenerateDocumentRequest, auth
 - Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
 - Always defer diagnosis to qualified medical professionals
 
+THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
+- Pay special attention to therapeutic strategies and interventions discussed by the practitioner
+- Accurately capture ALL therapeutic techniques mentioned (CBT, DBT, mindfulness, etc.) exactly as stated
+- Document homework assignments, coping strategies, and treatment plans precisely as discussed
+- Do NOT add, modify, or suggest interventions that were not explicitly mentioned in the transcript
+- Preserve the practitioner's exact therapeutic approach and language
+- If multiple sessions are included, track the evolution of therapeutic strategies over time
+- Prioritize documenting what the therapist actually said and did, not what you think they should have done
+- When documenting interventions, use direct quotes when possible to ensure accuracy
+- If the practitioner mentioned specific techniques or strategies, include those exact terms
+- Document any homework or between-session tasks exactly as assigned
+
+PERSONALIZATION REQUIREMENTS - CRITICAL:
+- NEVER use generic terms like "the client", "client", "the patient", "patient", "the individual", "the counselor", "the therapist", or "the practitioner"
+- ALWAYS use the actual names provided in the CLIENT INFORMATION and PRACTITIONER INFORMATION sections
+- Use the client's name when referring to them throughout the document
+- Use the practitioner's name when referring to therapeutic actions or interventions
+- Make the document personalized and human-centered by using actual names consistently
+- For formal references, use full names; for subsequent mentions, first names are acceptable
+
 You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
 Use the provided template to structure the document, but fill it with information from the transcript.
 Be professional, accurate, and only include information that was actually discussed in the session.
+Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
+Always personalize the document by using the actual client and practitioner names provided.
 """
         
         # Add generation instructions if provided
@@ -445,14 +467,18 @@ Be professional, accurate, and only include information that was actually discus
                 template_content = template_content.replace(f"[{var_name.upper()}]", var_value)
         
         # Build the user prompt
+        client_name = client_info.get('name', 'Client')
+        practitioner_name = practitioner_info.get('name', 'Practitioner')
+        
+        
         user_prompt = f"""Please generate a clinical document using the following template and transcript:
 
 CLIENT INFORMATION:
-- Name: {client_info.get('name', 'Client')}
+- Name: {client_name}
 - ID: {client_info.get('id', 'N/A')}
 
 PRACTITIONER INFORMATION:
-- Name: {practitioner_info.get('name', 'Practitioner')}
+- Name: {practitioner_name}
 - ID: {practitioner_info.get('id', 'N/A')}
 
 TEMPLATE (with variables processed):
@@ -461,20 +487,27 @@ TEMPLATE (with variables processed):
 SESSION TRANSCRIPT:
 {transcript_text}
 
+CRITICAL PERSONALIZATION REMINDER:
+- Throughout the document, refer to the client as "{client_name}" (NOT "the client", "client", "the patient", etc.)
+- Throughout the document, refer to the practitioner as "{practitioner_name}" (NOT "the counselor", "the therapist", etc.)
+- Use these exact names consistently throughout the entire document
+- Examples: "{client_name} expressed feeling overwhelmed..." instead of "The client expressed feeling overwhelmed..."
+- Examples: "{practitioner_name} suggested a collaborative approach..." instead of "The counselor suggested a collaborative approach..."
+
 Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
 
 IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
 """
         
-        # Generate document using OpenAI
+        # Generate document using OpenAI - upgraded to gpt-4o for better intervention analysis
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.3,
-            max_tokens=4000
+            max_tokens=6000  # Increased from 4000 to allow for more comprehensive documentation
         )
         
         generated_content = response.choices[0].message.content
