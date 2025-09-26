@@ -2,7 +2,7 @@
 set -euo pipefail
 
 export HOST=${HOST:-0.0.0.0}
-export PORT=${PORT:-8000}
+export PORT=${PORT:-8001}
 export VENV_DIR=${VENV_DIR:-"$PWD/antenv"}
 
 echo "[startup] Using Python: $(python --version 2>/dev/null || echo 'not found')"

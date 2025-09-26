@@ -165,16 +165,24 @@ class HaystackPipelineManager:
                     def _sync_tool(**kwargs):
                         import asyncio
                         import concurrent.futures
+                        import json
                         try:
                             # Simple approach: always use thread pool to avoid event loop issues
                             with concurrent.futures.ThreadPoolExecutor() as executor:
                                 future = executor.submit(
                                     lambda: asyncio.run(tool_manager.execute_tool(tool_name, kwargs))
                                 )
-                                return future.result(timeout=30)
+                                result = future.result(timeout=30)
+                                
+                                # CRITICAL: Haystack ToolInvoker expects the tool function to return a string
+                                # that will be used as the ChatMessage content. We need to return JSON string.
+                                if isinstance(result, dict):
+                                    return json.dumps(result, ensure_ascii=False)
+                                else:
+                                    return str(result)
                         except Exception as e:
                             logger.error(f"Tool execution error for {tool_name}: {e}")
-                            return {"success": False, "error": str(e)}
+                            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
                     return _sync_tool
 
                 haystack_tools.append(
@@ -224,9 +232,11 @@ class HaystackPipelineManager:
         """Best-effort extraction of text from a Haystack ChatMessage."""
         try:
             # 1) Direct string content
-            if hasattr(message, "content") and isinstance(getattr(message, "content"), str):
-                text = getattr(message, "content").strip()
-                return text if text else None
+            if hasattr(message, "content"):
+                content = getattr(message, "content")
+                if isinstance(content, str):
+                    text = content.strip()
+                    return text if text else None
 
             # 2) content as list of blocks
             if hasattr(message, "content") and isinstance(getattr(message, "content"), list):
@@ -239,23 +249,34 @@ class HaystackPipelineManager:
                 joined = "\n".join([p for p in parts if isinstance(p, str) and p.strip()])
                 return joined.strip() if joined else None
 
-            # 3) private _content list
-            if hasattr(message, "_content") and isinstance(getattr(message, "_content"), list):
-                parts = []
-                for block in getattr(message, "_content"):
-                    if hasattr(block, "text") and isinstance(block.text, str):
-                        parts.append(block.text)
-                    elif isinstance(block, str):
-                        parts.append(block)
-                joined = "\n".join([p for p in parts if isinstance(p, str) and p.strip()])
-                return joined.strip() if joined else None
+            # 3) private _content list (Haystack ToolCallResult handling)
+            if hasattr(message, "_content"):
+                _content = getattr(message, "_content")
+                if isinstance(_content, list):
+                    parts = []
+                    for block in _content:
+                        # Handle ToolCallResult objects from Haystack
+                        if hasattr(block, "result") and isinstance(block.result, str):
+                            return block.result  # This is the JSON string we need
+                        elif hasattr(block, "text") and isinstance(block.text, str):
+                            parts.append(block.text)
+                        elif isinstance(block, str):
+                            parts.append(block)
+                    
+                    # If we found text parts, join them
+                    if parts:
+                        joined = "\n".join([p for p in parts if isinstance(p, str) and p.strip()])
+                        return joined.strip() if joined else None
 
             # 4) direct .text attribute
-            if hasattr(message, "text") and isinstance(getattr(message, "text"), str):
-                text = getattr(message, "text").strip()
-                return text if text else None
-        except Exception:
-            pass
+            if hasattr(message, "text"):
+                text_attr = getattr(message, "text")
+                if isinstance(text_attr, str):
+                    text = text_attr.strip()
+                    return text if text else None
+                        
+        except Exception as e:
+            logger.warning(f"Error extracting text from message: {e}")
         return None
 
     def _collect_ui_actions(self, pipeline_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -265,19 +286,31 @@ class HaystackPipelineManager:
         # Check tool invoker results for UI actions
         if "tool_invoker" in pipeline_result:
             tool_results = pipeline_result["tool_invoker"].get("tool_messages", [])
-            for tool_msg in tool_results:
-                if hasattr(tool_msg, 'content'):
+            for i, tool_msg in enumerate(tool_results):
+                # Use the existing _extract_text_from_message method to get content from Haystack ChatMessage
+                content_text = self._extract_text_from_message(tool_msg)
+                
+                if content_text:
                     try:
-                        content = json.loads(tool_msg.content) if isinstance(tool_msg.content, str) else tool_msg.content
-                        if isinstance(content, dict) and content.get("ui_action"):
-                            ui_action_data = content["ui_action"]
-                            if isinstance(ui_action_data, list):
-                                ui_actions.extend(ui_action_data)
-                            else:
-                                ui_actions.append(ui_action_data)
-                    except (json.JSONDecodeError, AttributeError):
+                        content = json.loads(content_text)
+                        
+                        if isinstance(content, dict):
+                            # Check for ui_action directly in content
+                            ui_action_data = content.get("ui_action")
+                            
+                            # Also check for ui_action nested in result (from tool_manager wrapper)
+                            if not ui_action_data and content.get("result") and isinstance(content["result"], dict):
+                                ui_action_data = content["result"].get("ui_action")
+                            
+                            if ui_action_data:
+                                if isinstance(ui_action_data, list):
+                                    ui_actions.extend(ui_action_data)
+                                else:
+                                    ui_actions.append(ui_action_data)
+                    except (json.JSONDecodeError, AttributeError) as e:
+                        logger.warning(f"Error parsing tool message {i}: {e}")
                         continue
-        
+                # No need to log when content_text is None - this is expected for non-tool messages
         return ui_actions
     
     async def _update_session_context_from_tools(self, session_id: str, tool_messages: List[Any]) -> None:
@@ -488,19 +521,22 @@ class HaystackPipelineManager:
                         # Execute tools
                         inv_out = tool_invoker.run(messages=replies)
                         tool_messages = inv_out.get("tool_messages") or []
+                        
 
                         # Collect UI actions if any
                         try:
                             fake_pipeline_result = {"tool_invoker": {"tool_messages": tool_messages}}
                             ui_actions = self._collect_ui_actions(fake_pipeline_result)
                             if ui_actions:
+                                if not hasattr(self, '_ui_actions'):
+                                    self._ui_actions = []
                                 self._ui_actions.extend(ui_actions)
                                 if persona_type == PersonaType.WEB_ASSISTANT:
                                     ui_msg = f"\n[ui] Found {len(ui_actions)} UI action(s)\n"
                                     full_response += ui_msg
                                     yield ui_msg
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"Error collecting UI actions: {e}")
 
                         # Update session context based on tool results
                         await self._update_session_context_from_tools(session_id, tool_messages)
@@ -535,7 +571,6 @@ class HaystackPipelineManager:
             if full_response.strip():
                 await session_manager.add_message(session_id, "assistant", full_response)
             
-            logger.info(f"✅ Haystack pipeline completed. Response length: {len(full_response)}, UI actions: {len(self._ui_actions)}")
                     
         except Exception as e:
             logger.error(f"Error in Haystack pipeline response generation: {e}")

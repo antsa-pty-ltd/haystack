@@ -103,12 +103,35 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
     if ui_state:
         page_url = ui_state.get('page_url', 'unknown')
         client_id = ui_state.get('client_id')
+        client_name = ui_state.get('client_name')
         selected_template = ui_state.get('selected_template')
+        active_document = ui_state.get('active_document')
+        loaded_sessions = ui_state.get('loadedSessions', [])
+        generated_documents = ui_state.get('generatedDocuments', [])
         
         capabilities += f"\n\n📍 Current Context:"
         capabilities += f"\n- Page: {page_url}"
-        capabilities += f"\n- Client: {client_id if client_id else 'None selected'}"
+        capabilities += f"\n- Client: {client_name if client_name else (client_id if client_id else 'None selected')}"
         capabilities += f"\n- Template: {selected_template.get('name') if selected_template else 'None'}"
+        capabilities += f"\n- Loaded Sessions: {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0}"
+        capabilities += f"\n- Generated Documents: {len(generated_documents) if isinstance(generated_documents, list) else 0}"
+        
+        # Add active document context
+        if active_document and active_document.get('document'):
+            doc = active_document['document']
+            capabilities += f"\n- Active Document: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId', 'Unknown')})"
+            if doc.get('isGenerated'):
+                capabilities += f" - Generated document"
+            capabilities += f"\n- Document Content Preview: {doc.get('documentContent', '')[:100]}{'...' if len(doc.get('documentContent', '')) > 100 else ''}"
+        
+        # Add instructions for document generation
+        if client_name and (loaded_sessions or generated_documents):
+            capabilities += f"\n\n🎯 IMPORTANT: When asked to regenerate or create documents:"
+            capabilities += f"\n- ALWAYS use the check_document_readiness tool first to analyze the current state"
+            capabilities += f"\n- The client's name is '{client_name}' - use this instead of 'client' or 'the client'"
+            capabilities += f"\n- You have access to {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0} loaded session(s)"
+            if generated_documents and isinstance(generated_documents, list) and len(generated_documents) > 0:
+                capabilities += f"\n- There are {len(generated_documents)} existing document(s) that can be regenerated"
     
     return base_prompt + capabilities
 
