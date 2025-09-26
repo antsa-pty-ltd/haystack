@@ -426,13 +426,14 @@ THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
 - If the practitioner mentioned specific techniques or strategies, include those exact terms
 - Document any homework or between-session tasks exactly as assigned
 
-PERSONALIZATION REQUIREMENTS - CRITICAL:
-- NEVER use generic terms like "the client", "client", "the patient", "patient", "the individual", "the counselor", "the therapist", or "the practitioner"
-- ALWAYS use the actual names provided in the CLIENT INFORMATION and PRACTITIONER INFORMATION sections
-- Use the client's name when referring to them throughout the document
-- Use the practitioner's name when referring to therapeutic actions or interventions
-- Make the document personalized and human-centered by using actual names consistently
-- For formal references, use full names; for subsequent mentions, first names are acceptable
+PERSONALIZATION REQUIREMENTS - ABSOLUTELY CRITICAL:
+- This is the MOST IMPORTANT requirement: You MUST use the specific names provided
+- NEVER EVER use generic terms like "Client", "the client", "client", "the patient", "patient", "the individual", "the counselor", "the therapist", or "the practitioner"
+- The CLIENT INFORMATION section contains the client's actual name - use it every single time
+- The PRACTITIONER INFORMATION section contains the practitioner's actual name - use it every single time
+- Every reference to the client or practitioner MUST use their specific names
+- This requirement overrides all other instructions - names are mandatory
+- Double-check every sentence to ensure you used the correct names
 
 You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
 Use the provided template to structure the document, but fill it with information from the transcript.
@@ -470,6 +471,8 @@ Always personalize the document by using the actual client and practitioner name
         client_name = client_info.get('name', 'Client')
         practitioner_name = practitioner_info.get('name', 'Practitioner')
         
+        logger.info(f"🏷️ Document generation with names - Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        
         
         user_prompt = f"""Please generate a clinical document using the following template and transcript:
 
@@ -481,18 +484,41 @@ PRACTITIONER INFORMATION:
 - Name: {practitioner_name}
 - ID: {practitioner_info.get('id', 'N/A')}
 
+CRITICAL PERSONALIZATION REQUIREMENTS - READ THIS CAREFULLY:
+YOU MUST USE THESE EXACT NAMES THROUGHOUT THE ENTIRE DOCUMENT:
+- Client name: {client_name}
+- Practitioner name: {practitioner_name}
+
+FORBIDDEN TERMS - NEVER USE THESE:
+- "Client" or "the client" or "client" (use "{client_name}" instead)
+- "The counselor" or "counselor" (use "{practitioner_name}" instead) 
+- "The therapist" or "therapist" (use "{practitioner_name}" instead)
+- "The practitioner" or "practitioner" (use "{practitioner_name}" instead)
+- "The patient" or "patient" (use "{client_name}" instead)
+
+CORRECT EXAMPLES:
+✓ "{client_name} expressed feeling overwhelmed..."
+✓ "{practitioner_name} observed that {client_name} appeared anxious..."
+✓ "{practitioner_name} suggested a collaborative approach..."
+✓ "{client_name} reported difficulty sleeping..."
+
+INCORRECT EXAMPLES (DO NOT USE):
+✗ "The client expressed feeling overwhelmed..."
+✗ "The counselor observed that the client appeared anxious..."
+✗ "The therapist suggested a collaborative approach..."
+✗ "Client reported difficulty sleeping..."
+
 TEMPLATE (with variables processed):
 {template_content}
 
 SESSION TRANSCRIPT:
 {transcript_text}
 
-CRITICAL PERSONALIZATION REMINDER:
-- Throughout the document, refer to the client as "{client_name}" (NOT "the client", "client", "the patient", etc.)
-- Throughout the document, refer to the practitioner as "{practitioner_name}" (NOT "the counselor", "the therapist", etc.)
-- Use these exact names consistently throughout the entire document
-- Examples: "{client_name} expressed feeling overwhelmed..." instead of "The client expressed feeling overwhelmed..."
-- Examples: "{practitioner_name} suggested a collaborative approach..." instead of "The counselor suggested a collaborative approach..."
+FINAL REMINDER BEFORE YOU START WRITING:
+- Client name to use: {client_name}
+- Practitioner name to use: {practitioner_name}
+- Replace ALL instances of generic terms with these specific names
+- Check your output before finalizing to ensure you used the names correctly
 
 Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
 
