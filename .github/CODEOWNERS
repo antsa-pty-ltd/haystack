@@ -1,0 +1,10 @@
+# Global code ownership - antsa-alec must approve all changes
+* @antsa-alec
+
+# Specific critical files require extra attention
+/.github/workflows/* @antsa-alec
+/requirements.txt @antsa-alec
+/Dockerfile @antsa-alec
+/config.py @antsa-alec
+/startup.sh @antsa-alec
+/main.py @antsa-alec
