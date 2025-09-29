@@ -1,0 +1,94 @@
+[config]
+model = "gpt-4o"
+model_turbo = "gpt-4o-mini"
+fallback_models = ["gpt-4o-mini"]
+
+[github]
+# Auto-review PRs targeting develop branch
+auto_review = true
+# Auto-describe PRs with AI-generated descriptions
+auto_describe = true
+# Auto-improve code suggestions
+auto_improve = true
+# Publish PR description as a comment (since bot doesn't have edit permissions)
+publish_description_as_comment = true
+# Add labels based on PR content
+add_line_numbers_to_hunks = true
+
+[pr_reviewer]
+# Enable inline comments for code suggestions
+inline_code_comments = true
+# Review only modified files
+review_only_modified_files = true
+# Skip files that are too large
+max_files_to_review = 25
+# Skip very large files (tools.py is quite large)
+max_file_size_kb = 200
+# Enable security-focused reviews
+enable_security_review = true
+# Focus on critical issues
+focus_on_critical_issues = true
+
+[pr_description]
+# Generate comprehensive PR descriptions
+generate_ai_title = true
+# Include walkthrough of changes
+add_original_user_description = true
+# Add PR type classification
+extra_instructions = """
+Please focus on:
+1. FastAPI endpoint changes and WebSocket implementations
+2. Haystack pipeline modifications and their impact
+3. AI/ML model integration and configuration changes
+4. Session management and state handling
+5. Performance implications for AI processing
+6. Security considerations for AI service endpoints
+7. Python best practices and async/await patterns
+8. Tool integration and function calling logic
+"""
+
+[pr_code_suggestions]
+# Enable code improvement suggestions
+num_code_suggestions = 4
+# Focus on important improvements
+focus_on_important_suggestions = true
+# Rank suggestions by importance
+rank_suggestions = true
+
+[pr_questions]
+# Generate relevant questions about the PR
+num_questions = 3
+
+[pr_similar_issue]
+# Find similar issues/PRs
+skip_comments = false
+force_update_descriptions = false
+
+# File patterns to ignore for Haystack service
+[github.ignore]
+# Ignore generated files and logs
+"*.log" = true
+"*.log.*" = true
+"__pycache__/*" = true
+"*.pyc" = true
+"*.pyo" = true
+"venv/*" = true
+"antenv/*" = true
+"deploy/*" = true
+"deployments/*" = true
+"LogFiles/*" = true
+".azure/*" = true
+"startup_output.log" = true
+"startup.log" = true
+"service.log" = true
+".poll-health.log" = true
+
+# Focus on important Python/AI service files
+[github.focus]
+"*.py" = true
+"requirements.txt" = true
+"config.py" = true
+"Dockerfile" = true
+"*.yml" = true
+"*.yaml" = true
+"*.sh" = true
