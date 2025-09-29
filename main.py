@@ -543,10 +543,26 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.3
-            # No max_tokens limit - let the LLM generate as comprehensive a document as needed
         )
         
+        # Defensive null checks
+        if not response or not response.choices or len(response.choices) == 0:
+            logger.error(f"Invalid OpenAI response structure: {response}")
+            raise HTTPException(status_code=500, detail="Invalid response from OpenAI API")
+        
+        if not response.choices[0].message:
+            logger.error(f"No message in OpenAI response: {response.choices[0]}")
+            raise HTTPException(status_code=500, detail="No message content in OpenAI response")
+            
         generated_content = response.choices[0].message.content
+        
+        # Validate response content
+        if not generated_content or generated_content.strip() == "":
+            logger.error(f"Empty content returned from OpenAI - Completion: {response.choices[0]}, Usage: {getattr(response, 'usage', 'N/A')}")
+            raise HTTPException(
+                status_code=500, 
+                detail="Document generation failed: OpenAI returned empty content. This may be due to content filtering, token limits, or prompt issues."
+            )
         
         logger.info(f"✅ Document generated successfully, length: {len(generated_content)} characters")
         
