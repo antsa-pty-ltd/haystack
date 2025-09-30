@@ -583,6 +583,58 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
         logger.error(f"❌ Error generating document from template: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate document: {str(e)}")
 
+@app.post("/summarize-ai-conversations")
+async def summarize_ai_conversations_endpoint(request: dict):
+    """
+    Summarize multiple AI conversations between a client and assistant.
+    
+    Expected request format:
+    {
+        "conversations": [
+            {
+                "id": "conversation_id",
+                "createdAt": "2024-01-01T00:00:00Z",
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi there!"}
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        logger.info("🔄 Processing AI conversation summarization request")
+        
+        conversations_data = request.get("conversations", [])
+        if not conversations_data:
+            raise HTTPException(status_code=400, detail="No conversations provided")
+        
+        logger.info(f"📊 Summarizing {len(conversations_data)} conversations")
+        
+        # Import the function from tools
+        from tools import summarize_ai_conversations
+        
+        # Generate the summary
+        result = summarize_ai_conversations(conversations_data)
+        
+        if result.get("status") == "error":
+            logger.error(f"❌ Summarization failed: {result.get('error')}")
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        
+        logger.info("✅ Successfully generated AI conversation summary")
+        
+        return {
+            "summary": result.get("summary"),
+            "metadata": result.get("metadata", {}),
+            "status": "success"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in conversation summarization endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to summarize conversations: {str(e)}")
+
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()

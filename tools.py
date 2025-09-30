@@ -8,8 +8,23 @@ import os
 import jwt
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+# OpenAI client will be initialized lazily when needed
+openai_client = None
+
+def get_openai_client():
+    """Get OpenAI client, initializing it lazily if needed"""
+    global openai_client
+    if openai_client is None:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("OPENAI_API_KEY environment variable not set for tools.")
+            return None
+        openai_client = OpenAI(api_key=openai_api_key)
+    return openai_client
 
 class ToolManager:
     """Manages tools for different personas"""
@@ -3965,6 +3980,136 @@ Please refine the following document according to these instructions:
                 "status": "error"
             }
 
+
+
+def summarize_ai_conversations(conversations_data: List[Dict]) -> Dict:
+    """
+    Summarize multiple AI conversations between a client and assistant.
+    
+    Args:
+        conversations_data: List of conversation objects, each containing:
+            - messages: List of message objects with role and content
+            - createdAt: Conversation creation date
+            - id: Conversation identifier
+    
+    Returns:
+        Dict containing the summary and metadata
+    """
+    try:
+        logger.info(f"Starting AI conversation summarization for {len(conversations_data)} conversations")
+        
+        if not conversations_data:
+            return {
+                "error": "No conversations provided for summarization",
+                "status": "error"
+            }
+        
+        # Combine all conversations with clear separation
+        conversations_text = []
+        for index, conversation in enumerate(conversations_data):
+            messages = conversation.get('messages', [])
+            if not messages:
+                continue
+                
+            conversation_text = []
+            for message in messages:
+                role = message.get('role', 'unknown')
+                content = message.get('content', '')
+                speaker = 'Client' if role == 'user' else 'Assistant'
+                conversation_text.append(f"{speaker}: {content}")
+            
+            if conversation_text:
+                date_str = conversation.get('createdAt', 'Unknown date')
+                conversations_text.append(f"Conversation {index + 1} ({date_str}):\n" + '\n'.join(conversation_text))
+        
+        if not conversations_text:
+            return {
+                "error": "No valid conversation content found",
+                "status": "error"
+            }
+        
+        combined_text = '\n\n---\n\n'.join(conversations_text)
+        
+        # Create the summary prompt with anti-diagnosis instructions
+        system_prompt = """You are a professional clinical assistant tasked with creating detailed reports based on multiple conversations between a client and an AI assistant. 
+
+CRITICAL INSTRUCTIONS - NEVER PROVIDE MEDICAL DIAGNOSES:
+- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
+- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
+- NEVER imply, suggest, or state that someone has a specific mental health condition
+- Focus on observations, patterns, and themes from the conversations
+- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
+- Always defer diagnosis to qualified medical professionals
+
+Please analyze all conversations and create a comprehensive summary that includes:
+
+1. Overall Themes & Patterns
+2. Client's Progress Over Time  
+3. Key Insights from Each Conversation
+4. Notable Changes in Client's Perspective
+5. Recommendations Based on All Interactions
+
+Please structure your response with clear headings and maintain professional clinical language while avoiding any diagnostic terminology."""
+
+        user_prompt = f"""Below are {len(conversations_data)} conversations between the client and the AI assistant:
+
+{combined_text}
+
+Please analyze these conversations and provide a comprehensive summary following the requested structure."""
+
+        # Generate the summary using OpenAI
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        logger.info("Sending conversation summary request to OpenAI")
+        
+        # Get OpenAI client (lazy initialization)
+        client = get_openai_client()
+        if not client:
+            logger.error("OpenAI client not available - API key not configured")
+            return {
+                "error": "OpenAI service not available - API key not configured",
+                "status": "error"
+            }
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=3000
+        )
+        
+        summary_content = response.choices[0].message.content
+        
+        if not summary_content or summary_content.strip() == "":
+            logger.error("Empty summary content returned from OpenAI")
+            return {
+                "error": "Failed to generate summary - empty response",
+                "status": "error"
+            }
+        
+        logger.info("Successfully generated AI conversation summary")
+        
+        return {
+            "summary": summary_content,
+            "metadata": {
+                "conversation_count": len(conversations_data),
+                "total_messages": sum(len(conv.get('messages', [])) for conv in conversations_data),
+                "generated_at": datetime.now().isoformat(),
+                "word_count": len(summary_content.split()),
+                "estimated_read_time": max(1, len(summary_content.split()) // 200)
+            },
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in summarize_ai_conversations: {e}")
+        return {
+            "error": f"Failed to generate conversation summary: {str(e)}",
+            "status": "error"
+        }
 
 
 # Global tool manager instance
