@@ -9,9 +9,10 @@ import asyncio
 import logging
 import json
 import uuid
+import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -36,6 +37,9 @@ if not openai_api_key:
 
 # Create OpenAI client
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
+
+# API configuration for logging violations
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000/api/v1")
 
 # Simple tool loading (graceful fallback)
 def load_templates_safely():
@@ -372,6 +376,52 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def log_violation_to_api(
+    profile_id: str,
+    template_id: str,
+    template_name: str,
+    violation_type: str,
+    template_content: str,
+    reason: str,
+    confidence: str,
+    client_id: str = None,
+    metadata: Dict = None,
+    ip_address: str = None,
+    user_agent: str = None
+) -> None:
+    """Log policy violation to the API database"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            payload = {
+                "profileId": profile_id,
+                "templateId": template_id,
+                "templateName": template_name,
+                "violationType": violation_type,
+                "templateContent": template_content,
+                "reason": reason,
+                "confidence": confidence,
+                "clientId": client_id,
+                "metadata": metadata or {},
+                "ipAddress": ip_address,
+                "userAgent": user_agent,
+            }
+            
+            response = await client.post(
+                f"{API_BASE_URL}/admin/policy-violations",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ Successfully logged violation to API for profile {profile_id}")
+            else:
+                logger.error(f"❌ Failed to log violation to API: {response.status_code} - {response.text}")
+    
+    except Exception as e:
+        logger.error(f"❌ Error logging violation to API: {e}")
+        # Don't raise - we don't want to break the violation detection if API logging fails
+
+
 async def detect_policy_violation(template_content: str) -> Dict[str, Any]:
     """
     Detect if template content violates terms of service by requesting medical diagnosis
@@ -466,7 +516,12 @@ Respond with JSON only."""
 
 
 @app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
-async def generate_document_from_template(request: GenerateDocumentRequest, authorization: str = Header(None), profileid: str = Header(None)):
+async def generate_document_from_template(
+    request: GenerateDocumentRequest, 
+    http_request: Request,
+    authorization: str = Header(None), 
+    profileid: str = Header(None)
+):
     """Generate a document using a template and transcript data"""
     try:
         logger.info(f"🎨 Generating document from template: {request.template.get('name', 'Unknown')}")
@@ -483,12 +538,66 @@ async def generate_document_from_template(request: GenerateDocumentRequest, auth
         
         # Check for policy violations in template content
         template_content = template.get('content', '')
-        violation_check = await detect_policy_violation(template_content)
+        
+        # Strip out the prepended safety instructions to get original template
+        # These are added by the template service but we don't want them in the violation log
+        original_template_content = template_content
+        safety_instruction_marker = "CRITICAL INSTRUCTIONS FOR AI ASSISTANT:"
+        if safety_instruction_marker in template_content:
+            # Find the last occurrence of the safety instructions
+            parts = template_content.split(safety_instruction_marker)
+            if len(parts) > 1:
+                # The last part after the final safety instruction block is the original template
+                # Find where the safety block ends (look for double newline after it)
+                last_safety_block = safety_instruction_marker + parts[-1]
+                # Split on double newline to separate safety instructions from actual template
+                template_parts = last_safety_block.split('\n\n')
+                # Find the first part that doesn't contain safety instruction keywords
+                for i, part in enumerate(template_parts):
+                    if (not part.strip().startswith('-') and 
+                        not part.strip().startswith('CRITICAL') and 
+                        len(part.strip()) > 50):  # Original template is usually longer
+                        original_template_content = '\n\n'.join(template_parts[i:])
+                        break
+        
+        violation_check = await detect_policy_violation(original_template_content)
         
         if violation_check["is_violation"]:
             logger.warning(f"⚠️ Policy violation detected in template '{request.template.get('name', 'Unknown')}' - Type: {violation_check['violation_type']}")
             logger.warning(f"⚠️ User: {profileid}, Template ID: {template.get('id', 'N/A')}, Confidence: {violation_check.get('confidence', 'unknown')}")
             logger.warning(f"⚠️ Reason: {violation_check.get('reason', 'No reason provided')}")
+            
+            # Extract request metadata
+            ip_address = http_request.client.host if http_request.client else None
+            user_agent = http_request.headers.get("user-agent")
+            
+            logger.info(f"📤 Preparing to log violation to API - Profile ID: {profileid}, Template ID: {template.get('id')}")
+            
+            # Check if we have required data
+            if not profileid:
+                logger.error("❌ Cannot log violation: profileid is None or empty!")
+            else:
+                # Log violation to API database (async, non-blocking)
+                try:
+                    asyncio.create_task(log_violation_to_api(
+                        profile_id=profileid,
+                        template_id=template.get('id'),
+                        template_name=template.get('name'),
+                        violation_type=violation_check['violation_type'],
+                        template_content=original_template_content,  # Use cleaned template without safety instructions
+                        reason=violation_check.get('reason'),
+                        confidence=violation_check.get('confidence'),
+                        client_id=client_info.get('id'),
+                        metadata={
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "generationInstructions": generation_instructions,
+                        },
+                        ip_address=ip_address,
+                        user_agent=user_agent
+                    ))
+                    logger.info("✅ Async task created for violation logging")
+                except Exception as log_error:
+                    logger.error(f"❌ Failed to create async task for logging: {log_error}")
             
             # Build reason section if available
             reason_section = ""
