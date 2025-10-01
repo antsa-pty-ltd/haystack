@@ -193,6 +193,14 @@ IMPORTANT LOADED SESSION Q&A RULES:
 - Provide rich, detailed answers using the actual transcript content
 - For complex questions, break analysis into multiple calls if needed
 
+CRITICAL DOCUMENT REGENERATION RULES:
+- When user provides additional information, background, or context about a client or session (e.g., "the client's mother is named Sarah", "this was about work stress"), you MUST understand they want the current/active document regenerated with this new information
+- Look for phrases like: "actually", "I should mention", "for context", "by the way", "also", "the client's [relationship/background]"
+- If there are loaded sessions or generated documents visible, and user provides new context, IMMEDIATELY call check_document_readiness, then regenerate with the generation_instructions parameter containing the new context
+- Do NOT just acknowledge the information - actively use it to improve the documentation
+- If user says things like "regenerate with this info" or "update the notes" or "redo this", they're referring to the ACTIVE/CURRENT document
+- Use the generatedDocuments from UI state to identify what document they're referring to
+
 Use these tools when users ask for specific data or reports.""",
                 model="gpt-4.1",
                 temperature=0.7,

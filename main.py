@@ -199,12 +199,14 @@ CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
         
         # Add instructions for document generation
         if client_name and (loaded_sessions or generated_documents):
-            capabilities += f"\n\n🎯 IMPORTANT: When asked to regenerate or create documents:"
-            capabilities += f"\n- ALWAYS use the check_document_readiness tool first to analyze the current state"
+            capabilities += f"\n\n🎯 CRITICAL ACTIVE SESSION CONTEXT:"
             capabilities += f"\n- The client's name is '{client_name}' - use this instead of 'client' or 'the client'"
             capabilities += f"\n- You have access to {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0} loaded session(s)"
             if generated_documents and isinstance(generated_documents, list) and len(generated_documents) > 0:
-                capabilities += f"\n- There are {len(generated_documents)} existing document(s) that can be regenerated"
+                capabilities += f"\n- There are {len(generated_documents)} existing document(s) currently visible"
+                capabilities += f"\n- When user provides additional context/information, they want you to regenerate the CURRENT document with that new information"
+                capabilities += f"\n- Use check_document_readiness first, then generate_document_from_loaded with the new context in generation_instructions"
+                capabilities += f"\n- Do NOT just acknowledge new information - actively regenerate the document with it"
     
     return base_prompt + capabilities
 
@@ -694,7 +696,7 @@ Always personalize the document by using the actual client and practitioner name
         
         # Add generation instructions if provided
         if generation_instructions:
-            system_prompt += f"\n\nADDITIONAL INSTRUCTIONS: {generation_instructions}\n"
+            system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nIMPORTANT: This additional context should be integrated into your understanding of the transcript and used to correct any assumptions or add missing background information. Regenerate the document incorporating this new information.\n"
         
         # Process template variables
         template_content = template.get('content', '')
@@ -771,15 +773,17 @@ FINAL REMINDER BEFORE YOU START WRITING:
 - Replace ALL instances of generic terms with these specific names
 - Check your output before finalizing to ensure you used the names correctly
 
-COMPREHENSIVE OUTPUT REQUIREMENTS:
-- Provide detailed, thorough responses for each section
-- Expand on observations with specific examples from the transcript
+COMPREHENSIVE OUTPUT REQUIREMENTS - CRITICAL:
+- Document ALL topics, themes, and subjects discussed in chronological order - do NOT selectively highlight only major themes
+- For SOAP-style templates: The Subjective section must comprehensively cover EVERYTHING the client discussed, not just key highlights
+- For Planning sections: List ALL interventions, techniques, tools, and homework assignments mentioned - omit NOTHING
+- Provide detailed, thorough responses for each section with specific examples from the transcript
 - Include direct quotes when relevant to support your observations
-- Provide comprehensive analysis rather than brief bullet points
-- Aim for detailed, professional clinical documentation
-- Each section should be substantive and informative
+- Avoid summarizing or condensing - err on the side of being exhaustive rather than concise
+- If a topic was mentioned even briefly, include it - the practitioner needs a complete record
+- Do NOT editorialize or decide what's important - document everything discussed
 
-Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
+Please fill out the template using ALL information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
 
 IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
 """
@@ -791,7 +795,9 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3
+            temperature=0.7  # Increased from 0.3 to allow more comprehensive coverage
+            # No max_tokens limit - let the model naturally complete the document
+            # GPT-4o supports up to 16,384 output tokens if needed for comprehensive documentation
         )
         
         # Defensive null checks
@@ -805,12 +811,27 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
             
         generated_content = response.choices[0].message.content
         
-        # Validate response content
+        # Validate response content with detailed error messaging
         if not generated_content or generated_content.strip() == "":
-            logger.error(f"Empty content returned from OpenAI - Completion: {response.choices[0]}, Usage: {getattr(response, 'usage', 'N/A')}")
+            finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
+            usage_info = getattr(response, 'usage', None)
+            
+            error_detail = "Document generation failed: No content was generated. "
+            
+            if finish_reason == "content_filter":
+                error_detail += "The content was filtered by OpenAI's safety system. Please review your template and transcript for potentially sensitive content."
+            elif finish_reason == "length":
+                error_detail += "The response was truncated due to token limits. Try using a shorter transcript or simpler template."
+            else:
+                error_detail += f"This may be due to content filtering, token limits, or prompt issues. (Finish reason: {finish_reason})"
+            
+            if usage_info:
+                error_detail += f" Tokens used: {usage_info.total_tokens if hasattr(usage_info, 'total_tokens') else 'N/A'}"
+            
+            logger.error(f"Empty content returned from OpenAI - Completion: {response.choices[0]}, Usage: {usage_info}, Finish Reason: {finish_reason}")
             raise HTTPException(
                 status_code=500, 
-                detail="Document generation failed: OpenAI returned empty content. This may be due to content filtering, token limits, or prompt issues."
+                detail=error_detail
             )
         
         logger.info(f"✅ Document generated successfully, length: {len(generated_content)} characters")
