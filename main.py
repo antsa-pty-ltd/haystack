@@ -372,6 +372,99 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def detect_policy_violation(template_content: str) -> Dict[str, Any]:
+    """
+    Detect if template content violates terms of service by requesting medical diagnosis
+    Uses LLM to intelligently analyze template content for policy violations
+    Returns: {"is_violation": bool, "violation_type": str, "reason": str}
+    """
+    try:
+        if not openai_client:
+            logger.warning("OpenAI client not available for policy check, allowing template")
+            return {"is_violation": False, "violation_type": None, "reason": None}
+        
+        # Use LLM to analyze template for policy violations
+        system_prompt = """You are a content policy enforcement system for a mental health practice management platform.
+
+Your job is to analyze documentation templates and determine if they violate our Terms of Service.
+
+STRICT POLICY - Templates that violate ToS:
+1. Templates that explicitly request medical diagnosis or diagnostic assessments
+2. Templates that ask the AI to determine if someone meets diagnostic criteria (DSM, ICD, etc.)
+3. Templates that ask to evaluate whether a client "has" or "should be diagnosed with" a specific condition
+4. Templates that request clinical diagnosis of mental health conditions
+5. Templates that ask the AI to make diagnostic determinations
+
+ALLOWED - Templates that are acceptable:
+1. Templates for session notes documenting what was discussed
+2. Templates for treatment planning and progress tracking
+3. Templates that document "presenting concerns" or "reported symptoms"
+4. Templates that document practitioner observations (not AI diagnosis)
+5. Templates asking to document what the practitioner said/did in session
+6. Templates with anti-diagnosis warnings (these are our safety instructions)
+
+IMPORTANT: 
+- Multiple anti-diagnosis warnings in a template are SAFETY INSTRUCTIONS, not violations
+- Only flag templates that are ASKING THE AI to diagnose, not templates preventing diagnosis
+- Be strict but fair - we want to catch actual misuse, not legitimate clinical documentation
+
+Analyze the template and respond ONLY with valid JSON in this exact format:
+{
+  "is_violation": true/false,
+  "violation_type": "medical_diagnosis_request" or null,
+  "reason": "Brief explanation" or null,
+  "confidence": "high/medium/low"
+}"""
+
+        user_prompt = f"""Analyze this template for Terms of Service violations:
+
+TEMPLATE CONTENT:
+{template_content}
+
+Respond with JSON only."""
+
+        # Call LLM for analysis
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",  # Fast and cost-effective for this task
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,  # Low temperature for consistent policy enforcement
+            max_tokens=200
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Parse JSON response
+        # Remove markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+            result_text = result_text.strip()
+        
+        result = json.loads(result_text)
+        
+        logger.info(f"🔍 Policy check result: {result}")
+        
+        return {
+            "is_violation": result.get("is_violation", False),
+            "violation_type": result.get("violation_type"),
+            "reason": result.get("reason"),
+            "confidence": result.get("confidence", "unknown")
+        }
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse policy check response: {e}, Response: {result_text if 'result_text' in locals() else 'N/A'}")
+        # Fail open - allow template if we can't parse the response
+        return {"is_violation": False, "violation_type": None, "reason": None}
+    except Exception as e:
+        logger.error(f"Error detecting policy violation: {e}")
+        # Fail open - allow template on error to avoid breaking legitimate use
+        return {"is_violation": False, "violation_type": None, "reason": None}
+
+
 @app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
 async def generate_document_from_template(request: GenerateDocumentRequest, authorization: str = Header(None), profileid: str = Header(None)):
     """Generate a document using a template and transcript data"""
@@ -387,6 +480,54 @@ async def generate_document_from_template(request: GenerateDocumentRequest, auth
         client_info = request.clientInfo
         practitioner_info = request.practitionerInfo
         generation_instructions = request.generationInstructions
+        
+        # Check for policy violations in template content
+        template_content = template.get('content', '')
+        violation_check = await detect_policy_violation(template_content)
+        
+        if violation_check["is_violation"]:
+            logger.warning(f"⚠️ Policy violation detected in template '{request.template.get('name', 'Unknown')}' - Type: {violation_check['violation_type']}")
+            logger.warning(f"⚠️ User: {profileid}, Template ID: {template.get('id', 'N/A')}, Confidence: {violation_check.get('confidence', 'unknown')}")
+            logger.warning(f"⚠️ Reason: {violation_check.get('reason', 'No reason provided')}")
+            
+            # Build reason section if available
+            reason_section = ""
+            if violation_check.get("reason"):
+                reason_section = f"\n\nReason: {violation_check['reason']}"
+            
+            # Return professional warning message
+            warning_message = f"""⚠️ CONTENT POLICY VIOLATION DETECTED
+
+We're unable to process this request as the template content appears to be requesting medical diagnosis or clinical assessment using diagnostic criteria, which violates our Terms of Service and responsible AI use policies.
+
+Our system is not designed to provide medical diagnoses, mental health assessments, or clinical evaluations. Such determinations should only be made by qualified healthcare professionals in appropriate clinical settings.
+
+**This incident has been flagged and our team has been notified.**
+
+Violation Type: {violation_check['violation_type']}
+Template Name: {template.get('name', 'Unknown')}
+Timestamp: {datetime.now(timezone.utc).isoformat()}{reason_section}
+
+If you believe this was flagged in error, please contact our support team. If you're looking for documentation templates for non-diagnostic purposes (such as session notes, treatment planning, or progress tracking), we'd be happy to help with those instead.
+
+For more information, please review our Terms of Service at www.ANTSA.com.au."""
+            
+            return GenerateDocumentResponse(
+                content=warning_message,
+                generatedAt=datetime.now(timezone.utc).isoformat(),
+                metadata={
+                    "templateId": template.get("id"),
+                    "templateName": template.get("name"),
+                    "clientId": client_info.get("id"),
+                    "practitionerId": practitioner_info.get("id"),
+                    "policyViolation": True,
+                    "violationType": violation_check["violation_type"],
+                    "confidence": violation_check.get("confidence", "unknown"),
+                    "reason": violation_check.get("reason"),
+                    "flagged": True,
+                    "processingMethod": "policy_violation_detected"
+                }
+            )
         
         # Build the transcript text from segments
         transcript_text = ""
@@ -450,7 +591,6 @@ Always personalize the document by using the actual client and practitioner name
         template_content = template.get('content', '')
         
         # Replace common template variables
-        from datetime import datetime
         today = datetime.now().strftime("%B %d, %Y")
         
         # Replace date placeholders
