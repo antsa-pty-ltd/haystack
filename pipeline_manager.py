@@ -99,8 +99,8 @@ class PipelineManager:
                 # Add user message to session
                 await session_manager.add_message(session_id, "user", user_message)
                 
-                # Get conversation history
-                messages = await session_manager.get_messages(session_id, limit=20)
+                # Get conversation history - increased limit to ensure we capture all modification requests
+                messages = await session_manager.get_messages(session_id, limit=40)
                 
                 # Check if this is the first user message for jaimee_therapist (auto-preload context)
                 is_first_jaimee_message = False

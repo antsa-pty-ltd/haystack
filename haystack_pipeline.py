@@ -393,8 +393,8 @@ class HaystackPipelineManager:
             # Add user message to session
             await session_manager.add_message(session_id, "user", user_message)
             
-            # Get conversation history
-            messages = await session_manager.get_messages(session_id, limit=20)
+            # Get conversation history - increased limit to ensure we capture all modification requests
+            messages = await session_manager.get_messages(session_id, limit=40)
             
             # Get persona config and system prompt
             persona_config = persona_manager.get_persona(persona_type)

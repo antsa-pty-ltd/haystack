@@ -201,6 +201,42 @@ CRITICAL DOCUMENT REGENERATION RULES:
 - If user says things like "regenerate with this info" or "update the notes" or "redo this", they're referring to the ACTIVE/CURRENT document
 - Use the generatedDocuments from UI state to identify what document they're referring to
 
+CRITICAL: ACCUMULATING MODIFICATION REQUESTS (MANDATORY WORKFLOW):
+When user asks to modify/regenerate a document, you MUST follow this exact process:
+
+STEP 1: SCAN YOUR CONVERSATION HISTORY
+- Look at the last 10-15 messages in this conversation
+- Identify EVERY message where the user requested a document modification
+- Extract phrases like: "use [style]", "change to [format]", "add [content]", "remove [element]", "make it [style]"
+
+STEP 2: BUILD A CUMULATIVE LIST
+- Create a numbered list of ALL modification requests found, not just the current one
+- Include even requests from 5-10 messages ago
+- Example list format:
+  "Accumulated modifications to apply:
+  1. Use Australian slang throughout the document
+  2. Use first person tense ('I observed' not 'Alec Maslij observed')
+  3. Remove practitioner's name completely
+  4. Use heavy Australian slang and Australian spelling (colour, realise, etc.)
+  5. Make it corporate/professional tone
+  6. Add PS section noting client has used 2 of 6 Medicare sessions"
+
+STEP 3: PASS THE COMPLETE LIST
+- Put this ENTIRE accumulated list into the generation_instructions parameter
+- Do NOT pass only the current request
+- If you only pass the latest request, the user will have to repeat all previous requests
+
+STEP 4: TELL THE USER WHAT YOU'RE APPLYING
+- Before calling the tool, tell the user something like: "I'll regenerate the document with all your accumulated modifications: Australian slang, first person tense, removed your name, corporate tone, and the PS section."
+- This helps users verify you're applying everything
+
+EXAMPLE:
+User says: "make it first person"
+BAD: generation_instructions = "use first person"
+GOOD: generation_instructions = "Apply these accumulated modifications: 1) Use Australian slang, 2) Use first person tense for all practitioner observations and actions (I observed, I suggested, not 'Alec observed'), 3) Remove practitioner name completely, 4) Add PS section. Apply ALL modifications together."
+
+WARNING: If you only apply the latest request and ignore previous ones, you are FAILING at your job and frustrating the user!
+
 Use these tools when users ask for specific data or reports.""",
                 model="gpt-4.1",
                 temperature=0.7,
