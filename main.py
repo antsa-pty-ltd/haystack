@@ -723,11 +723,44 @@ Always personalize the document by using the actual client and practitioner name
         practitioner_name = practitioner_info.get('name', 'Practitioner')
         
         logger.info(f"🏷️ Document generation with names - Client: '{client_name}', Practitioner: '{practitioner_name}'")
-        logger.info(f"🔍 Debug client_info received: {client_info}")
-        logger.info(f"🔍 Debug practitioner_info received: {practitioner_info}")
         
+        # Detect if this is a regeneration request (template contains existing document)
+        is_regeneration = template_content.startswith("CRITICAL MODIFICATION REQUEST")
         
-        user_prompt = f"""Please generate a clinical document using the following template and transcript:
+        if is_regeneration:
+            user_prompt = f"""Please generate a clinical document using the following template and transcript:
+
+CLIENT INFORMATION:
+- Name: {client_name}
+- ID: {client_info.get('id', 'N/A')}
+
+PRACTITIONER INFORMATION:
+- Name: {practitioner_name}
+- ID: {practitioner_info.get('id', 'N/A')}
+
+TEMPLATE (contains modification request and current document):
+{template_content}
+
+SESSION TRANSCRIPT (for reference only - do NOT regenerate from scratch):
+{transcript_text}
+
+COMPREHENSIVE OUTPUT REQUIREMENTS - CRITICAL:
+- Document ALL topics, themes, and subjects discussed in chronological order - do NOT selectively highlight only major themes
+- For SOAP-style templates: The Subjective section must comprehensively cover EVERYTHING the client discussed, not just key highlights
+- For Planning sections: List ALL interventions, techniques, tools, and homework assignments mentioned - omit NOTHING
+- Provide detailed, thorough responses for each section with specific examples from the transcript
+- Include direct quotes when relevant to support your observations
+- Avoid summarizing or condensing - err on the side of being exhaustive rather than concise
+- If a topic was mentioned even briefly, include it - the practitioner needs a complete record
+- Do NOT editorialize or decide what's important - document everything discussed
+
+Please fill out the template using ALL information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
+
+IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
+"""
+        else:
+            # Normal generation (not regeneration) - include full personalization requirements
+            user_prompt = f"""Please generate a clinical document using the following template and transcript:
 
 CLIENT INFORMATION:
 - Name: {client_name}
