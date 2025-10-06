@@ -204,9 +204,12 @@ CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
             capabilities += f"\n- You have access to {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0} loaded session(s)"
             if generated_documents and isinstance(generated_documents, list) and len(generated_documents) > 0:
                 capabilities += f"\n- There are {len(generated_documents)} existing document(s) currently visible"
-                capabilities += f"\n- When user provides additional context/information, they want you to regenerate the CURRENT document with that new information"
-                capabilities += f"\n- Use check_document_readiness first, then generate_document_from_loaded with the new context in generation_instructions"
-                capabilities += f"\n- Do NOT just acknowledge new information - actively regenerate the document with it"
+                capabilities += f"\n\n🔄 CRITICAL DOCUMENT MODIFICATION INSTRUCTIONS:"
+                capabilities += f"\n- When user asks to modify/regenerate/change an existing document, use the refine_document tool"
+                capabilities += f"\n- Pass the document ID and the user's specific instructions in refinement_instructions parameter"
+                capabilities += f"\n- The refine_document tool will regenerate the document with the requested changes"
+                capabilities += f"\n- Do NOT just acknowledge requests - actively call refine_document to apply changes"
+                capabilities += f"\n- For NEW documents (not modifying existing), use generate_document_auto with generation_instructions"
     
     return base_prompt + capabilities
 
