@@ -669,6 +669,15 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
 - Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
 - Always defer diagnosis to qualified medical professionals
 
+TEMPLATE META-INSTRUCTIONS - CRITICAL:
+- The template may contain instructions for you (the AI) at the end, often titled "AI Scribe Instructions", "Instructions for AI", or similar
+- These meta-instructions are GUIDANCE FOR YOU - they tell you HOW to fill out the template
+- DO NOT include these meta-instructions in your output document
+- DO NOT render them as part of the final report
+- They are for your internal use only to understand the template requirements
+- When you encounter phrases like "DO NOT infer", "LEAVE BLANK if", "ONLY INCLUDE if" - these are rules for you to follow, not content to output
+- The actual clinical document should end before any meta-instruction sections
+
 THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
 - Pay special attention to therapeutic strategies and interventions discussed by the practitioner
 - Accurately capture ALL therapeutic techniques mentioned (CBT, DBT, mindfulness, etc.) exactly as stated
@@ -703,26 +712,6 @@ Always personalize the document by using the actual client and practitioner name
         
         # Process template variables
         template_content = template.get('content', '')
-        
-        # CRITICAL FIX: Remove AI instructions from template content
-        # These should be in the system prompt, not rendered in the output document
-        ai_instruction_markers = [
-            "AI Scribe Instructions",
-            "Instructions for AI Assistant",
-            "AI Assistant Instructions",
-            "INSTRUCTIONS FOR AI"
-        ]
-        
-        # Find and remove the AI instructions section
-        for marker in ai_instruction_markers:
-            if marker in template_content:
-                # Split on the marker and take only the part before it
-                parts = template_content.split(marker)
-                if len(parts) > 1:
-                    # Keep everything before the marker
-                    template_content = parts[0].rstrip()
-                    logger.info(f"🧹 Stripped AI instructions from template (found marker: '{marker}')")
-                    break
         
         # Replace common template variables
         today = datetime.now().strftime("%B %d, %Y")
