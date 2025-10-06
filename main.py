@@ -872,35 +872,9 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
         
         logger.info(f"✅ Document generated successfully, length: {len(generated_content)} characters")
         
-        # Save document to database via API
-        saved_document_id = None
-        if client_info.get('id') and practitioner_info.get('id'):
-            try:
-                logger.info(f"📝 Attempting to save document to database - Client: {client_info.get('id')}, Practitioner: {practitioner_info.get('id')}")
-                async with httpx.AsyncClient(timeout=30.0) as http_client:
-                    save_response = await http_client.post(
-                        f"{API_BASE_URL}/dictated-notes",
-                        json={
-                            "clientId": client_info['id'],
-                            "title": template.get('name'),
-                            "content": generated_content
-                        },
-                        headers={
-                            "Authorization": authorization if authorization else f"Bearer {profileid}",
-                            "ProfileID": profileid if profileid else ""
-                        }
-                    )
-                    if save_response.status_code in [200, 201]:
-                        saved_data = save_response.json()
-                        saved_document_id = saved_data.get('id')
-                        logger.info(f"✅ Document saved to database: {saved_document_id}")
-                    else:
-                        logger.error(f"❌ Failed to save document to database: {save_response.status_code} - {save_response.text}")
-            except Exception as save_error:
-                logger.error(f"❌ Error saving document to database: {save_error}")
-                # Don't fail the request - still return the document even if save fails
-        else:
-            logger.warning(f"⚠️ Skipping database save - missing client_id or practitioner_id")
+        # Note: Document persistence is handled by the API layer to ensure proper
+        # handling of preview mode, authentication context, and transaction management.
+        # Haystack service is responsible only for document generation via AI.
         
         return GenerateDocumentResponse(
             content=generated_content,
@@ -911,8 +885,7 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 "clientId": client_info.get("id"),
                 "practitionerId": practitioner_info.get("id"),
                 "wordCount": len(generated_content.split()),
-                "processingMethod": "haystack_openai",
-                "savedDocumentId": saved_document_id
+                "processingMethod": "haystack_openai"
             }
         )
         
