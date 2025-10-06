@@ -710,139 +710,54 @@ Always personalize the document by using the actual client and practitioner name
         if generation_instructions:
             system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nIMPORTANT: This additional context should be integrated into your understanding of the transcript and used to correct any assumptions or add missing background information. Regenerate the document incorporating this new information.\n"
         
-        # Process template variables
+        # Get the raw template - let the LLM handle all variable substitution
         template_content = template.get('content', '')
         
-        # Replace common template variables
-        today = datetime.now().strftime("%B %d, %Y")
-        
-        # Replace date placeholders
-        template_content = template_content.replace("(today's date)", today)
-        template_content = template_content.replace("{{date}}", today)
-        template_content = template_content.replace("{{today}}", today)
-        template_content = template_content.replace("[DATE]", today)
-        
-        # Replace client/practitioner variables if provided in template variables
-        if template.get('variables'):
-            for var in template['variables']:
-                var_name = var.get('name', '')
-                var_value = var.get('value', '')
-                template_content = template_content.replace(f"{{{{{var_name}}}}}", var_value)
-                template_content = template_content.replace(f"[{var_name.upper()}]", var_value)
-        
-        # Build the user prompt
+        # Build the user prompt - keep it simple
         client_name = client_info.get('name', 'Client')
         practitioner_name = practitioner_info.get('name', 'Practitioner')
+        today = datetime.now().strftime("%B %d, %Y")
         
-        logger.info(f"🏷️ Document generation with names - Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        logger.info(f"🏷️ Document generation - Client: '{client_name}', Practitioner: '{practitioner_name}'")
         
-        # Detect if this is a regeneration request (template contains existing document)
+        # Check if this is a modification/regeneration request
         is_regeneration = template_content.startswith("CRITICAL MODIFICATION REQUEST")
         
         if is_regeneration:
-            user_prompt = f"""Please generate a clinical document using the following template and transcript:
+            user_prompt = f"""Modify the existing document based on the modification request.
 
-CLIENT INFORMATION:
-- Name: {client_name}
-- ID: {client_info.get('id', 'N/A')}
+**Client:** {client_name}
+**Practitioner:** {practitioner_name}
+**Today's Date:** {today}
 
-PRACTITIONER INFORMATION:
-- Name: {practitioner_name}
-- ID: {practitioner_info.get('id', 'N/A')}
-
-TEMPLATE (contains modification request and current document):
+**Template (contains modification request and current document):**
 {template_content}
 
-SESSION TRANSCRIPT (for reference only - do NOT regenerate from scratch):
+**Session Transcript (for reference):**
 {transcript_text}
 
-COMPREHENSIVE OUTPUT REQUIREMENTS - CRITICAL:
-- Document ALL topics, themes, and subjects discussed in chronological order - do NOT selectively highlight only major themes
-- For SOAP-style templates: The Subjective section must comprehensively cover EVERYTHING the client discussed, not just key highlights
-- For Planning sections: List ALL interventions, techniques, tools, and homework assignments mentioned - omit NOTHING
-- Provide detailed, thorough responses for each section with specific examples from the transcript
-- Include direct quotes when relevant to support your observations
-- Avoid summarizing or condensing - err on the side of being exhaustive rather than concise
-- If a topic was mentioned even briefly, include it - the practitioner needs a complete record
-- Do NOT editorialize or decide what's important - document everything discussed
-
-Please fill out the template using ALL information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
-
-IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
+**Instructions:** Follow the modification request in the template. Keep comprehensive detail.
 """
         else:
-            # Normal generation (not regeneration) - include full personalization requirements
-            user_prompt = f"""Please generate a clinical document using the following template and transcript:
+            # Normal generation - keep it simple and trust the LLM
+            user_prompt = f"""Generate a comprehensive clinical document.
 
-CLIENT INFORMATION:
-- Name: {client_name}
-- ID: {client_info.get('id', 'N/A')}
+**Client:** {client_name}
+**Practitioner:** {practitioner_name}
+**Today's Date:** {today}
 
-PRACTITIONER INFORMATION:
-- Name: {practitioner_name}
-- ID: {practitioner_info.get('id', 'N/A')}
-
-CRITICAL PERSONALIZATION REQUIREMENTS - READ THIS CAREFULLY:
-YOU MUST USE THESE EXACT NAMES THROUGHOUT THE ENTIRE DOCUMENT:
-- Client name: {client_name}
-- Practitioner name: {practitioner_name}
-
-FORBIDDEN TERMS - NEVER USE THESE:
-- "Client" or "the client" or "client" (use "{client_name}" instead)
-- "The counselor" or "counselor" (use "{practitioner_name}" instead) 
-- "The therapist" or "therapist" (use "{practitioner_name}" instead)
-- "The practitioner" or "practitioner" (use "{practitioner_name}" instead)
-- "The patient" or "patient" (use "{client_name}" instead)
-
-CORRECT EXAMPLES:
-✓ "{client_name} expressed feeling overwhelmed..."
-✓ "{practitioner_name} observed that {client_name} appeared anxious..."
-✓ "{practitioner_name} suggested a collaborative approach..."
-✓ "{client_name} reported difficulty sleeping..."
-
-INCORRECT EXAMPLES (DO NOT USE):
-✗ "The client expressed feeling overwhelmed..."
-✗ "The counselor observed that the client appeared anxious..."
-✗ "The therapist suggested a collaborative approach..."
-✗ "Client reported difficulty sleeping..."
-
-TEMPLATE (with variables processed):
+**Template:**
 {template_content}
 
-SESSION TRANSCRIPT:
+**Session Transcript:**
 {transcript_text}
 
-FINAL REMINDER BEFORE YOU START WRITING:
-- Client name to use: {client_name}
-- Practitioner name to use: {practitioner_name}
-- Replace ALL instances of generic terms with these specific names
-- Check your output before finalizing to ensure you used the names correctly
-
-COMPREHENSIVE OUTPUT REQUIREMENTS - ABSOLUTELY CRITICAL:
-- Document ALL topics, themes, and subjects discussed in chronological order - do NOT selectively highlight only major themes
-- For SOAP-style templates: The Subjective section must comprehensively cover EVERYTHING the client discussed, not just key highlights
-- For Planning sections: List ALL interventions, techniques, tools, and homework assignments mentioned - omit NOTHING
-- Provide detailed, thorough responses for each section with specific examples from the transcript
-- Include direct quotes when relevant to support your observations
-- Avoid summarizing or condensing - err on the side of being exhaustive rather than concise
-- If a topic was mentioned even briefly, include it - the practitioner needs a complete record
-- Do NOT editorialize or decide what's important - document everything discussed
-
-LENGTH AND DETAIL EXPECTATIONS - CRITICAL:
-- Aim for COMPREHENSIVE documentation - a thorough clinical report should be 800-1500+ words minimum
-- Each section should have substantial detail, not just bullet points
-- Use full sentences and paragraphs, not abbreviated notes
-- If the transcript is 30+ minutes, the document should be proportionally detailed
-- Think "clinical report for insurance/legal purposes" not "quick session notes"
-
-QUALITY STANDARDS:
-- Good output: Detailed paragraphs with specific examples, quotes, and comprehensive coverage
-- Bad output: Brief bullet points, generic statements, missing context
-- Remember: Practitioners need this for funding approval, legal records, and continuity of care
-
-Please fill out the template using ALL information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
-
-IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
+**Key Requirements:**
+- Use {client_name} and {practitioner_name} throughout (never "the client" or "the therapist")
+- Replace template placeholders (like {{{{date}}}}, {{{{practitionerName}}}}) with actual values
+- Be thorough and detailed - aim for 800-1500+ words with full paragraphs
+- Document everything discussed with specific examples and quotes
+- If info isn't in transcript, note "not discussed in this session"
 """
         
         # Generate document using OpenAI - upgraded to gpt-4o for better intervention analysis
