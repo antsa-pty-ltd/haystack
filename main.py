@@ -704,6 +704,26 @@ Always personalize the document by using the actual client and practitioner name
         # Process template variables
         template_content = template.get('content', '')
         
+        # CRITICAL FIX: Remove AI instructions from template content
+        # These should be in the system prompt, not rendered in the output document
+        ai_instruction_markers = [
+            "AI Scribe Instructions",
+            "Instructions for AI Assistant",
+            "AI Assistant Instructions",
+            "INSTRUCTIONS FOR AI"
+        ]
+        
+        # Find and remove the AI instructions section
+        for marker in ai_instruction_markers:
+            if marker in template_content:
+                # Split on the marker and take only the part before it
+                parts = template_content.split(marker)
+                if len(parts) > 1:
+                    # Keep everything before the marker
+                    template_content = parts[0].rstrip()
+                    logger.info(f"🧹 Stripped AI instructions from template (found marker: '{marker}')")
+                    break
+        
         # Replace common template variables
         today = datetime.now().strftime("%B %d, %Y")
         
@@ -809,7 +829,7 @@ FINAL REMINDER BEFORE YOU START WRITING:
 - Replace ALL instances of generic terms with these specific names
 - Check your output before finalizing to ensure you used the names correctly
 
-COMPREHENSIVE OUTPUT REQUIREMENTS - CRITICAL:
+COMPREHENSIVE OUTPUT REQUIREMENTS - ABSOLUTELY CRITICAL:
 - Document ALL topics, themes, and subjects discussed in chronological order - do NOT selectively highlight only major themes
 - For SOAP-style templates: The Subjective section must comprehensively cover EVERYTHING the client discussed, not just key highlights
 - For Planning sections: List ALL interventions, techniques, tools, and homework assignments mentioned - omit NOTHING
@@ -818,6 +838,18 @@ COMPREHENSIVE OUTPUT REQUIREMENTS - CRITICAL:
 - Avoid summarizing or condensing - err on the side of being exhaustive rather than concise
 - If a topic was mentioned even briefly, include it - the practitioner needs a complete record
 - Do NOT editorialize or decide what's important - document everything discussed
+
+LENGTH AND DETAIL EXPECTATIONS - CRITICAL:
+- Aim for COMPREHENSIVE documentation - a thorough clinical report should be 800-1500+ words minimum
+- Each section should have substantial detail, not just bullet points
+- Use full sentences and paragraphs, not abbreviated notes
+- If the transcript is 30+ minutes, the document should be proportionally detailed
+- Think "clinical report for insurance/legal purposes" not "quick session notes"
+
+QUALITY STANDARDS:
+- Good output: Detailed paragraphs with specific examples, quotes, and comprehensive coverage
+- Bad output: Brief bullet points, generic statements, missing context
+- Remember: Practitioners need this for funding approval, legal records, and continuity of care
 
 Please fill out the template using ALL information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
 
@@ -831,9 +863,10 @@ IMPORTANT: Replace any remaining placeholder text like "(today's date)" with act
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.7  # Increased from 0.3 to allow more comprehensive coverage
+            temperature=0.8,  # Increased from 0.7 to 0.8 for even more comprehensive, detailed output
             # No max_tokens limit - let the model naturally complete the document
             # GPT-4o supports up to 16,384 output tokens if needed for comprehensive documentation
+            # Higher temperature encourages thorough coverage of all topics discussed
         )
         
         # Defensive null checks
