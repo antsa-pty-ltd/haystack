@@ -491,7 +491,7 @@ class HaystackPipelineManager:
             self._ui_actions = []  # Reset UI actions for this run
             
             # Doc-aligned agent loop: OpenAIChatGenerator + ToolInvoker
-            max_iterations = 4
+            max_iterations = 25  # High limit for complex multi-step workflows (similar to LangChain's default of 15)
             current_messages = haystack_messages.copy()
             
             # Prepare Haystack tools and components

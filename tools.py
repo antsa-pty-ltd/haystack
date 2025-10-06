@@ -637,7 +637,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "set_client_selection",
-                        "description": "Set the client selection in the UI (like selecting from AutoComplete). Call this FIRST before loading any sessions.",
+                        "description": "Set the client selection in the UI (like selecting from AutoComplete). This is STEP 1 - you must then call load_session_direct or load_multiple_sessions as STEP 2 to actually load session content.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -707,7 +707,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "load_multiple_sessions",
-                        "description": "Load multiple sessions as separate tabs in the UI. Use when user requests to load several sessions at once (e.g. 'load session 1 and 3'). Call AFTER setting client selection.",
+                        "description": "Load multiple sessions as separate tabs in the UI. CRITICAL: When user asks to load sessions, you MUST call BOTH set_client_selection AND load_multiple_sessions in sequence. This tool loads the actual session content into the UI. Use validate_sessions first to check sessions are valid.",
                         "parameters": {
                             "type": "object",
                             "properties": {
