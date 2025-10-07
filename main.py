@@ -826,9 +826,73 @@ Always personalize the document by using the actual client and practitioner name
             }
         )
         
+    except HTTPException:
+        # Re-raise HTTP exceptions (these are already user-friendly)
+        raise
     except Exception as e:
         logger.error(f"❌ Error generating document from template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate document: {str(e)}")
+        
+        # Determine error type and provide user-friendly message
+        error_message = str(e).lower()
+        
+        if "timeout" in error_message or "timed out" in error_message:
+            error_content = """# Generation Timed Out
+
+The document generation took longer than expected and timed out on the server.
+
+**What you can do:**
+• Click the Generate button again to retry
+• Try generating with a shorter transcript or simpler template
+• If the problem persists, contact support
+
+💡 **Tip:** Large transcripts may take up to 2 minutes to process."""
+        
+        elif "rate limit" in error_message or "quota" in error_message:
+            error_content = """# API Rate Limit Reached
+
+We've temporarily reached our AI service capacity.
+
+**What you can do:**
+• Wait a moment (30-60 seconds) and try again
+• If urgent, contact support for assistance
+
+💡 **Tip:** This is usually temporary and resolves quickly."""
+        
+        elif "openai" in error_message or "api" in error_message:
+            error_content = f"""# AI Service Error
+
+The AI service encountered an error while generating your document.
+
+**What you can do:**
+• Wait a moment and try again
+• Check that your transcript and template are properly formatted
+• Contact support if the problem persists
+
+💡 **Technical details:** {str(e)[:200]}"""
+        
+        else:
+            error_content = f"""# Oops! Something went wrong
+
+We encountered an unexpected error while generating your document.
+
+**What you can do:**
+• Click the Generate button again to retry
+• Refresh the page if the problem persists
+• Contact support if you continue to see this error
+
+**Error details:** {str(e)[:200]}"""
+        
+        # Return user-friendly error as document content
+        return GenerateDocumentResponse(
+            content=error_content,
+            generatedAt=datetime.now(timezone.utc).isoformat(),
+            metadata={
+                "error": True,
+                "errorType": type(e).__name__,
+                "errorMessage": str(e)[:500],
+                "processingMethod": "error_handling"
+            }
+        )
 
 @app.post("/summarize-ai-conversations")
 async def summarize_ai_conversations_endpoint(request: dict):
