@@ -172,7 +172,7 @@ class HaystackPipelineManager:
                                 future = executor.submit(
                                     lambda: asyncio.run(tool_manager.execute_tool(tool_name, kwargs))
                                 )
-                                result = future.result(timeout=30)
+                                result = future.result(timeout=120)  # 2 minutes timeout to match frontend Generate button
                                 
                                 # CRITICAL: Haystack ToolInvoker expects the tool function to return a string
                                 # that will be used as the ChatMessage content. We need to return JSON string.
