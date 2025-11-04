@@ -188,7 +188,7 @@ class PipelineManager:
                             mood_profile_result = await tool_manager.execute_tool("get_client_mood_profile", {
                                 "include_mood_history": True,
                                 "include_profile_details": True
-                            })
+                            }, session_id=session_id)
 
                             if mood_profile_result.get("success"):
                                 # Add the preloaded context as a hidden assistant message for context
@@ -334,7 +334,7 @@ class PipelineManager:
                                         if (not cid or (isinstance(cid, str) and len(cid) < 30)) and last_client_name:
                                             # Resolve via a quick lookup using last_client_name
                                             try:
-                                                lookup = await tool_manager.execute_tool("search_clients", {"query": last_client_name, "limit": 1})
+                                                lookup = await tool_manager.execute_tool("search_clients", {"query": last_client_name, "limit": 1}, session_id=session_id)
                                                 if lookup.get("success") and isinstance(lookup.get("result"), list) and len(lookup.get("result")) > 0:
                                                     resolved = lookup["result"][0].get("client_id")
                                                     if isinstance(resolved, str) and len(resolved) >= 30:
@@ -364,7 +364,7 @@ class PipelineManager:
                                             try:
                                                 cid_for_latest = arguments.get("client_id") or last_found_client_id
                                                 if cid_for_latest:
-                                                    latest = await tool_manager.execute_tool("get_latest_conversation", {"client_id": cid_for_latest, "message_limit": 50})
+                                                    latest = await tool_manager.execute_tool("get_latest_conversation", {"client_id": cid_for_latest, "message_limit": 50}, session_id=session_id)
                                                     if latest.get("success") and isinstance(latest.get("result"), dict):
                                                         candidate = latest["result"].get("latest_assignment_id")
                                                         if _is_valid_assignment_id(candidate):
@@ -403,7 +403,7 @@ class PipelineManager:
                                     full_response += executing_msg
                                     yield executing_msg
 
-                                tool_result = await tool_manager.execute_tool(tool_name, arguments)
+                                tool_result = await tool_manager.execute_tool(tool_name, arguments, session_id=session_id)
                                 last_tool_signature = tool_signature
 
                                 # Debug logging for templates issue

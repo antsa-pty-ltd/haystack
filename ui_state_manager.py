@@ -1,137 +1,402 @@
 """
-UI State Manager for storing and accessing frontend UI state in the backend.
+UI State Manager for storing and accessing frontend UI state in Redis.
 This allows AI tools to access information about loaded sessions, selected clients, etc.
 """
 import logging
-from typing import Dict, Any, List, Optional
+import json
+import os
+from typing import Dict, List, Optional, TypedDict, Union, cast
 from datetime import datetime
+
+try:
+    import redis.asyncio as redis_async
+    import redis as redis_sync  # Sync client for tool execution in threads
+except ImportError:
+    import redis as redis_async  # type: ignore
+    redis_sync = redis_async  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+# Type definitions for UI state structure
+class LoadedSessionData(TypedDict, total=False):
+    sessionId: str
+    clientId: str
+    clientName: str
+    content: str
+    metadata: Dict[str, Union[str, int, float]]
+
+class CurrentClientData(TypedDict, total=False):
+    clientId: str
+    clientName: str
+
+class TemplateData(TypedDict, total=False):
+    templateId: str
+    templateName: str
+    templateContent: str
+    templateDescription: str
+
+class DocumentData(TypedDict, total=False):
+    documentId: str
+    documentName: str
+    documentContent: str
+
+class UIState(TypedDict, total=False):
+    session_id: str
+    last_updated: str
+    page_type: str
+    page_url: str
+    loadedSessions: List[LoadedSessionData]
+    currentClient: Optional[CurrentClientData]
+    selectedTemplate: Optional[TemplateData]
+    generatedDocuments: List[DocumentData]
+    sessionCount: int
+    documentCount: int
+    client_id: Optional[str]
+    active_tab: Optional[str]
+
 class UIStateManager:
-    """Manages UI state from frontend for AI tool access"""
+    """Redis-backed UI state manager with strict typing"""
     
-    def __init__(self):
-        # Store UI state per session ID
-        self._ui_states: Dict[str, Dict[str, Any]] = {}
-        # Store auth tokens per session for tool authentication
-        self._auth_tokens: Dict[str, str] = {}
+    STATE_TTL = 86400  # 24 hours in seconds
     
-    def update_state(self, session_id: str, ui_state: Dict[str, Any], auth_token: Optional[str] = None):
-        """Update UI state for a session"""
+    def __init__(self) -> None:
+        self.redis_client: Optional[redis_async.Redis] = None  # Async client for FastAPI
+        self.redis_client_sync: Optional[redis_sync.Redis] = None  # Sync client for tool execution
+        self._initialized: bool = False
+        self._in_memory_fallback: Dict[str, str] = {}  # Fallback storage if Redis fails
+        self._in_memory_tokens: Dict[str, str] = {}
+    
+    async def initialize(self) -> None:
+        """Initialize Redis connection (async for FastAPI)"""
         try:
-            self._ui_states[session_id] = {
-                **ui_state,
-                "last_updated": datetime.now().isoformat(),
-                "session_id": session_id
-            }
-            
-            if auth_token:
-                self._auth_tokens[session_id] = auth_token
-            
-            logger.info(f"📂 UI state updated for session {session_id}: {len(ui_state.get('loadedSessions', []))} sessions loaded")
-            
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            # Initialize async client
+            self.redis_client = await redis_async.from_url(redis_url, decode_responses=True)
+            await self.redis_client.ping()
+            # Initialize sync client for tool execution
+            self.redis_client_sync = redis_sync.from_url(redis_url, decode_responses=True)
+            self.redis_client_sync.ping()
+            self._initialized = True
+            logger.info(f"✅ UIStateManager initialized with Redis at {redis_url} (async + sync clients)")
         except Exception as e:
-            logger.error(f"Error updating UI state for session {session_id}: {e}")
+            logger.error(f"❌ Failed to initialize Redis: {e}")
+            logger.warning("⚠️  Falling back to in-memory state storage")
+            self._initialized = False
     
-    def get_state(self, session_id: str) -> Dict[str, Any]:
-        """Get UI state for a session"""
-        return self._ui_states.get(session_id, {})
+    def _state_key(self, session_id: str) -> str:
+        """Generate Redis key for UI state"""
+        return f"ui_state:{session_id}"
     
-    def get_loaded_sessions(self, session_id: str) -> List[Dict[str, Any]]:
+    def _token_key(self, session_id: str) -> str:
+        """Generate Redis key for auth token"""
+        return f"auth_token:{session_id}"
+    
+    async def update_incremental(
+        self, 
+        session_id: str, 
+        changes: Dict[str, Union[str, int, List[LoadedSessionData], CurrentClientData, TemplateData, None]], 
+        timestamp: str
+    ) -> bool:
+        """Apply incremental state changes with timestamp ordering"""
+        try:
+            if self._initialized and self.redis_client is not None:
+                # Redis path
+                key = self._state_key(session_id)
+                
+                # Get current state
+                current_json = await self.redis_client.get(key)
+                current: UIState = json.loads(current_json) if current_json else {}
+                
+                # Check timestamp ordering
+                last_updated = current.get("last_updated", "1970-01-01T00:00:00Z")
+                if timestamp < last_updated:
+                    logger.warning(f"⏭️  Ignoring stale update for {session_id}: {timestamp} < {last_updated}")
+                    return False
+                
+                # Merge changes (type-safe update)
+                for key_name, value in changes.items():
+                    current[key_name] = value  # type: ignore
+                
+                current["last_updated"] = timestamp
+                current["session_id"] = session_id
+                
+                # Store with TTL
+                await self.redis_client.setex(key, self.STATE_TTL, json.dumps(current))
+                logger.info(f"✅ Updated UI state for {session_id} (Redis)")
+                return True
+            else:
+                # In-memory fallback
+                key = self._state_key(session_id)
+                current_json = self._in_memory_fallback.get(key, "{}")
+                current: UIState = json.loads(current_json)
+                
+                last_updated = current.get("last_updated", "1970-01-01T00:00:00Z")
+                if timestamp < last_updated:
+                    logger.warning(f"⏭️  Ignoring stale update for {session_id}: {timestamp} < {last_updated}")
+                    return False
+                
+                for key_name, value in changes.items():
+                    current[key_name] = value  # type: ignore
+                
+                current["last_updated"] = timestamp
+                current["session_id"] = session_id
+                
+                self._in_memory_fallback[key] = json.dumps(current)
+                logger.info(f"✅ Updated UI state for {session_id} (in-memory fallback)")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Error updating incremental state for {session_id}: {e}")
+            return False
+    
+    async def update_state(
+        self, 
+        session_id: str, 
+        ui_state: UIState, 
+        auth_token: Optional[str] = None
+    ) -> bool:
+        """Full state update (replaces existing)"""
+        try:
+            ui_state["last_updated"] = datetime.utcnow().isoformat()
+            ui_state["session_id"] = session_id
+            
+            if self._initialized and self.redis_client is not None:
+                # Redis path
+                key = self._state_key(session_id)
+                await self.redis_client.setex(key, self.STATE_TTL, json.dumps(ui_state))
+                
+                if auth_token:
+                    token_key = self._token_key(session_id)
+                    await self.redis_client.setex(token_key, self.STATE_TTL, auth_token)
+                
+                logger.info(f"✅ Full state update for {session_id} (Redis)")
+                return True
+            else:
+                # In-memory fallback
+                key = self._state_key(session_id)
+                self._in_memory_fallback[key] = json.dumps(ui_state)
+                
+                if auth_token:
+                    token_key = self._token_key(session_id)
+                    self._in_memory_tokens[token_key] = auth_token
+                
+                logger.info(f"✅ Full state update for {session_id} (in-memory fallback)")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Error updating full state for {session_id}: {e}")
+            return False
+    
+    async def get_state(self, session_id: str) -> UIState:
+        """Get UI state for session"""
+        try:
+            if self._initialized and self.redis_client is not None:
+                # Redis path
+                key = self._state_key(session_id)
+                state_json = await self.redis_client.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+            else:
+                # In-memory fallback
+                key = self._state_key(session_id)
+                state_json = self._in_memory_fallback.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting state for {session_id}: {e}")
+            return {}
+    
+    async def get_loaded_sessions(self, session_id: str) -> List[LoadedSessionData]:
         """Get loaded sessions for a session"""
-        ui_state = self.get_state(session_id)
+        ui_state = await self.get_state(session_id)
         return ui_state.get("loadedSessions", [])
     
-    def get_current_client(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_current_client(self, session_id: str) -> Optional[CurrentClientData]:
         """Get currently selected client for a session"""
-        ui_state = self.get_state(session_id)
+        ui_state = await self.get_state(session_id)
         return ui_state.get("currentClient")
     
-    def get_active_tab(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get currently active tab for a session"""
-        ui_state = self.get_state(session_id)
-        return ui_state.get("activeTab")
-    
-    def get_selected_template(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_selected_template(self, session_id: str) -> Optional[TemplateData]:
         """Get currently selected template for a session"""
-        ui_state = self.get_state(session_id)
+        ui_state = await self.get_state(session_id)
         return ui_state.get("selectedTemplate")
     
-    def get_generated_documents(self, session_id: str) -> List[Dict[str, Any]]:
+    async def get_generated_documents(self, session_id: str) -> List[DocumentData]:
         """Get generated documents for a session"""
-        ui_state = self.get_state(session_id)
+        ui_state = await self.get_state(session_id)
         return ui_state.get("generatedDocuments", [])
     
-    def get_session_count(self, session_id: str) -> int:
-        """Get number of loaded sessions for a session"""
-        ui_state = self.get_state(session_id)
-        return ui_state.get("sessionCount", 0)
+    async def get_auth_token(self, session_id: str) -> Optional[str]:
+        """Get auth token for session"""
+        try:
+            if self._initialized and self.redis_client is not None:
+                # Redis path
+                token_key = self._token_key(session_id)
+                return await self.redis_client.get(token_key)
+            else:
+                # In-memory fallback
+                token_key = self._token_key(session_id)
+                return self._in_memory_tokens.get(token_key)
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting auth token for {session_id}: {e}")
+            return None
     
-    def get_auth_token(self, session_id: str) -> Optional[str]:
-        """Get auth token for a session"""
-        return self._auth_tokens.get(session_id)
+    async def cleanup_session(self, session_id: str) -> None:
+        """Clean up state for disconnected session"""
+        try:
+            if self._initialized and self.redis_client is not None:
+                # Redis path
+                await self.redis_client.delete(self._state_key(session_id))
+                await self.redis_client.delete(self._token_key(session_id))
+                logger.info(f"🧹 Cleaned up state for {session_id} (Redis)")
+            else:
+                # In-memory fallback
+                self._in_memory_fallback.pop(self._state_key(session_id), None)
+                self._in_memory_tokens.pop(self._token_key(session_id), None)
+                logger.info(f"🧹 Cleaned up state for {session_id} (in-memory)")
+                
+        except Exception as e:
+            logger.error(f"❌ Error cleaning up session {session_id}: {e}")
     
-    def get_session_content(self, session_id: str, target_session_id: str) -> Optional[str]:
-        """Get content of a specific loaded session"""
-        loaded_sessions = self.get_loaded_sessions(session_id)
-        for session in loaded_sessions:
-            if session.get("sessionId") == target_session_id:
-                return session.get("content", "")
-        return None
+    async def get_page_capabilities(self, session_id: str) -> List[str]:
+        """Get available tools for current page"""
+        state = await self.get_state(session_id)
+        page_type = state.get("page_type", "unknown")
+        
+        capability_map: Dict[str, List[str]] = {
+            "transcribe_page": [
+                "set_client_selection", "load_session_direct", "load_multiple_sessions",
+                "set_selected_template", "select_template_by_name", "get_loaded_sessions",
+                "get_session_content", "analyze_loaded_session", "generate_document_from_loaded"
+            ],
+            "client_details": [
+                "get_client_summary", "get_client_homework_status", "load_session_direct"
+            ],
+            "sessions_list": [
+                "load_session_direct", "load_multiple_sessions"
+            ],
+            "messages_page": [
+                "search_clients", "get_conversations", "get_conversation_messages"
+            ],
+        }
+        
+        base_tools = ["search_clients", "get_clinic_stats", "suggest_navigation"]
+        return base_tools + capability_map.get(page_type, [])
     
-    def find_sessions_by_client(self, session_id: str, client_name: str) -> List[Dict[str, Any]]:
-        """Find loaded sessions by client name"""
-        loaded_sessions = self.get_loaded_sessions(session_id)
-        matching_sessions = []
-        for session in loaded_sessions:
-            if session.get("clientName", "").lower() == client_name.lower():
-                matching_sessions.append(session)
-        return matching_sessions
-    
-    def cleanup_session(self, session_id: str):
-        """Clean up UI state for a disconnected session"""
-        if session_id in self._ui_states:
-            del self._ui_states[session_id]
-        if session_id in self._auth_tokens:
-            del self._auth_tokens[session_id]
-        logger.info(f"🧹 Cleaned up UI state for session {session_id}")
-    
-    def get_all_sessions_summary(self) -> Dict[str, Any]:
+    async def get_all_sessions_summary(self) -> Dict[str, Dict[str, Union[str, int]]]:
         """Get summary of all active sessions (for debugging)"""
-        summary = {}
-        for session_id, ui_state in self._ui_states.items():
-            # Safely get current_client name
-            current_client = ui_state.get("currentClient")
-            current_client_name = "None"
-            if current_client and isinstance(current_client, dict):
-                current_client_name = current_client.get("clientName", "None")
-            
-            # Safely get active tab ID
-            active_tab = ui_state.get("activeTab")
-            active_tab_id = "None"
-            if active_tab and isinstance(active_tab, dict):
-                active_tab_id = active_tab.get("activeTabId", "None")
-            
-            # Safely get selected template name
-            selected_template = ui_state.get("selectedTemplate")
-            selected_template_name = "None"
-            if selected_template and isinstance(selected_template, dict) and selected_template.get("templateId"):
-                selected_template_name = selected_template.get("templateName", "None")
-            
-            # Safely get generated documents count
-            generated_documents = ui_state.get("generatedDocuments", [])
-            document_count = len(generated_documents) if isinstance(generated_documents, list) else 0
-            
-            summary[session_id] = {
-                "session_count": ui_state.get("sessionCount", 0),
-                "document_count": document_count,
-                "current_client": current_client_name,
-                "active_tab": active_tab_id,
-                "selected_template": selected_template_name,
-                "last_updated": ui_state.get("last_updated", "Unknown")
-            }
+        summary: Dict[str, Dict[str, Union[str, int]]] = {}
+        
+        try:
+            if self._initialized and self.redis_client is not None:
+                # Redis path - scan for all ui_state:* keys
+                keys = await self.redis_client.keys("ui_state:*")
+                for key in keys:
+                    if isinstance(key, str):
+                        session_id = key.split(":", 1)[1]
+                        state = await self.get_state(session_id)
+                        summary[session_id] = {
+                            "page_type": state.get("page_type", "unknown"),
+                            "last_updated": state.get("last_updated", "unknown"),
+                            "loaded_sessions": len(state.get("loadedSessions", []))
+                        }
+            else:
+                # In-memory fallback
+                for key, state_json in self._in_memory_fallback.items():
+                    if key.startswith("ui_state:"):
+                        session_id = key.split(":", 1)[1]
+                        state = cast(UIState, json.loads(state_json))
+                        summary[session_id] = {
+                            "page_type": state.get("page_type", "unknown"),
+                            "last_updated": state.get("last_updated", "unknown"),
+                            "loaded_sessions": len(state.get("loadedSessions", []))
+                        }
+                        
+        except Exception as e:
+            logger.error(f"❌ Error getting sessions summary: {e}")
+        
         return summary
+    
+    # ====================================================================================
+    # SYNC METHODS - For tool execution in threads (avoids event loop conflicts)
+    # ====================================================================================
+    
+    def get_all_sessions_summary_sync(self) -> Dict[str, Dict[str, Union[str, int]]]:
+        """SYNC version: Get summary of all active sessions"""
+        summary: Dict[str, Dict[str, Union[str, int]]] = {}
+        
+        try:
+            if self._initialized and self.redis_client_sync is not None:
+                # Use sync Redis client
+                keys = self.redis_client_sync.keys("ui_state:*")
+                for key in keys:
+                    if isinstance(key, (str, bytes)):
+                        session_id = (key.decode() if isinstance(key, bytes) else key).split(":", 1)[1]
+                        state = self.get_state_sync(session_id)
+                        summary[session_id] = {
+                            "page_type": state.get("page_type", "unknown"),
+                            "last_updated": state.get("last_updated", "unknown"),
+                            "loaded_sessions": len(state.get("loadedSessions", []))
+                        }
+            else:
+                # In-memory fallback
+                for key, state_json in self._in_memory_fallback.items():
+                    if key.startswith("ui_state:"):
+                        session_id = key.split(":", 1)[1]
+                        state = cast(UIState, json.loads(state_json))
+                        summary[session_id] = {
+                            "page_type": state.get("page_type", "unknown"),
+                            "last_updated": state.get("last_updated", "unknown"),
+                            "loaded_sessions": len(state.get("loadedSessions", []))
+                        }
+        except Exception as e:
+            logger.error(f"❌ Error getting sessions summary (sync): {e}")
+        
+        return summary
+    
+    def get_state_sync(self, session_id: str) -> UIState:
+        """SYNC version: Get UI state for session"""
+        try:
+            if self._initialized and self.redis_client_sync is not None:
+                key = self._state_key(session_id)
+                state_json = self.redis_client_sync.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+            else:
+                # In-memory fallback
+                key = self._state_key(session_id)
+                state_json = self._in_memory_fallback.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+        except Exception as e:
+            logger.error(f"❌ Error getting state (sync) for {session_id}: {e}")
+            return {}
+    
+    def get_loaded_sessions_sync(self, session_id: str) -> List[LoadedSessionData]:
+        """SYNC version: Get loaded sessions"""
+        state = self.get_state_sync(session_id)
+        return state.get("loadedSessions", [])
+    
+    def get_current_client_sync(self, session_id: str) -> Optional[CurrentClientData]:
+        """SYNC version: Get current client"""
+        state = self.get_state_sync(session_id)
+        return state.get("currentClient")
+    
+    def get_selected_template_sync(self, session_id: str) -> Optional[TemplateData]:
+        """SYNC version: Get selected template"""
+        state = self.get_state_sync(session_id)
+        return state.get("selectedTemplate")
+    
+    def get_generated_documents_sync(self, session_id: str) -> List[DocumentData]:
+        """SYNC version: Get generated documents"""
+        state = self.get_state_sync(session_id)
+        return state.get("generatedDocuments", [])
 
 # Global instance
 ui_state_manager = UIStateManager()

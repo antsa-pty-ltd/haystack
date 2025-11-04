@@ -1684,27 +1684,53 @@ class ToolManager:
             logger.error(f"Error getting client homework status: {e}")
             return {"error": f"Failed to get homework status: {str(e)}", "assignments": []}
     
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a tool function"""
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Execute a tool function with session-based context"""
         try:
             if tool_name not in self.tools:
-                raise ValueError(f"Unknown tool: {tool_name}")
+                return {
+                    "success": False,
+                    "error": f"Unknown tool: {tool_name}",
+                    "tool": tool_name,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
             
+            # Check tool availability on current page (if session_id provided)
+            if session_id:
+                from ui_state_manager import ui_state_manager
+                ui_state = await ui_state_manager.get_state(session_id)
+                page_capabilities = await ui_state_manager.get_page_capabilities(session_id)
+                
+                # UI tools require page capability
+                ui_tools = [
+                    'set_client_selection', 'load_session_direct', 'load_multiple_sessions',
+                    'set_selected_template', 'select_template_by_name', 'generate_document_from_loaded',
+                    'get_loaded_sessions', 'get_session_content', 'analyze_loaded_session'
+                ]
+                
+                if tool_name in ui_tools and tool_name not in page_capabilities:
+                    page_type = ui_state.get("page_type", "unknown")
+                    return {
+                        "success": False,
+                        "error": f"Tool '{tool_name}' not available on '{page_type}' page",
+                        "suggestion": f"Navigate to transcribe page to use this tool",
+                        "tool": tool_name,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                
+                logger.info(f"🔧 Executing tool {tool_name} with page_type={page_type}")
+            
+            # Get tool implementation
             implementation = self.tools[tool_name]["implementation"]
             
-            # For UI-related tools, inject page context if available and tool supports it
-            ui_tools_with_context = ['set_client_selection', 'load_session_direct', 'load_multiple_sessions', 'set_selected_template']
+            # Inject session_id into tool arguments if the tool signature supports it
+            import inspect
+            sig = inspect.signature(implementation)
+            if 'session_id' in sig.parameters and session_id:
+                arguments['session_id'] = session_id
+                logger.info(f"🔄 Injected session_id into {tool_name}")
             
-            if tool_name in ui_tools_with_context and self.current_page_context:
-                # Add page_context to arguments if the tool function signature supports it
-                import inspect
-                sig = inspect.signature(implementation)
-                if 'page_context' in sig.parameters:
-                    arguments['page_context'] = self.current_page_context
-                    logger.info(f"🔄 Injecting page context into {tool_name}: {self.current_page_context.get('page_type', 'unknown')}")
-            elif tool_name in ui_tools_with_context:
-                logger.warning(f"⚠️ Tool {tool_name} is UI-related but no page context available")
-            
+            # Execute tool
             result = await implementation(**arguments)
             
             return {
@@ -1713,6 +1739,7 @@ class ToolManager:
                 "tool": tool_name,
                 "timestamp": datetime.utcnow().isoformat()
             }
+            
         except Exception as e:
             logger.error(f"Error executing tool {tool_name}: {e}")
             return {
@@ -1878,10 +1905,10 @@ class ToolManager:
             ui_sessions = []
             if page_context:
                 # Use the most recent UI state
-                all_summary = ui_state_manager.get_all_sessions_summary()
+                all_summary = ui_state_manager.get_all_sessions_summary_sync()
                 if all_summary:
                     latest_session_id = max(all_summary.keys(), key=lambda k: all_summary[k].get('last_updated', ''))
-                    ui_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
+                    ui_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
             
             selected_sessions = sessions or [
                 {
@@ -1961,7 +1988,7 @@ PERSONALIZATION INSTRUCTIONS:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             if not all_sessions_summary:
                 return {
                     "error": "No active UI session found. Template selection requires an active browser session.",
@@ -1972,7 +1999,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             if not selected_template or not selected_template.get("templateId"):
                 return {
                     "error": "No template is currently selected. Please select a template first or use set_selected_template.",
@@ -2033,8 +2060,8 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            # Use SYNC methods to avoid event loop conflicts when called from threads
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             if not all_sessions_summary:
                 return {
                     "ready_to_generate": False,
@@ -2048,17 +2075,17 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            # Check template status
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            # Check template status (SYNC)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             template_ready = bool(selected_template and selected_template.get("templateId"))
             
-            # Check sessions status
-            loaded_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
+            # Check sessions status (SYNC)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
             sessions_ready = bool(loaded_sessions)
             session_count = len(loaded_sessions) if loaded_sessions else 0
             
-            # Check client status
-            current_client = ui_state_manager.get_current_client(latest_session_id)
+            # Check client status (SYNC)
+            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
             client_ready = bool(current_client and current_client.get("clientName"))
             
             # Determine readiness and build response
@@ -2160,8 +2187,8 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            # Use SYNC methods to avoid event loop conflicts
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -2175,7 +2202,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
             
             if not generated_documents:
                 return {
@@ -2226,7 +2253,7 @@ PERSONALIZATION INSTRUCTIONS:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -2238,7 +2265,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
             
             # Find the document to refine
             target_document = None
@@ -3604,7 +3631,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3618,9 +3645,9 @@ Please refine the following document according to these instructions:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            loaded_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
-            session_count = ui_state_manager.get_session_count(latest_session_id)
-            current_client = ui_state_manager.get_current_client(latest_session_id)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
+            session_count = len(loaded_sessions)  # Count sessions from loaded_sessions array
+            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
             
             logger.info(f"📂 Found {session_count} loaded sessions in UI context")
             
@@ -3663,7 +3690,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3676,7 +3703,7 @@ Please refine the following document according to these instructions:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             
             if not selected_template or not selected_template.get("templateId"):
                 return {
@@ -3717,7 +3744,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3732,16 +3759,17 @@ Please refine the following document according to these instructions:
             found_session = None
             
             for ws_session_id in all_sessions_summary.keys():
-                content = ui_state_manager.get_session_content(ws_session_id, session_id)
-                if content:
-                    session_content = content
-                    
-                    # Get the full session metadata
-                    loaded_sessions = ui_state_manager.get_loaded_sessions(ws_session_id)
-                    for session in loaded_sessions:
-                        if session.get("sessionId") == session_id:
-                            found_session = session
-                            break
+                # Get loaded sessions for this WebSocket session
+                loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
+                
+                # Find the session with matching sessionId
+                for session in loaded_sessions:
+                    if session.get("sessionId") == session_id:
+                        session_content = session.get("content")
+                        found_session = session
+                        break
+                        
+                if found_session:
                     break
             
             if not session_content:
@@ -3778,14 +3806,14 @@ Please refine the following document according to these instructions:
             
             # Debug: Check what sessions are available in UI state
             from ui_state_manager import ui_state_manager
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             logger.info(f"🔍 DEBUG: All UI sessions: {all_sessions_summary}")
             
             # Get the actual loaded session IDs
             actual_loaded_sessions = []
             if all_sessions_summary:
                 for ws_session_id in all_sessions_summary.keys():
-                    loaded_sessions = ui_state_manager.get_loaded_sessions(ws_session_id)
+                    loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
                     session_ids = [s.get('sessionId') for s in loaded_sessions if s.get('sessionId')]
                     logger.info(f"🔍 DEBUG: Loaded sessions for {ws_session_id}: {session_ids}")
                     actual_loaded_sessions.extend(session_ids)

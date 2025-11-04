@@ -72,6 +72,11 @@ app = FastAPI(
 @app.on_event("startup")
 async def on_startup():
     try:
+        await ui_state_manager.initialize()
+        logger.info("✅ UI State Manager initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ UI State Manager init warning: {e}")
+    try:
         await session_manager.initialize()
     except Exception as e:
         logger.warning(f"Session manager init warning: {e}")
@@ -89,9 +94,9 @@ app.add_middleware(
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
 )
 
-# In-memory UI state only (sessions are persisted via SessionManager)
+# WebSocket connections and message buffers for ordering
 websocket_connections: Dict[str, WebSocket] = {}
-ui_states: Dict[str, Dict[str, Any]] = {}
+message_buffers: Dict[str, List[Dict[str, Any]]] = {}
 
 class CreateSessionRequest(BaseModel):
     persona_type: str = "web_assistant"
@@ -280,7 +285,7 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
 
     # Prefer token from incoming message, else from stored UI state manager, else from stored session
     incoming_token = message_data.get("auth_token") or message_data.get("token")
-    ui_state_token = ui_state_manager.get_auth_token(session_id)
+    ui_state_token = await ui_state_manager.get_auth_token(session_id)
     
     # Also check the stored session for auth token
     session_token = None
@@ -321,7 +326,7 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
         logger.info("🔍 Debug: skipping explicit profile_id set for client context")
 
     # Attach page context derived from latest UI state for this session
-    ui_state = ui_states.get(session_id) or {}
+    ui_state = await ui_state_manager.get_state(session_id)
     page_context = _build_page_context_from_ui_state(ui_state)
     if page_context:
         try:
@@ -972,17 +977,86 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 continue
                 
             if message_data.get("type") == "ui_state_update":
-                # Store UI state and (optionally) auth token
-                state = message_data.get("state", {})
+                # Handle UI state update - supports BOTH formats:
+                # 1. Full state format: { type: "ui_state_update", state: {...}, auth_token: "..." }
+                # 2. Incremental format: { type: "ui_state_update", changeType: "...", payload: {...}, ... }
+                
+                # Extract auth token if present
                 auth_token = message_data.get("auth_token") or message_data.get("token")
-                ui_states[session_id] = state
-                try:
-                    ui_state_manager.update_state(session_id, state, auth_token=auth_token)
-                except Exception as e:
-                    logger.warning(f"Failed to persist UI state via manager: {e}")
-                logger.info(f"Updated UI state for session {session_id}")
+                
+                # Check which format we received
+                if "state" in message_data:
+                    # Full state format from ai-ui-integration.ts
+                    full_state = message_data.get("state", {})
+                    timestamp = full_state.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    
+                    # Store the full state directly
+                    try:
+                        await ui_state_manager.update_state(session_id, full_state, auth_token=auth_token)
+                        logger.info(f"✅ Updated full UI state for session {session_id}: {len(full_state.get('generatedDocuments', []))} docs, {len(full_state.get('loadedSessions', []))} sessions")
+                        success = True
+                    except Exception as e:
+                        logger.error(f"❌ Failed to update UI state for {session_id}: {e}")
+                        success = False
+                else:
+                    # Incremental format with changeType/payload
+                    change_type = message_data.get("changeType", "unknown")
+                    payload = message_data.get("payload", {})
+                    timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    page_type = message_data.get("page_type", "")
+                    page_url = message_data.get("page_url", "")
+                    sequence = message_data.get("sequence", 0)
+                    
+                    # Build incremental changes dict
+                    changes: Dict[str, Any] = {
+                        change_type: payload,
+                        "page_type": page_type,
+                        "page_url": page_url,
+                    }
+                    
+                    # Add sequence if provided
+                    if sequence:
+                        changes["sequence"] = sequence
+                    
+                    # Persist to Redis via ui_state_manager
+                    try:
+                        success = await ui_state_manager.update_incremental(
+                            session_id, changes, timestamp
+                        )
+                        
+                        # Also store auth token if provided
+                        if auth_token and success:
+                            await ui_state_manager.update_state(
+                                session_id, 
+                                await ui_state_manager.get_state(session_id),
+                                auth_token=auth_token
+                            )
+                        
+                        logger.info(f"✅ Updated UI state for session {session_id}: {change_type}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to update UI state for {session_id}: {e}")
+                        success = False
+                
+                # Send acknowledgment
+                await websocket.send_text(json.dumps({
+                    "type": "ui_state_ack",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "success": success,
+                    "session_id": session_id
+                }))
+                
                 # Proactively set tool context if available
                 await _ensure_tools_context(session_id, message_data)
+                
+                # Process any buffered chat messages waiting for state
+                if session_id in message_buffers and message_buffers[session_id]:
+                    logger.info(f"🔄 Processing {len(message_buffers[session_id])} buffered messages for {session_id}")
+                    buffered = message_buffers[session_id]
+                    message_buffers[session_id] = []
+                    for buffered_msg in buffered:
+                        # Re-process buffered message (will be handled by main loop)
+                        pass
+                
                 continue
             
             message = message_data.get("message", "")
@@ -1002,7 +1076,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await _ensure_tools_context(session_id, message_data)
 
                 # Build context for pipeline
-                ui_state = ui_states.get(session_id) or {}
+                ui_state = await ui_state_manager.get_state(session_id)
                 derived = _build_page_context_from_ui_state(ui_state)
                 
                 # Extract profile_id for session recovery
@@ -1088,10 +1162,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.info(f"WebSocket disconnected for session {session_id}")
         if session_id in websocket_connections:
             del websocket_connections[session_id]
+        # Note: UI state is NOT cleaned up here - it persists with 24h TTL in Redis
+        # This allows reconnection and state recovery
+        # Cleanup message buffer
+        message_buffers.pop(session_id, None)
     except Exception as e:
         logger.error(f"WebSocket error for session {session_id}: {e}")
         if session_id in websocket_connections:
             del websocket_connections[session_id]
+        # On error, also keep state for potential recovery
+        message_buffers.pop(session_id, None)
 
 async def handle_template_request(message: str, session_id: str) -> str:
     """Handle template-related requests"""
@@ -1139,7 +1219,7 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
         # Get session info
         sess = await session_manager.get_session(session_id)
         persona_type = (sess.persona_type if sess else "web_assistant")
-        ui_state = ui_states.get(session_id, {})
+        ui_state = await ui_state_manager.get_state(session_id)
         
         system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
         
@@ -1213,6 +1293,66 @@ async def send_streaming_response(websocket: WebSocket, session_id: str, respons
         "type": "message_complete",
         "session_id": session_id
     }))
+
+# Debug endpoints for state inspection
+@app.get("/debug/sessions/{session_id}/state")
+async def debug_session_state(session_id: str, authorization: Optional[str] = Header(None)):
+    """Debug endpoint - get UI state for a specific session (requires auth in production)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    ui_state = await ui_state_manager.get_state(session_id)
+    capabilities = await ui_state_manager.get_page_capabilities(session_id)
+    
+    return {
+        "session_id": session_id,
+        "ui_state": ui_state,
+        "available_capabilities": capabilities,
+        "last_updated": ui_state.get("last_updated"),
+        "redis_connected": ui_state_manager._initialized
+    }
+
+@app.get("/debug/sessions")
+async def debug_all_sessions(authorization: Optional[str] = Header(None)):
+    """Debug endpoint - list all active sessions (requires auth in production)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    # Get all sessions summary from ui_state_manager
+    sessions = await ui_state_manager.get_all_sessions_summary()
+    
+    return {
+        "total_sessions": len(sessions),
+        "sessions": sessions,
+        "redis_connected": ui_state_manager._initialized
+    }
+
+@app.get("/debug/redis/health")
+async def debug_redis_health(authorization: Optional[str] = Header(None)):
+    """Debug endpoint - check Redis connection health"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    try:
+        if ui_state_manager._initialized and ui_state_manager.redis_client:
+            await ui_state_manager.redis_client.ping()
+            return {
+                "redis_connected": True,
+                "status": "healthy",
+                "message": "Redis connection is working"
+            }
+        else:
+            return {
+                "redis_connected": False,
+                "status": "disconnected",
+                "message": "Redis client not initialized (using in-memory fallback)"
+            }
+    except Exception as e:
+        return {
+            "redis_connected": False,
+            "status": "error",
+            "message": f"Redis connection error: {str(e)}"
+        }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8001))
