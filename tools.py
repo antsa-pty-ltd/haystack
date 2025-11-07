@@ -1700,16 +1700,16 @@ class ToolManager:
                 from ui_state_manager import ui_state_manager
                 ui_state = await ui_state_manager.get_state(session_id)
                 page_capabilities = await ui_state_manager.get_page_capabilities(session_id)
-                
+                page_type = ui_state.get("page_type", "unknown")
+
                 # UI tools require page capability
                 ui_tools = [
                     'set_client_selection', 'load_session_direct', 'load_multiple_sessions',
                     'set_selected_template', 'select_template_by_name', 'generate_document_from_loaded',
                     'get_loaded_sessions', 'get_session_content', 'analyze_loaded_session'
                 ]
-                
+
                 if tool_name in ui_tools and tool_name not in page_capabilities:
-                    page_type = ui_state.get("page_type", "unknown")
                     return {
                         "success": False,
                         "error": f"Tool '{tool_name}' not available on '{page_type}' page",
@@ -1717,7 +1717,7 @@ class ToolManager:
                         "tool": tool_name,
                         "timestamp": datetime.utcnow().isoformat()
                     }
-                
+
                 logger.info(f"🔧 Executing tool {tool_name} with page_type={page_type}")
             
             # Get tool implementation
