@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
 from haystack_pipeline import HaystackPipelineManager
-from personas import PersonaType
+from personas import PersonaType, persona_manager
 from session_manager import session_manager
 
 # Load environment variables
@@ -121,102 +121,48 @@ class GenerateDocumentResponse(BaseModel):
     metadata: Dict[str, Any] = {}
 
 def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = None) -> str:
-    """Get enhanced system prompt with available capabilities"""
+    """Get enhanced system prompt using personas.py"""
+    try:
+        # Convert string to PersonaType enum
+        persona_enum = PersonaType(persona_type)
+    except ValueError:
+        persona_enum = PersonaType.WEB_ASSISTANT
     
-    base_prompt = """You are a helpful AI assistant for the ANTSA platform.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
+    # Get base system prompt from personas.py
+    base_prompt = persona_manager.get_system_prompt(persona_enum)
     
-    if persona_type == "web_assistant":
-        base_prompt = """You are a helpful AI web assistant designed to assist users with navigating and using the ANTSA platform. Provide concise and direct answers.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
-    elif persona_type == "data_assistant":
-        base_prompt = """You are a data analysis AI assistant. Your primary goal is to help users understand and interpret their data.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
-    
-    # Add current page context if available
+    # Add UI-specific context enhancements
     if ui_state:
         derived_context = _build_page_context_from_ui_state(ui_state)
+        
+        # Add current page context
         if derived_context.get('page_display_name'):
-            base_prompt += f"\n\nCURRENT PAGE: You are currently viewing the {derived_context['page_display_name']} page."
-    
-    # Add template capabilities if available
-    capabilities = "\n\n🛠️ Available Capabilities:"
-    
-    if tool_manager:
-        capabilities += "\n- Template access: I can help you find and load templates"
-        capabilities += "\n- Client search: I can help you find client information"
-        capabilities += "\n- Document generation: I can help create documents from templates"
-    else:
-        capabilities += "\n- General chat and assistance"
-        capabilities += "\n- Guidance on using the platform"
-    
-    # Add current context
-    if ui_state:
-        page_url = ui_state.get('page_url', 'unknown')
-        client_id = ui_state.get('client_id')
+            base_prompt += f"\n\n📍 CURRENT PAGE: {derived_context['page_display_name']}"
+        
+        # Add UI state context
+        page_url = ui_state.get('page_url', '')
         client_name = ui_state.get('client_name')
+        client_id = ui_state.get('client_id')
         selected_template = ui_state.get('selected_template')
-        active_document = ui_state.get('active_document')
         loaded_sessions = ui_state.get('loadedSessions', [])
         generated_documents = ui_state.get('generatedDocuments', [])
+        active_document = ui_state.get('active_document')
         
-        capabilities += f"\n\n📍 Current Context:"
-        capabilities += f"\n- Page: {page_url}"
-        capabilities += f"\n- Client: {client_name if client_name else (client_id if client_id else 'None selected')}"
-        capabilities += f"\n- Template: {selected_template.get('name') if selected_template else 'None'}"
-        capabilities += f"\n- Loaded Sessions: {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0}"
-        capabilities += f"\n- Generated Documents: {len(generated_documents) if isinstance(generated_documents, list) else 0}"
+        context_parts = []
+        context_parts.append(f"Page: {page_url}")
+        context_parts.append(f"Client: {client_name or client_id or 'None'}")
+        context_parts.append(f"Template: {selected_template.get('name') if selected_template else 'None'}")
+        context_parts.append(f"Loaded Sessions: {len(loaded_sessions)}")
+        context_parts.append(f"Generated Documents: {len(generated_documents)}")
         
-        # Add active document context
+        base_prompt += f"\n\n🔍 UI STATE:\n" + "\n".join(f"- {part}" for part in context_parts)
+        
+        # Add active document info
         if active_document and active_document.get('document'):
             doc = active_document['document']
-            capabilities += f"\n- Active Document: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId', 'Unknown')})"
-            if doc.get('isGenerated'):
-                capabilities += f" - Generated document"
-            capabilities += f"\n- Document Content Preview: {doc.get('documentContent', '')[:100]}{'...' if len(doc.get('documentContent', '')) > 100 else ''}"
-        
-        # Add instructions for document generation
-        if client_name and (loaded_sessions or generated_documents):
-            capabilities += f"\n\n🎯 CRITICAL ACTIVE SESSION CONTEXT:"
-            capabilities += f"\n- The client's name is '{client_name}' - use this instead of 'client' or 'the client'"
-            capabilities += f"\n- You have access to {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0} loaded session(s)"
-            if generated_documents and isinstance(generated_documents, list) and len(generated_documents) > 0:
-                capabilities += f"\n- There are {len(generated_documents)} existing document(s) currently visible"
-                capabilities += f"\n\n🔄 CRITICAL DOCUMENT MODIFICATION INSTRUCTIONS:"
-                capabilities += f"\n- When user asks to modify/regenerate/change an existing document, use the refine_document tool"
-                capabilities += f"\n- Pass the document ID and the user's specific instructions in refinement_instructions parameter"
-                capabilities += f"\n- The refine_document tool will regenerate the document with the requested changes"
-                capabilities += f"\n- Do NOT just acknowledge requests - actively call refine_document to apply changes"
-                capabilities += f"\n- For NEW documents (not modifying existing), use generate_document_auto with generation_instructions"
+            base_prompt += f"\n\n📄 ACTIVE DOCUMENT: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId')})"
     
-    return base_prompt + capabilities
+    return base_prompt
 
 
 def _get_human_readable_page_name(technical_name: str) -> str:

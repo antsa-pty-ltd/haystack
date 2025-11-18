@@ -2440,13 +2440,39 @@ Please refine the following document according to these instructions:
             
         except Exception as e:
             logger.error(f"Error searching clients: {e}")
-            # Fallback response
+            
+            # Provide more helpful error context
+            error_message = str(e)
+            error_type = "Unknown Error"
+            user_guidance = "Please try again or contact support if the issue persists."
+            
+            # Detect specific error types
+            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+                error_type = "Authentication Error"
+                user_guidance = "Your session may have expired. Please refresh the page and try again."
+            elif "403" in error_message or "Forbidden" in error_message:
+                error_type = "Permission Error"
+                user_guidance = "You don't have permission to access this client information."
+            elif "404" in error_message or "Not Found" in error_message:
+                error_type = "Client Not Found"
+                user_guidance = f"No clients found matching '{query}'. Please check the spelling and try again."
+            elif "timeout" in error_message.lower() or "timed out" in error_message.lower():
+                error_type = "Connection Timeout"
+                user_guidance = "The server took too long to respond. Please try again in a moment."
+            elif "connection" in error_message.lower() or "network" in error_message.lower():
+                error_type = "Network Error"
+                user_guidance = "Unable to connect to the server. Please check your internet connection."
+            
+            # Fallback response with detailed error info
             return [
                 {
                     "client_id": "error",
-                    "name": f"Search Error for '{query}'",
+                    "name": f"Search Error: {error_type}",
                     "status": "Error",
-                    "error": f"Failed to search: {str(e)}",
+                    "error": error_message,
+                    "error_type": error_type,
+                    "user_guidance": user_guidance,
+                    "search_query": query,
                     "last_session": None
                 }
             ]
@@ -3242,10 +3268,41 @@ Please refine the following document according to these instructions:
             
         except Exception as e:
             logger.error(f"Error searching sessions: {e}")
+            
+            # Provide more helpful error context
+            error_message = str(e)
+            error_type = "Unknown Error"
+            user_guidance = "Please try again or contact support if the issue persists."
+            
+            # Detect specific error types
+            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+                error_type = "Authentication Error"
+                user_guidance = "Your session may have expired. Please refresh the page and try again."
+            elif "403" in error_message or "Forbidden" in error_message:
+                error_type = "Permission Error"
+                user_guidance = "You don't have permission to access session information."
+            elif "404" in error_message or "Not Found" in error_message:
+                error_type = "Sessions Not Found"
+                criteria = []
+                if client_name:
+                    criteria.append(f"client '{client_name}'")
+                if date_from or date_to:
+                    criteria.append(f"dates {date_from or 'any'} to {date_to or 'any'}")
+                criteria_str = " and ".join(criteria) if criteria else "the specified criteria"
+                user_guidance = f"No sessions found for {criteria_str}. The session may not exist or may not have been transcribed yet."
+            elif "timeout" in error_message.lower() or "timed out" in error_message.lower():
+                error_type = "Connection Timeout"
+                user_guidance = "The server took too long to respond. Please try again in a moment."
+            elif "connection" in error_message.lower() or "network" in error_message.lower():
+                error_type = "Network Error"
+                user_guidance = "Unable to connect to the server. Please check your internet connection."
+            
             return {
                 "sessions": [],
                 "total": 0,
-                "error": f"Failed to search sessions: {str(e)}",
+                "error": error_message,
+                "error_type": error_type,
+                "user_guidance": user_guidance,
                 "search_criteria": {
                     "client_name": client_name,
                     "client_id": client_id,
