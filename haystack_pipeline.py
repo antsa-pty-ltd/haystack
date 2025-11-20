@@ -5,6 +5,8 @@ Following official Haystack recommendations for agent workflows
 import asyncio
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Any, AsyncGenerator, Callable
 from datetime import datetime
 
@@ -34,16 +36,19 @@ class HaystackPipelineManager:
         self.pipelines: Dict[str, Pipeline] = {}
         self._initialized = False
         self._main_loop = None  # Store reference to main event loop
+        self._main_thread_id = None  # Store main thread ID
+        self._tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool_exec")
     
     async def initialize(self):
         """Initialize Haystack pipelines for different workflows"""
         if self._initialized:
             return
         
-        # Capture the main event loop for tool execution from threads
+        # Capture the main event loop and thread for tool execution
         try:
             self._main_loop = asyncio.get_running_loop()
-            logger.info("✅ Captured main event loop for tool execution")
+            self._main_thread_id = threading.current_thread().ident
+            logger.info(f"✅ Captured main event loop (thread {self._main_thread_id}) for tool execution")
         except RuntimeError:
             logger.warning("⚠️ Could not capture main event loop - tools may not work correctly")
         
@@ -178,34 +183,28 @@ class HaystackPipelineManager:
                             # Otherwise, tools will operate without session context
                             session_id_from_kwargs = kwargs.pop('session_id', None)
                             
-                            # CRITICAL FIX: Must use the main event loop, not create a new one
-                            # The Redis client is bound to FastAPI's main event loop
-                            # Creating a new loop with asyncio.run() causes "different loop" errors
+                            # CRITICAL FIX: Avoid deadlock by running async code in a separate thread
+                            # The issue: If we're in the main loop's thread and try to use 
+                            # run_coroutine_threadsafe, we'll deadlock because the main loop
+                            # is blocked waiting for this synchronous function to return
                             
-                            # Try to get the current running loop (should work in async context)
-                            try:
-                                loop = asyncio.get_running_loop()
-                                # If we have a running loop, schedule the coroutine
-                                import concurrent.futures
-                                future = asyncio.run_coroutine_threadsafe(
-                                    tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs),
-                                    loop
-                                )
-                                result = future.result(timeout=120)
-                            except RuntimeError:
-                                # No running loop - we're in a thread spawned by Haystack
-                                # Use the main loop reference we captured during initialization
-                                if self._main_loop:
-                                    logger.debug(f"🔄 Tool {tool_name} using main loop reference from thread")
-                                    future = asyncio.run_coroutine_threadsafe(
-                                        tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs),
-                                        self._main_loop
+                            # Solution: Run the async code in a dedicated thread pool with its own event loop
+                            def _run_async_in_thread():
+                                """Run the async tool in a new event loop in a separate thread"""
+                                # Create a new event loop for this thread
+                                new_loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(new_loop)
+                                try:
+                                    # Run the async function and return the result
+                                    return new_loop.run_until_complete(
+                                        tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs)
                                     )
-                                    result = future.result(timeout=120)
-                                else:
-                                    # Last resort fallback: create a new loop (not ideal but functional)
-                                    logger.warning(f"⚠️ Tool {tool_name} called from thread without loop access, creating new loop")
-                                    result = asyncio.run(tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs))
+                                finally:
+                                    new_loop.close()
+                            
+                            # Submit to thread pool and wait for result
+                            future = self._tool_executor.submit(_run_async_in_thread)
+                            result = future.result(timeout=120)
                             
                             # CRITICAL: Haystack ToolInvoker expects the tool function to return a string
                             # that will be used as the ChatMessage content. We need to return JSON string.
