@@ -1266,6 +1266,94 @@ class ToolManager:
         else:
             return {}
     
+    def get_haystack_component_tools(self, persona_type: str) -> List:
+        """
+        Get Haystack Tool objects for a specific persona.
+        
+        This method converts the tool manager's async tools into proper Haystack Tool format
+        that can be used directly in Haystack Pipelines with ToolInvoker.
+        
+        Args:
+            persona_type: The persona type ("web_assistant", "jaimee_therapist", etc.)
+            
+        Returns:
+            List of Haystack Tool objects ready for use in Pipeline
+        """
+        from haystack.tools import Tool
+        import asyncio
+        import json
+        
+        haystack_tools = []
+        
+        # Get the list of allowed tools for this persona
+        tool_definitions = self.get_tools_for_persona(persona_type)
+        allowed_tool_names = [
+            t.get("function", {}).get("name") 
+            for t in tool_definitions 
+            if isinstance(t.get("function"), dict)
+        ]
+        
+        for tool_name in allowed_tool_names:
+            if tool_name not in self.tools:
+                continue
+            
+            tool_cfg = self.tools[tool_name]
+            
+            try:
+                description = tool_cfg["definition"]["function"].get("description", tool_name)
+                parameters = tool_cfg["definition"]["function"].get("parameters", {})
+            except Exception:
+                logger.warning(f"Failed to extract definition for tool {tool_name}")
+                continue
+            
+            # Create a sync wrapper for the async tool
+            def make_sync_wrapper(tool_name: str):
+                """Create a synchronous wrapper for async tool execution"""
+                def sync_tool_wrapper(**kwargs):
+                    try:
+                        # Create a new event loop in a thread to avoid blocking
+                        def run_async():
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                result = loop.run_until_complete(
+                                    self.execute_tool(tool_name, kwargs, session_id=kwargs.pop('session_id', None))
+                                )
+                                return result
+                            finally:
+                                loop.close()
+                        
+                        # Run in thread pool to avoid blocking
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(run_async)
+                            result = future.result(timeout=120)
+                        
+                        # Haystack ToolInvoker expects string return
+                        if isinstance(result, dict):
+                            return json.dumps(result, ensure_ascii=False)
+                        return str(result)
+                        
+                    except Exception as e:
+                        logger.error(f"Tool execution error for {tool_name}: {e}")
+                        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+                
+                return sync_tool_wrapper
+            
+            # Create Haystack Tool object
+            haystack_tool = Tool(
+                name=tool_name,
+                description=description,
+                parameters=parameters,
+                function=make_sync_wrapper(tool_name)
+            )
+            
+            haystack_tools.append(haystack_tool)
+            logger.debug(f"Converted tool {tool_name} to Haystack Tool format")
+        
+        logger.info(f"✅ Created {len(haystack_tools)} Haystack tools for persona {persona_type}")
+        return haystack_tools
+    
     def set_auth_token(self, token: str, profile_id: Optional[str] = None):
         """Set the JWT token for API calls and optionally set profile ID"""
         self.auth_token = token

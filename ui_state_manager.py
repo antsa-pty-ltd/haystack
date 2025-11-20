@@ -52,7 +52,9 @@ class UIState(TypedDict, total=False):
     sessionCount: int
     documentCount: int
     client_id: Optional[str]
+    client_name: Optional[str]
     active_tab: Optional[str]
+    profile_id: Optional[str]  # Track profile to detect profile changes
 
 class UIStateManager:
     """Redis-backed UI state manager with strict typing"""
@@ -159,6 +161,20 @@ class UIStateManager:
         try:
             ui_state["last_updated"] = datetime.utcnow().isoformat()
             ui_state["session_id"] = session_id
+            
+            # Validate and clear stale client_id if it doesn't match the current session's profile
+            client_id = ui_state.get("client_id")
+            if client_id:
+                # Get the previous state to check if profile changed
+                previous_state = await self.get_state(session_id)
+                previous_profile_id = previous_state.get("profile_id") if previous_state else None
+                current_profile_id = ui_state.get("profile_id")
+                
+                # If profile changed and client_id is still set, clear it (likely stale)
+                if previous_profile_id and current_profile_id and previous_profile_id != current_profile_id:
+                    logger.warning(f"⚠️ Profile changed from {previous_profile_id} to {current_profile_id}, clearing stale client_id: {client_id}")
+                    ui_state["client_id"] = None
+                    ui_state["client_name"] = None
             
             if self._initialized and self.redis_client is not None:
                 # Redis path

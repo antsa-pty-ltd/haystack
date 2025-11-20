@@ -19,7 +19,7 @@ import uvicorn
 from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
-from haystack_pipeline import HaystackPipelineManager
+from haystack_pipeline import haystack_pipeline_manager
 from personas import PersonaType, persona_manager
 from session_manager import session_manager
 
@@ -59,7 +59,7 @@ def load_templates_safely():
 tool_manager = load_templates_safely()
 
 # Pipeline manager for tool-enabled conversations with history using Haystack
-pipeline_manager = HaystackPipelineManager()
+pipeline_manager = haystack_pipeline_manager
 
 # Create FastAPI app
 app = FastAPI(
@@ -930,11 +930,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Extract auth token if present
                 auth_token = message_data.get("auth_token") or message_data.get("token")
                 
+                # Extract profile_id if present
+                profile_id = message_data.get("profile_id") or message_data.get("profileId")
+                
                 # Check which format we received
                 if "state" in message_data:
                     # Full state format from ai-ui-integration.ts
                     full_state = message_data.get("state", {})
                     timestamp = full_state.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    
+                    # Add profile_id to state for tracking
+                    if profile_id:
+                        full_state["profile_id"] = profile_id
                     
                     # Store the full state directly
                     try:
@@ -959,6 +966,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "page_type": page_type,
                         "page_url": page_url,
                     }
+                    
+                    # Add profile_id to changes if present
+                    if profile_id:
+                        changes["profile_id"] = profile_id
                     
                     # Add sequence if provided
                     if sequence:
