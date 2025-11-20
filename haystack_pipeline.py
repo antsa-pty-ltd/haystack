@@ -33,11 +33,19 @@ class HaystackPipelineManager:
     def __init__(self):
         self.pipelines: Dict[str, Pipeline] = {}
         self._initialized = False
+        self._main_loop = None  # Store reference to main event loop
     
     async def initialize(self):
         """Initialize Haystack pipelines for different workflows"""
         if self._initialized:
             return
+        
+        # Capture the main event loop for tool execution from threads
+        try:
+            self._main_loop = asyncio.get_running_loop()
+            logger.info("✅ Captured main event loop for tool execution")
+        except RuntimeError:
+            logger.warning("⚠️ Could not capture main event loop - tools may not work correctly")
         
         try:
             # Create different pipeline types
@@ -170,7 +178,7 @@ class HaystackPipelineManager:
                             # Otherwise, tools will operate without session context
                             session_id_from_kwargs = kwargs.pop('session_id', None)
                             
-                            # CRITICAL FIX: Must use the running event loop, not create a new one
+                            # CRITICAL FIX: Must use the main event loop, not create a new one
                             # The Redis client is bound to FastAPI's main event loop
                             # Creating a new loop with asyncio.run() causes "different loop" errors
                             
@@ -185,11 +193,19 @@ class HaystackPipelineManager:
                                 )
                                 result = future.result(timeout=120)
                             except RuntimeError:
-                                # No running loop - we're in a thread. Need to create a task in the main loop.
-                                # This is the problematic case - we need the main loop reference
-                                logger.error(f"⚠️ Tool {tool_name} called from thread without loop access")
-                                # Fallback: just run synchronously in a new loop (not ideal but functional)
-                                result = asyncio.run(tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs))
+                                # No running loop - we're in a thread spawned by Haystack
+                                # Use the main loop reference we captured during initialization
+                                if self._main_loop:
+                                    logger.debug(f"🔄 Tool {tool_name} using main loop reference from thread")
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs),
+                                        self._main_loop
+                                    )
+                                    result = future.result(timeout=120)
+                                else:
+                                    # Last resort fallback: create a new loop (not ideal but functional)
+                                    logger.warning(f"⚠️ Tool {tool_name} called from thread without loop access, creating new loop")
+                                    result = asyncio.run(tool_manager.execute_tool(tool_name, kwargs, session_id=session_id_from_kwargs))
                             
                             # CRITICAL: Haystack ToolInvoker expects the tool function to return a string
                             # that will be used as the ChatMessage content. We need to return JSON string.
