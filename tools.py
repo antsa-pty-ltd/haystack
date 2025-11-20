@@ -254,13 +254,13 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_homework_status",
-                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details.",
+                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details. IMPORTANT: You MUST first use search_clients or search_specific_clients to find the client and get their client_id, then use that exact client_id in this function. Never guess or fabricate a client_id.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "client_id": {
                                     "type": "string",
-                                    "description": "The unique identifier for the client (UUID)",
+                                    "description": "The exact UUID client_id returned from search_clients or search_specific_clients. You MUST obtain this from a search first - do not guess or make up a client_id.",
                                     "pattern": "^[0-9a-fA-F-]{30,}$"
                                 },
                                 "status_filter": {
