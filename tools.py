@@ -266,7 +266,7 @@ class ToolManager:
                                 "status_filter": {
                                     "type": "string",
                                     "enum": ["all", "active", "completed", "expired"],
-                                    "description": "Filter assignments by status",
+                                    "description": "Filter assignments. Use 'completed' to show assignments with completed homework items (what users mean by 'completed homework'). Use 'active' or 'expired' to filter by assignment status.",
                                     "default": "all"
                                 },
                                 "limit": {
@@ -1710,12 +1710,24 @@ class ToolManager:
             
             response = await self._make_api_request('GET', '/haystack/conversations', params=params)
             
+            logger.info(f"🔍 _get_client_homework_status: Raw API response keys: {list(response.keys())}")
+            logger.info(f"🔍 _get_client_homework_status: Total conversations: {response.get('total', 0)}")
+            logger.info(f"🔍 _get_client_homework_status: Conversations count: {len(response.get('conversations', []))}")
+            if response.get('conversations'):
+                first_conv = response['conversations'][0]
+                logger.info(f"🔍 _get_client_homework_status: First conversation sample: {first_conv}")
+            
             client_name = response.get("client_name", "Unknown Client")
             conversations = response.get("conversations", [])
             total_assignments = response.get("total", len(conversations))
             
             # Filter by status if specified
-            if status_filter != "all":
+            # Note: "completed" filter should show assignments with completed items, not just assignment status
+            if status_filter == "completed":
+                # When user asks for "completed" homework, show assignments that have completed items
+                conversations = [c for c in conversations if c.get("has_completed_items", False) or c.get("completed_items", 0) > 0]
+            elif status_filter != "all":
+                # For other filters (active, expired, etc.), filter by assignment status
                 conversations = [c for c in conversations if c.get("status", "").lower() == status_filter.lower()]
             
             # Apply limit
@@ -1724,13 +1736,21 @@ class ToolManager:
             # Enhance conversation data
             enhanced_assignments = []
             for conv in conversations:
+                total_items = conv.get("total_items", 0)
+                completed_items = conv.get("completed_items", 0)
+                has_completed = conv.get("has_completed_items", False) or completed_items > 0
+                
                 assignment = {
                     "assignment_id": conv.get("assignment_id"),
                     "homework_id": conv.get("homework_id"),
                     "title": conv.get("title"),
                     "status": conv.get("status"),
                     "start_date": conv.get("start_date"),
-                    "end_date": conv.get("end_date")
+                    "end_date": conv.get("end_date"),
+                    "total_items": total_items,
+                    "completed_items": completed_items,
+                    "has_completed_items": has_completed,
+                    "completion_rate": f"{completed_items}/{total_items}" if total_items > 0 else "0/0"
                 }
                 
                 if include_messages:
@@ -1753,6 +1773,10 @@ class ToolManager:
             active_assignments = len([c for c in conversations if c.get("status", "").lower() == "active"])
             completed_assignments = len([c for c in conversations if c.get("status", "").lower() == "completed"])
             
+            # Count assignments with completed items (this is what users mean by "completed homework")
+            assignments_with_completed_items = len([c for c in conversations if c.get("has_completed_items", False) or c.get("completed_items", 0) > 0])
+            total_completed_items = sum(c.get("completed_items", 0) for c in conversations)
+            
             return {
                 "client_id": client_id,
                 "client_name": client_name,
@@ -1761,11 +1785,13 @@ class ToolManager:
                     "returned_assignments": len(enhanced_assignments),
                     "active_assignments": active_assignments,
                     "completed_assignments": completed_assignments,
+                    "assignments_with_completed_items": assignments_with_completed_items,
+                    "total_completed_items": total_completed_items,
                     "total_messages": total_messages,
                     "status_breakdown": status_counts
                 },
                 "assignments": enhanced_assignments,
-                "filter_applied": status_filter
+                "filter_applied": status_filter if status_filter != "all" else None
             }
             
         except Exception as e:
