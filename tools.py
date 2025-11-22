@@ -515,6 +515,42 @@ class ToolManager:
                 "implementation": self._validate_sessions
             },
 
+            "semantic_search_sessions": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "semantic_search_sessions",
+                        "description": "Search for specific themes/topics across session transcripts using semantic similarity. Use when practitioner wants to focus on particular discussion topics (e.g., 'find discussions about anxiety coping strategies', 'segments mentioning sleep problems'). Returns the most relevant transcript segments.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Natural language query describing what to search for (e.g., 'discussions about sleep problems', 'anxiety coping strategies')"
+                                },
+                                "transcript_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Transcript IDs to search within (get these from search_sessions or load_session results)"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "default": 20,
+                                    "description": "Maximum number of segments to return (default: 20)"
+                                },
+                                "similarity_threshold": {
+                                    "type": "number",
+                                    "default": 0.7,
+                                    "description": "Minimum similarity score from 0.0 to 1.0 (default: 0.7)"
+                                }
+                            },
+                            "required": ["query", "transcript_ids"]
+                        }
+                    }
+                },
+                "implementation": self._semantic_search_sessions
+            },
+
             "get_loaded_sessions": {
                 "definition": {
                     "type": "function",
@@ -1175,6 +1211,7 @@ class ToolManager:
                 self.tools["get_latest_conversation"]["definition"],
                 self.tools["search_sessions"]["definition"],
                 self.tools["validate_sessions"]["definition"],
+                self.tools["semantic_search_sessions"]["definition"],
                 self.tools["load_session"]["definition"],
                 self.tools["analyze_session_content"]["definition"],
                 self.tools["set_client_selection"]["definition"],
@@ -1229,6 +1266,7 @@ class ToolManager:
                 "get_latest_conversation": self.tools["get_latest_conversation"]["implementation"],
                 "search_sessions": self.tools["search_sessions"]["implementation"],
                 "validate_sessions": self.tools["validate_sessions"]["implementation"],
+                "semantic_search_sessions": self.tools["semantic_search_sessions"]["implementation"],
                 "load_session": self.tools["load_session"]["implementation"],
                 "analyze_session_content": self.tools["analyze_session_content"]["implementation"],
                 "set_client_selection": self.tools["set_client_selection"]["implementation"],
@@ -1812,8 +1850,11 @@ class ToolManager:
             # Check tool availability on current page (if session_id provided)
             if session_id:
                 from ui_state_manager import ui_state_manager
-                ui_state = await ui_state_manager.get_state(session_id)
-                page_capabilities = await ui_state_manager.get_page_capabilities(session_id)
+                
+                # Always use sync methods - execute_tool runs in ThreadPoolExecutor with its own event loop
+                # Calling async methods from here causes "Future attached to different loop" errors
+                ui_state = ui_state_manager.get_state_sync(session_id)
+                page_capabilities = ui_state_manager.get_page_capabilities_sync(session_id)
                 
                 # UI tools require page capability
                 ui_tools = [
@@ -1832,7 +1873,7 @@ class ToolManager:
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 
-                logger.info(f"🔧 Executing tool {tool_name} with page_type={page_type}")
+                logger.info(f"🔧 Executing tool {tool_name} with page_type={ui_state.get('page_type', 'unknown')}")
             
             # Get tool implementation
             implementation = self.tools[tool_name]["implementation"]
@@ -3790,6 +3831,82 @@ Please refine the following document according to these instructions:
             logger.error(f"Error in validate_sessions: {e}")
             return {
                 "error": f"Failed to validate sessions: {str(e)}",
+                "status": "error"
+            }
+
+    async def _semantic_search_sessions(
+        self, 
+        query: str, 
+        transcript_ids: List[str],
+        limit: int = 20,
+        similarity_threshold: float = 0.7
+    ) -> Dict[str, Any]:
+        """
+        Semantic search across session transcripts using vector embeddings.
+        
+        Calls the API endpoint to perform semantic search using pgvector.
+        """
+        try:
+            if not query or not query.strip():
+                return {
+                    "error": "Query cannot be empty",
+                    "status": "invalid_request"
+                }
+            
+            if not transcript_ids or len(transcript_ids) == 0:
+                return {
+                    "error": "At least one transcript_id is required",
+                    "status": "invalid_request"
+                }
+            
+            logger.info(
+                f"🔍 semantic_search_sessions: query='{query[:50]}...', "
+                f"transcripts={len(transcript_ids)}, limit={limit}, threshold={similarity_threshold}"
+            )
+            
+            # Use synchronous httpx client (safe in thread pool)
+            import httpx
+            
+            # Make synchronous HTTP request to API endpoint
+            with httpx.Client() as client:
+                response = client.post(
+                    f"{self.api_base_url}/ai/semantic-search",
+                    json={
+                        "query": query,
+                        "transcript_ids": transcript_ids,
+                        "limit": limit,
+                        "similarity_threshold": similarity_threshold
+                    },
+                    headers=self._get_auth_headers(),
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                result = response.json()
+            
+            # Format response to match expected structure
+            segments = result.get("segments", [])
+            logger.info(f"✅ Found {len(segments)} matching segments")
+            
+            return {
+                "query": query,
+                "results_count": len(segments),
+                "segments": segments,
+                "transcript_ids_searched": transcript_ids,
+                "similarity_threshold": similarity_threshold,
+                "status": "success",
+                "message": f"Found {len(segments)} segments matching '{query[:50]}...'"
+            }
+            
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error in semantic_search_sessions: {e}", exc_info=True)
+            return {
+                "error": f"Failed to search sessions (HTTP error): {str(e)}",
+                "status": "error"
+            }
+        except Exception as e:
+            logger.error(f"Error in semantic_search_sessions: {e}", exc_info=True)
+            return {
+                "error": f"Failed to search sessions: {str(e)}",
                 "status": "error"
             }
 

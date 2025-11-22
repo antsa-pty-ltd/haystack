@@ -16,6 +16,10 @@ PyJWT==2.10.1
 # Redis for session management
 redis==5.2.0
 
+# PostgreSQL and vector search
+psycopg[binary,pool]>=3.1.18
+pgvector>=0.2.5
+
 # General utilities
 python-multipart==0.0.12
 httpx==0.27.0

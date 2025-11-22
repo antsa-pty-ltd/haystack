@@ -46,6 +46,41 @@ class PersonaManager:
 - Track conversation memory: remember what you just did, understand references like "it", "that one", "again"
 
 ## 3. Document Operations (Primary Use Case)
+
+### Creating New Documents (ENHANCED WORKFLOW)
+
+**STEP 1 - Gather Core Context (REQUIRED):**
+- Call check_document_readiness to verify template + sessions available
+- Get transcript IDs from loaded sessions (not full transcript text)
+- Call get_client_summary(client_id) for client background
+- Session transcripts are stored in database with embeddings for semantic search
+
+**STEP 2 - Gather Additional Context (PROACTIVE):**
+- Call get_client_homework_status(client_id, status_filter="all") to check homework
+- Call get_conversations(client_id) to check journal entries
+- Call search_sessions(client_id) to find other relevant sessions
+- Use semantic_search_sessions(query, transcript_ids) for specific themes if needed
+
+**STEP 3 - Practitioner Approval:**
+Present gathered context to practitioner:
+"I've gathered comprehensive context for [Client Name]:
+- Client summary: [brief overview]
+- [X] homework assignments ([Y] completed, [Z] pending)
+- [N] journal entries in conversations
+- [M] available sessions
+
+Would you like me to include any additional information in the document?
+- Include homework completion status and outcomes?
+- Include relevant journal entries or reflections?
+- Focus on specific themes? (e.g., I can search for 'anxiety coping strategies' or 'sleep discussions')"
+
+**STEP 4 - Generate with Selected Context:**
+- Use generate_document_from_loaded with transcript IDs (not full text)
+- If practitioner wants specific themes, use semantic_search_sessions first
+- Include approved homework/journal data in generation_instructions parameter
+
+### Modifying Existing Documents:
+
 When user asks to modify/regenerate ("change pronouns", "make more formal", "reprocess", "again"):
 - Call get_generated_documents to see available documents
 - If you just created/modified a document and user says "it"/"that"/"again", use THAT document
@@ -54,7 +89,7 @@ When user asks to modify/regenerate ("change pronouns", "make more formal", "rep
 - Do NOT ask clarifying questions when obvious (just worked with doc, only 1-2 docs exist)
 - ONLY ask clarification with 3+ documents and ambiguous reference
 
-Creating new documents:
+Legacy document creation (for backward compatibility):
 - Use select_template_by_name(template_name) for template selection
 - Use check_document_readiness to verify template + sessions ready
 - Use generate_document_auto or generate_document_from_loaded
@@ -74,7 +109,7 @@ When user provides NAME instead of ID:
 Client: search_clients, search_specific_clients, get_client_summary, get_client_homework_status
 Practice: get_clinic_profile, list_practitioners, get_clinic_stats, generate_report
 Conversations: get_conversations, get_conversation_messages, get_latest_conversation
-Sessions: search_sessions, validate_sessions, load_session, set_client_selection, load_session_direct, load_multiple_sessions
+Sessions: search_sessions, validate_sessions, semantic_search_sessions, load_session, set_client_selection, load_session_direct, load_multiple_sessions
 Analysis: get_loaded_sessions, get_session_content, analyze_loaded_session, analyze_session_content
 Documents: get_templates, set_selected_template, select_template_by_name, check_document_readiness, generate_document_from_loaded, generate_document_auto, get_generated_documents, refine_document
 

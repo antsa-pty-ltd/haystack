@@ -89,6 +89,9 @@ jobs:
         cp *.py deploy/
         cp requirements.txt deploy/
         
+        # Copy components directory (custom Haystack components)
+        cp -r components deploy/
+        
         # Copy any configuration files
         [ -f .env.example ] && cp .env.example deploy/ || true
         [ -f env-template.txt ] && cp env-template.txt deploy/ || true

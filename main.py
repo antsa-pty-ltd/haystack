@@ -61,6 +61,68 @@ tool_manager = load_templates_safely()
 # Pipeline manager for tool-enabled conversations with history using Haystack
 pipeline_manager = haystack_pipeline_manager
 
+# ===== SEMANTIC SEARCH CONFIGURATION =====
+# These settings control the quality vs. coverage tradeoff for document generation
+SEMANTIC_SEARCH_CONFIG = {
+    # Base similarity threshold (will be relaxed if results are sparse)
+    "base_similarity_threshold": 0.5,
+    
+    # Minimum similarity threshold (won't go below this)
+    "min_similarity_threshold": 0.2,
+    
+    # Threshold reduction per retry attempt
+    "threshold_reduction_step": 0.15,
+    
+    # Temporal context window (segments before/after high-relevance matches)
+    "temporal_context_window": 2,
+    
+    # Minimum relevance score to fetch temporal context (0.0-1.0)
+    "min_relevance_for_context": 0.6,
+    
+    # Maximum retry attempts when relaxing threshold
+    "max_threshold_attempts": 3,
+    
+    # Minimum expected results as fraction of requested (e.g., 0.33 = expect at least 1/3)
+    "min_result_fraction": 0.33
+}
+# ==========================================
+
+# ===== PROGRESS EMISSION HELPER =====
+async def emit_progress(generation_id: str, data: dict, authorization: Optional[str] = None):
+    """
+    Emit progress update to API via HTTP POST, which will broadcast via WebSocket
+    """
+    if not generation_id:
+        # No generationId means no progress tracking (legacy mode)
+        return
+    
+    try:
+        api_url = os.getenv("API_URL", "http://localhost:8080")
+        
+        payload = {
+            "generationId": generation_id,
+            **data
+        }
+        
+        # Use Authorization header if provided
+        headers = {}
+        if authorization:
+            headers["Authorization"] = authorization
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{api_url}/api/v1/ai/websocket/document-progress",
+                json=payload,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to emit progress (HTTP {response.status_code}): {response.text}")
+    except Exception as e:
+        # Don't fail document generation if progress emission fails
+        logger.error(f"Failed to emit progress for generation {generation_id}: {e}")
+# ====================================
+
 # Create FastAPI app
 app = FastAPI(
     title="Haystack AU Service",
@@ -110,10 +172,12 @@ class SessionResponse(BaseModel):
 
 class GenerateDocumentRequest(BaseModel):
     template: Dict[str, Any]
-    transcript: Dict[str, Any]
+    sessionIds: List[str]
     clientInfo: Dict[str, Any]
     practitionerInfo: Dict[str, Any]
     generationInstructions: Optional[str] = None
+    clientContextData: Optional[Dict[str, Any]] = None
+    generationId: Optional[str] = None  # For progress tracking via WebSocket
 
 class GenerateDocumentResponse(BaseModel):
     content: str
@@ -479,6 +543,9 @@ async def generate_document_from_template(
     profileid: str = Header(None)
 ):
     """Generate a document using a template and transcript data"""
+    # Extract generationId if present (for progress tracking)
+    generation_id = getattr(request, 'generationId', None)
+    
     try:
         logger.info(f"🎨 Generating document from template: {request.template.get('name', 'Unknown')}")
         
@@ -487,10 +554,19 @@ async def generate_document_from_template(
         
         # Extract data from request
         template = request.template
-        transcript = request.transcript
+        session_ids = request.sessionIds
         client_info = request.clientInfo
         practitioner_info = request.practitionerInfo
         generation_instructions = request.generationInstructions
+        
+        logger.info(f"📋 Generating document from {len(session_ids)} sessions using template '{template.get('name', 'Unknown')}'")
+        
+        # Emit initial progress
+        await emit_progress(generation_id, {
+            "type": "stage_started",
+            "stage": "policy_check",
+            "message": "Checking template for policy violations..."
+        }, authorization)
         
         # Check for policy violations in template content
         template_content = template.get('content', '')
@@ -594,20 +670,377 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 }
             )
         
-        # Build the transcript text from segments
+        # STEP 1: Analyze template to determine what context is needed
+        logger.info(f"🔍 STEP 1: Analyzing template to extract semantic search queries")
+        
+        await emit_progress(generation_id, {
+            "type": "stage_started",
+            "stage": "analyzing_template",
+            "message": "Analyzing template structure to determine context needs..."
+        }, authorization)
+        
+        analysis_prompt = f"""Analyze this clinical documentation template. Your goal is to generate semantic search queries to accurately populate the template with relevant information from therapy session transcripts.
+
+Template:
+{template_content}
+
+Number of sessions being searched: {len(session_ids)}
+
+CRITICAL: The transcripts contain natural, conversational language between therapist and client - NOT clinical terminology. Your queries must use the language that would actually appear in a conversation.
+
+Examples of BAD vs GOOD queries:
+- BAD: "presenting mental health concerns and symptoms" 
+- GOOD: "feeling anxious depressed worried stressed emotional struggling"
+
+- BAD: "behavioral observations and affect"
+- GOOD: "appeared seemed looked acted behaved responded reacted"
+
+- BAD: "therapeutic interventions used"
+- GOOD: "tried practicing working on techniques strategies we discussed"
+
+Create search queries that:
+1. Use natural, conversational language that would appear in actual dialogue
+2. Include synonyms and variations people actually say
+3. Focus on what the client/therapist would naturally discuss, not clinical labels
+4. Capture the optimal number of distinct topics needed (avoid redundancy but ensure coverage)
+
+Return a JSON array:
+[
+  {{"query": "conversational natural language query with synonyms", "purpose": "what this will populate", "max_results": 5-30}}
+]
+
+IMPORTANT: Return ONLY the JSON array, no other text or explanation."""
+
+        try:
+            analysis_response = await openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert at analyzing clinical documentation templates. Return only valid JSON arrays with no additional text or formatting."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                temperature=0.2  # Lower temperature for more focused, consistent analysis
+            )
+            
+            response_content = analysis_response.choices[0].message.content.strip()
+            
+            # Clean up response if it has markdown code blocks
+            if response_content.startswith("```"):
+                # Remove markdown code blocks
+                response_content = response_content.split("```")[1]
+                if response_content.startswith("json"):
+                    response_content = response_content[4:]
+                response_content = response_content.strip()
+            
+            search_queries = json.loads(response_content)
+            logger.info(f"✅ Generated {len(search_queries)} semantic search queries from template analysis")
+            
+            await emit_progress(generation_id, {
+                "type": "progress_update",
+                "stage": "analyzing_template",
+                "message": f"Generated {len(search_queries)} semantic search queries from template",
+                "details": {"query_count": len(search_queries)}
+            }, authorization)
+            
+            for i, query_obj in enumerate(search_queries):
+                logger.info(f"  Query {i+1}: '{query_obj.get('query', 'N/A')[:60]}...' for {query_obj.get('purpose', 'N/A')}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse template analysis response as JSON: {e}")
+            logger.error(f"Response was: {response_content}")
+            # Fallback to a generic search if analysis fails
+            search_queries = [
+                {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
+            ]
+        except Exception as e:
+            logger.error(f"Error analyzing template: {e}")
+            # Fallback to a generic search if analysis fails
+            search_queries = [
+                {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
+            ]
+        
+        # STEP 2: Execute semantic searches for each query
+        logger.info(f"🔎 STEP 2: Executing {len(search_queries)} semantic searches")
+        
+        await emit_progress(generation_id, {
+            "type": "stage_started",
+            "stage": "semantic_search",
+            "message": f"Executing {len(search_queries)} semantic searches across sessions..."
+        }, authorization)
+        
+        api_url = os.getenv("API_URL", "http://localhost:8080")
+        all_relevant_segments = []
+        
+        # Adaptive similarity threshold: start strict, relax if needed
+        # This ensures we get enough content without being too loose initially
+        base_threshold = SEMANTIC_SEARCH_CONFIG["base_similarity_threshold"]
+        low_result_queries = []  # Track queries that return few results
+        
+        for query_obj in search_queries:
+            query = query_obj.get("query", "")
+            max_results = query_obj.get("max_results", 15)
+            purpose = query_obj.get("purpose", "General")
+            
+            logger.info(f"🔎 Searching: '{query[:60]}...' (max: {max_results}) for {purpose}")
+            
+            # Emit tool call progress
+            await emit_progress(generation_id, {
+                "type": "tool_call",
+                "stage": "semantic_search",
+                "tool": "semantic_search_sessions",
+                "message": f"Searching: '{query[:60]}...'",
+                "progress": {"current": search_queries.index(query_obj) + 1, "total": len(search_queries)},
+                "details": {"purpose": purpose, "max_results": max_results}
+            }, authorization)
+            
+            try:
+                # Single semantic search attempt - no retries for speed
+                search_payload = {
+                    "query": query,
+                    "transcript_ids": session_ids,
+                    "limit": max_results,
+                    "similarity_threshold": base_threshold
+                }
+                
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    response = await http_client.post(
+                        f"{api_url}/api/v1/ai/semantic-search",
+                        json=search_payload,
+                        headers={"Authorization": authorization} if authorization else {}
+                    )
+                    response.raise_for_status()
+                    response_data = response.json()
+                
+                # Extract segments from response
+                if isinstance(response_data, dict) and 'segments' in response_data:
+                    segments = response_data['segments']
+                elif isinstance(response_data, list):
+                    segments = response_data
+                else:
+                    logger.error(f"⚠️ API returned unexpected format: {type(response_data)}")
+                    segments = []
+                
+                # Log if we got few results
+                if len(segments) < 3:
+                    low_result_queries.append((query, purpose, len(segments)))
+                    logger.warning(f"  ⚠️ Query returned few results ({len(segments)}) with threshold {base_threshold:.2f}")
+                # Tag segments with their purpose (create new dicts to avoid mutation issues)
+                tagged_segments = []
+                for segment in segments:
+                    # Create a new dict with the segment data plus our tags
+                    if isinstance(segment, dict):
+                        tagged_segment = dict(segment)  # Create a copy
+                        tagged_segment["_search_purpose"] = purpose
+                        tagged_segment["_search_query"] = query
+                        tagged_segment["_relevance_score"] = segment.get("similarity_score", 1.0)  # Track relevance
+                        tagged_segments.append(tagged_segment)
+                    else:
+                        logger.warning(f"⚠️ Segment is not a dict, type: {type(segment)}")
+                
+                all_relevant_segments.extend(tagged_segments)
+                
+                # Create a safe scores preview for logging
+                scores_preview = []
+                for s in tagged_segments[:3]:
+                    score = s.get('_relevance_score', 'N/A')
+                    if isinstance(score, (int, float)):
+                        scores_preview.append(f'{score:.2f}')
+                    else:
+                        scores_preview.append('N/A')
+                
+                logger.info(f"✅ Found {len(segments)} relevant segments (scores: {scores_preview}...), added {len(tagged_segments)} to context")
+                
+                # Emit search result progress
+                await emit_progress(generation_id, {
+                    "type": "progress_update",
+                    "stage": "semantic_search",
+                    "message": f"Found {len(segments)} relevant segments for {purpose}",
+                    "details": {"segments_found": len(segments), "purpose": purpose}
+                }, authorization)
+                
+            except Exception as search_error:
+                logger.error(f"Error in semantic search for '{query}': {search_error}")
+                # Continue with other searches even if one fails
+                continue
+        
+        # Report on queries that had difficulty finding results
+        if low_result_queries:
+            logger.warning(f"📊 {len(low_result_queries)} queries returned limited results:")
+            for query, purpose, count in low_result_queries[:5]:  # Show first 5
+                logger.warning(f"   • '{query[:50]}...' ({purpose}): {count} results")
+        
+        logger.info(f"📊 STEP 2 Complete: Total {len(all_relevant_segments)} relevant segments retrieved")
+        
+        await emit_progress(generation_id, {
+            "type": "progress_update",
+            "stage": "semantic_search",
+            "message": f"Retrieved {len(all_relevant_segments)} total relevant segments",
+            "details": {"total_segments": len(all_relevant_segments), "sections": len(context_by_purpose) if 'context_by_purpose' in locals() else 0}
+        }, authorization)
+        
+        # ENHANCEMENT: Add temporal context around high-relevance segments
+        # TEMPORARILY DISABLED - was causing 400 errors
+        # This helps capture important context that might not be semantically similar
+        # but provides crucial background information
+        TEMPORAL_CONTEXT_WINDOW = SEMANTIC_SEARCH_CONFIG["temporal_context_window"]
+        MIN_RELEVANCE_FOR_CONTEXT = SEMANTIC_SEARCH_CONFIG["min_relevance_for_context"]
+        
+        if False and len(all_relevant_segments) > 0:
+            # Group segments by session and timestamp for efficient context retrieval
+            segments_by_session = {}
+            for seg in all_relevant_segments:
+                transcript_id = seg.get("transcript_id")
+                relevance = seg.get("_relevance_score", 0)
+                
+                # Only fetch context for high-relevance segments to avoid bloat
+                if transcript_id and relevance >= MIN_RELEVANCE_FOR_CONTEXT:
+                    if transcript_id not in segments_by_session:
+                        segments_by_session[transcript_id] = []
+                    segments_by_session[transcript_id].append(seg)
+            
+            # Fetch temporal context for high-relevance segments
+            if segments_by_session:
+                logger.info(f"🔍 Fetching temporal context (±{TEMPORAL_CONTEXT_WINDOW} segments) for {sum(len(segs) for segs in segments_by_session.values())} high-relevance matches")
+                
+                context_segments_added = 0
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as http_client:
+                        for transcript_id, high_rel_segments in segments_by_session.items():
+                            # Get all segments for this session to find neighbors
+                            full_session_response = await http_client.post(
+                                f"{api_url}/api/v1/ai/semantic-search",
+                                json={
+                                    "query": "session content",  # Broad query to get all
+                                    "transcript_ids": [transcript_id],
+                                    "limit": 1000,  # High limit to get full session
+                                    "similarity_threshold": 0.0
+                                },
+                                headers={"Authorization": authorization} if authorization else {}
+                            )
+                            
+                            if full_session_response.status_code == 200:
+                                response_data = full_session_response.json()
+                                all_session_segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
+                                
+                                # Sort by start_time for finding neighbors
+                                all_session_segments.sort(key=lambda s: s.get('start_time', 0))
+                                
+                                # For each high-relevance segment, find and add neighbors
+                                for high_seg in high_rel_segments:
+                                    seg_time = high_seg.get('start_time', 0)
+                                    
+                                    # Find index of current segment
+                                    current_idx = next((i for i, s in enumerate(all_session_segments) 
+                                                       if s.get('start_time') == seg_time 
+                                                       and s.get('text') == high_seg.get('text')), None)
+                                    
+                                    if current_idx is not None:
+                                        # Add segments before
+                                        for i in range(max(0, current_idx - TEMPORAL_CONTEXT_WINDOW), current_idx):
+                                            neighbor = dict(all_session_segments[i])
+                                            # Check if not already in results
+                                            if not any(s.get('start_time') == neighbor.get('start_time') 
+                                                     and s.get('transcript_id') == neighbor.get('transcript_id') 
+                                                     for s in all_relevant_segments):
+                                                neighbor["_search_purpose"] = f"Temporal Context (before high-relevance match)"
+                                                neighbor["_is_context"] = True
+                                                all_relevant_segments.append(neighbor)
+                                                context_segments_added += 1
+                                        
+                                        # Add segments after
+                                        for i in range(current_idx + 1, min(len(all_session_segments), current_idx + TEMPORAL_CONTEXT_WINDOW + 1)):
+                                            neighbor = dict(all_session_segments[i])
+                                            # Check if not already in results
+                                            if not any(s.get('start_time') == neighbor.get('start_time') 
+                                                     and s.get('transcript_id') == neighbor.get('transcript_id') 
+                                                     for s in all_relevant_segments):
+                                                neighbor["_search_purpose"] = f"Temporal Context (after high-relevance match)"
+                                                neighbor["_is_context"] = True
+                                                all_relevant_segments.append(neighbor)
+                                                context_segments_added += 1
+                
+                    if context_segments_added > 0:
+                        logger.info(f"✅ Added {context_segments_added} temporal context segments")
+                        logger.info(f"📊 Total segments after context enrichment: {len(all_relevant_segments)}")
+                
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to add temporal context: {e}. Continuing with semantic results only.")
+        
+        # If semantic search returned 0 results, fetch ALL segments from the sessions (fallback strategy)
+        if len(all_relevant_segments) == 0:
+            logger.warning(f"⚠️ Semantic search returned 0 results. Fetching ALL segments from sessions as fallback.")
+            try:
+                # Fetch all segments directly from the API
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    for session_id in session_ids:
+                        # Use the existing semantic-search endpoint but with a very broad query
+                        fallback_payload = {
+                            "query": "session therapy conversation discussion",  # Generic broad query
+                            "transcript_ids": [session_id],
+                            "limit": 100,  # Get up to 100 segments per session
+                            "similarity_threshold": 0.0  # Accept any similarity (get everything)
+                        }
+                        
+                        response = await http_client.post(
+                            f"{api_url}/api/v1/ai/semantic-search",
+                            json=fallback_payload,
+                            headers={"Authorization": authorization} if authorization else {}
+                        )
+                        
+                        if response.status_code == 200:
+                            response_data = response.json()
+                            segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
+                            
+                            # Tag these as fallback segments
+                            for segment in segments:
+                                if isinstance(segment, dict):
+                                    seg_copy = dict(segment)
+                                    seg_copy["_search_purpose"] = "Full Session Content (Fallback)"
+                                    seg_copy["_search_query"] = "All segments (threshold=0.0)"
+                                    all_relevant_segments.append(seg_copy)
+                
+                logger.info(f"✅ Fallback: Retrieved {len(all_relevant_segments)} total segments from all sessions")
+            except Exception as e:
+                logger.error(f"❌ Fallback segment retrieval failed: {e}")
+                # Continue with empty segments - generate template-only document
+        
+        # STEP 3: Build organized transcript context from search results
+        logger.info(f"📝 STEP 3: Building organized context from semantic search results")
+        
+        context_by_purpose = {}
+        for segment in all_relevant_segments:
+            purpose = segment.get("_search_purpose", "General")
+            if purpose not in context_by_purpose:
+                context_by_purpose[purpose] = []
+            
+            # Format segment
+            # API returns snake_case field names (start_time, transcript_id, etc.)
+            speaker = segment.get("speaker", "Speaker")
+            text = segment.get("text", "")
+            start_time = segment.get("start_time", segment.get("startTime", 0))  # Support both naming conventions
+            
+            minutes = int(start_time // 60)
+            seconds = int(start_time % 60)
+            time_str = f"{minutes:02d}:{seconds:02d}"
+            
+            context_by_purpose[purpose].append(f"[{time_str}] {speaker}: {text}")
+        
+        # Build organized transcript text
         transcript_text = ""
-        if transcript.get("segments"):
-            for segment in transcript["segments"]:
-                speaker = segment.get("speaker", "Speaker")
-                text = segment.get("text", "")
-                start_time = segment.get("startTime", 0)
-                
-                # Format time as MM:SS
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                time_str = f"{minutes:02d}:{seconds:02d}"
-                
-                transcript_text += f"[{time_str}] {speaker}: {text}\n"
+        for purpose, segments_text in context_by_purpose.items():
+            transcript_text += f"\n--- Context for: {purpose} ---\n"
+            transcript_text += "\n".join(segments_text)
+            transcript_text += "\n"
+        
+        logger.info(f"✅ Built context with {len(context_by_purpose)} sections, total {len(transcript_text)} characters")
+        
+        # STEP 4: Generate document using template + semantic context
+        logger.info(f"🎨 STEP 4: Generating document using template and semantic context")
+        
+        await emit_progress(generation_id, {
+            "type": "stage_started",
+            "stage": "generating_document",
+            "message": "AI agent is generating the document using template and context..."
+        }, authorization)
         
         # Build the system prompt with anti-diagnosis instructions and intervention focus
         system_prompt = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
@@ -691,6 +1124,15 @@ Always personalize the document by using the actual client and practitioner name
 """
         else:
             # Normal generation - keep it simple and trust the LLM
+            # Build user prompt with context indication  
+            if len(all_relevant_segments) > 0:
+                if any(seg.get("_search_query", "").startswith("All segments") for seg in all_relevant_segments):
+                    context_source_note = f"\n\n**NOTE**: Semantic search found no relevant matches, so ALL session content ({len(all_relevant_segments)} segments) is provided below for your review."
+                else:
+                    context_source_note = f"\n\n**NOTE**: The session content below ({len(all_relevant_segments)} segments) was retrieved using semantic search based on the template structure."
+            else:
+                context_source_note = "\n\n**NOTE**: No session transcript content is available. Generate a note indicating what information is missing from the provided sessions."
+            
             user_prompt = f"""Generate a comprehensive clinical document.
 
 **Client:** {client_name}
@@ -700,7 +1142,7 @@ Always personalize the document by using the actual client and practitioner name
 **Template:**
 {template_content}
 
-**Session Transcript:**
+**Session Transcript:**{context_source_note}
 {transcript_text}
 
 **Key Requirements:**
@@ -1055,7 +1497,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     persona_enum = PersonaType(persona_str)
                 except Exception:
                     persona_enum = PersonaType.WEB_ASSISTANT
-                auth_token = message_data.get("auth_token") or message_data.get("token") or ui_state_manager.get_auth_token(session_id)
+                auth_token = message_data.get("auth_token") or message_data.get("token") or await ui_state_manager.get_auth_token(session_id)
 
                 # Stream via Haystack pipeline manager (tool-enabled, history-aware)
                 full_content = ""

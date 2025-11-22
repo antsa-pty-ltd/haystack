@@ -203,6 +203,28 @@ class UIStateManager:
             logger.error(f"❌ Error updating full state for {session_id}: {e}")
             return False
     
+    def get_state_sync(self, session_id: str) -> UIState:
+        """Get UI state for session (synchronous version for thread-safe execution)"""
+        try:
+            if self._initialized and self.redis_client_sync is not None:
+                # Redis path (sync)
+                key = self._state_key(session_id)
+                state_json = self.redis_client_sync.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+            else:
+                # In-memory fallback
+                key = self._state_key(session_id)
+                state_json = self._in_memory_fallback.get(key)
+                if state_json:
+                    return cast(UIState, json.loads(state_json))
+                return {}
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting state for {session_id}: {e}")
+            return {}
+    
     async def get_state(self, session_id: str) -> UIState:
         """Get UI state for session"""
         try:
@@ -277,6 +299,31 @@ class UIStateManager:
                 
         except Exception as e:
             logger.error(f"❌ Error cleaning up session {session_id}: {e}")
+    
+    def get_page_capabilities_sync(self, session_id: str) -> List[str]:
+        """Get available tools for current page (synchronous version for thread-safe execution)"""
+        state = self.get_state_sync(session_id)
+        page_type = state.get("page_type", "unknown")
+        
+        capability_map: Dict[str, List[str]] = {
+            "transcribe_page": [
+                "set_client_selection", "load_session_direct", "load_multiple_sessions",
+                "set_selected_template", "select_template_by_name", "get_loaded_sessions",
+                "get_session_content", "analyze_loaded_session", "generate_document_from_loaded"
+            ],
+            "client_details": [
+                "get_client_summary", "get_client_homework_status", "load_session_direct"
+            ],
+            "sessions_list": [
+                "load_session_direct", "load_multiple_sessions"
+            ],
+            "messages_page": [
+                "search_clients", "get_conversations", "get_conversation_messages"
+            ],
+        }
+        
+        base_tools = ["search_clients", "get_clinic_stats", "suggest_navigation"]
+        return base_tools + capability_map.get(page_type, [])
     
     async def get_page_capabilities(self, session_id: str) -> List[str]:
         """Get available tools for current page"""
@@ -413,6 +460,21 @@ class UIStateManager:
         """SYNC version: Get generated documents"""
         state = self.get_state_sync(session_id)
         return state.get("generatedDocuments", [])
+
+    def get_auth_token_sync(self, session_id: str) -> Optional[str]:
+        """SYNC version: Get auth token for session"""
+        try:
+            if self._initialized and self.redis_client_sync is not None:
+                # Redis path (sync)
+                key = self._token_key(session_id)
+                return self.redis_client_sync.get(key)
+            else:
+                # In-memory fallback
+                key = self._token_key(session_id)
+                return self._in_memory_tokens.get(key)
+        except Exception as e:
+            logger.error(f"❌ Error getting auth token (sync) for {session_id}: {e}")
+            return None
 
 # Global instance
 ui_state_manager = UIStateManager()
