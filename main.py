@@ -83,7 +83,20 @@ SEMANTIC_SEARCH_CONFIG = {
     "max_threshold_attempts": 3,
     
     # Minimum expected results as fraction of requested (e.g., 0.33 = expect at least 1/3)
-    "min_result_fraction": 0.33
+    "min_result_fraction": 0.33,
+    
+    # ===== INTELLIGENT RETRIEVAL CONFIGURATION =====
+    # Token threshold for "pull all" strategy (~50K tokens, well under 128K context limit)
+    "pull_all_token_threshold": 50000,
+    
+    # Segment count threshold per session (< 100 segments = small session)
+    "small_session_segment_threshold": 100,
+    
+    # Max sessions for "pull all" strategy
+    "max_sessions_for_pull_all": 2,
+    
+    # Average tokens per segment (for estimation)
+    "avg_tokens_per_segment": 75,
 }
 # ==========================================
 
@@ -396,6 +409,64 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def fetch_session_metadata(session_id: str, authorization: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Fetch metadata for a session including duration, segment count, and dates.
+    
+    Args:
+        session_id: The transcript/session ID
+        authorization: Authorization header for API requests
+        
+    Returns:
+        Dict with keys: totalSegments, duration, recordingDate, createdAt, sessionId
+        Returns None if fetch fails
+    """
+    try:
+        api_url = os.getenv("API_URL", "http://localhost:8080")
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {}
+            if authorization:
+                headers["Authorization"] = authorization
+            
+            response = await client.get(
+                f"{api_url}/api/v1/ai/transcriptions/{session_id}",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "sessionId": session_id,
+                    "totalSegments": data.get("totalSegments", 0),
+                    "duration": data.get("duration", 0),
+                    "recordingDate": data.get("recordingDate"),
+                    "createdAt": data.get("createdAt"),
+                }
+            else:
+                logger.warning(f"Failed to fetch metadata for session {session_id}: HTTP {response.status_code}")
+                return None
+                
+    except Exception as e:
+        logger.error(f"Error fetching session metadata for {session_id}: {e}")
+        return None
+
+
+def estimate_tokens_from_segments(segment_count: int) -> int:
+    """
+    Estimate token count from segment count.
+    
+    Uses conservative estimate of avg_tokens_per_segment from config.
+    
+    Args:
+        segment_count: Number of segments in the session
+        
+    Returns:
+        Estimated token count
+    """
+    return segment_count * SEMANTIC_SEARCH_CONFIG["avg_tokens_per_segment"]
+
+
 async def log_violation_to_api(
     profile_id: str,
     template_id: str,
@@ -670,212 +741,435 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 }
             )
         
-        # STEP 1: Analyze template to determine what context is needed
-        logger.info(f"🔍 STEP 1: Analyzing template to extract semantic search queries")
+        # ===== INTELLIGENT RETRIEVAL STRATEGY =====
+        # NEW: Analyze sessions first, then decide on retrieval strategy
+        
+        logger.info(f"🔍 STEP 1: Analyzing sessions to determine optimal retrieval strategy")
         
         await emit_progress(generation_id, {
             "type": "stage_started",
-            "stage": "analyzing_template",
-            "message": "Analyzing template structure to determine context needs..."
+            "stage": "analyzing_sessions",
+            "message": "Analyzing session sizes and determining retrieval strategy..."
         }, authorization)
         
-        analysis_prompt = f"""Analyze this clinical documentation template. Your goal is to generate semantic search queries to accurately populate the template with relevant information from therapy session transcripts.
-
-Template:
-{template_content}
-
-Number of sessions being searched: {len(session_ids)}
-
-CRITICAL: The transcripts contain natural, conversational language between therapist and client - NOT clinical terminology. Your queries must use the language that would actually appear in a conversation.
-
-Examples of BAD vs GOOD queries:
-- BAD: "presenting mental health concerns and symptoms" 
-- GOOD: "feeling anxious depressed worried stressed emotional struggling"
-
-- BAD: "behavioral observations and affect"
-- GOOD: "appeared seemed looked acted behaved responded reacted"
-
-- BAD: "therapeutic interventions used"
-- GOOD: "tried practicing working on techniques strategies we discussed"
-
-Create search queries that:
-1. Use natural, conversational language that would appear in actual dialogue
-2. Include synonyms and variations people actually say
-3. Focus on what the client/therapist would naturally discuss, not clinical labels
-4. Capture the optimal number of distinct topics needed (avoid redundancy but ensure coverage)
-
-Return a JSON array:
-[
-  {{"query": "conversational natural language query with synonyms", "purpose": "what this will populate", "max_results": 5-30}}
-]
-
-IMPORTANT: Return ONLY the JSON array, no other text or explanation."""
-
-        try:
-            analysis_response = await openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are an expert at analyzing clinical documentation templates. Return only valid JSON arrays with no additional text or formatting."},
-                    {"role": "user", "content": analysis_prompt}
-                ],
-                temperature=0.2  # Lower temperature for more focused, consistent analysis
-            )
+        # Fetch metadata for all sessions
+        session_metadata_list = []
+        for session_id in session_ids:
+            metadata = await fetch_session_metadata(session_id, authorization)
+            if metadata:
+                session_metadata_list.append(metadata)
+            else:
+                # Fallback: assume medium-sized session if metadata fetch fails
+                logger.warning(f"⚠️ Could not fetch metadata for session {session_id}, using defaults")
+                session_metadata_list.append({
+                    "sessionId": session_id,
+                    "totalSegments": 150,  # Conservative estimate
+                    "duration": 3600,
+                    "recordingDate": None,
+                    "createdAt": None
+                })
+        
+        # Sort sessions by oldest first (prefer recordingDate, fall back to createdAt)
+        def get_session_date(session):
+            date_str = session.get("recordingDate") or session.get("createdAt")
+            if date_str:
+                try:
+                    return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except:
+                    return datetime.max  # Put unparseable dates at the end
+            return datetime.max
+        
+        session_metadata_list.sort(key=get_session_date)
+        oldest_session = session_metadata_list[0] if session_metadata_list else None
+        
+        logger.info(f"📊 Session Analysis:")
+        logger.info(f"   Total sessions: {len(session_metadata_list)}")
+        if oldest_session:
+            logger.info(f"   Oldest session: {oldest_session['sessionId']} ({oldest_session['totalSegments']} segments)")
+        
+        # Calculate total estimated tokens
+        total_segments = sum(s['totalSegments'] for s in session_metadata_list)
+        estimated_tokens = estimate_tokens_from_segments(total_segments)
+        
+        logger.info(f"   Total segments: {total_segments}")
+        logger.info(f"   Estimated tokens: {estimated_tokens:,}")
+        
+        # Decision: Pull all vs Semantic search
+        should_pull_all = (
+            len(session_metadata_list) <= SEMANTIC_SEARCH_CONFIG["max_sessions_for_pull_all"] or
+            estimated_tokens < SEMANTIC_SEARCH_CONFIG["pull_all_token_threshold"]
+        )
+        
+        if should_pull_all:
+            # ===== PATH A: PULL ALL TRANSCRIPTS =====
+            logger.info(f"✅ Strategy: PULL ALL (sessions small enough for full retrieval)")
+        
+            await emit_progress(generation_id, {
+                    "type": "progress_update",
+                    "stage": "analyzing_sessions",
+                    "message": f"Sessions are small enough ({estimated_tokens:,} tokens) - retrieving all content...",
+                    "details": {"strategy": "pull_all", "sessions": len(session_metadata_list), "estimated_tokens": estimated_tokens}
+            }, authorization)
+        
+            # Skip semantic search - we'll pull everything in STEP 2
+            search_queries = None
+            oldest_session_context = None
             
-            response_content = analysis_response.choices[0].message.content.strip()
-            
-            # Clean up response if it has markdown code blocks
-            if response_content.startswith("```"):
-                # Remove markdown code blocks
-                response_content = response_content.split("```")[1]
-                if response_content.startswith("json"):
-                    response_content = response_content[4:]
-                response_content = response_content.strip()
-            
-            search_queries = json.loads(response_content)
-            logger.info(f"✅ Generated {len(search_queries)} semantic search queries from template analysis")
+        else:
+            # ===== PATH B: INTELLIGENT SEMANTIC SEARCH =====
+            logger.info(f"✅ Strategy: SEMANTIC SEARCH (using oldest session as context)")
             
             await emit_progress(generation_id, {
                 "type": "progress_update",
-                "stage": "analyzing_template",
-                "message": f"Generated {len(search_queries)} semantic search queries from template",
-                "details": {"query_count": len(search_queries)}
+                "stage": "analyzing_sessions",
+                "message": f"Large dataset ({estimated_tokens:,} tokens) - using intelligent semantic search...",
+                "details": {"strategy": "semantic_search", "sessions": len(session_metadata_list), "estimated_tokens": estimated_tokens}
             }, authorization)
             
-            for i, query_obj in enumerate(search_queries):
-                logger.info(f"  Query {i+1}: '{query_obj.get('query', 'N/A')[:60]}...' for {query_obj.get('purpose', 'N/A')}")
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse template analysis response as JSON: {e}")
-            logger.error(f"Response was: {response_content}")
-            # Fallback to a generic search if analysis fails
-            search_queries = [
-                {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
-            ]
-        except Exception as e:
-            logger.error(f"Error analyzing template: {e}")
-            # Fallback to a generic search if analysis fails
-            search_queries = [
-                {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
-            ]
-        
-        # STEP 2: Execute semantic searches for each query
-        logger.info(f"🔎 STEP 2: Executing {len(search_queries)} semantic searches")
-        
-        await emit_progress(generation_id, {
-            "type": "stage_started",
-            "stage": "semantic_search",
-            "message": f"Executing {len(search_queries)} semantic searches across sessions..."
-        }, authorization)
-        
-        api_url = os.getenv("API_URL", "http://localhost:8080")
-        all_relevant_segments = []
-        
-        # Adaptive similarity threshold: start strict, relax if needed
-        # This ensures we get enough content without being too loose initially
-        base_threshold = SEMANTIC_SEARCH_CONFIG["base_similarity_threshold"]
-        low_result_queries = []  # Track queries that return few results
-        
-        for query_obj in search_queries:
-            query = query_obj.get("query", "")
-            max_results = query_obj.get("max_results", 15)
-            purpose = query_obj.get("purpose", "General")
-            
-            logger.info(f"🔎 Searching: '{query[:60]}...' (max: {max_results}) for {purpose}")
-            
-            # Emit tool call progress
+            # Fetch oldest session for context
             await emit_progress(generation_id, {
-                "type": "tool_call",
-                "stage": "semantic_search",
-                "tool": "semantic_search_sessions",
-                "message": f"Searching: '{query[:60]}...'",
-                "progress": {"current": search_queries.index(query_obj) + 1, "total": len(search_queries)},
-                "details": {"purpose": purpose, "max_results": max_results}
+            "type": "stage_started",
+            "stage": "fetching_oldest_session",
+            "message": f"Fetching oldest session for context building..."
             }, authorization)
+            
+            logger.info(f"🔎 Fetching full transcript of oldest session: {oldest_session['sessionId']}")
+            
+            api_url = os.getenv("API_URL", "http://localhost:8080")
+            oldest_session_segments = []
             
             try:
-                # Single semantic search attempt - no retries for speed
-                search_payload = {
-                    "query": query,
-                    "transcript_ids": session_ids,
-                    "limit": max_results,
-                    "similarity_threshold": base_threshold
-                }
-                
                 async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    # Fetch ALL segments from oldest session with similarity_threshold=0.0
                     response = await http_client.post(
                         f"{api_url}/api/v1/ai/semantic-search",
-                        json=search_payload,
+                        json={
+                            "query": "session therapy conversation discussion",
+                            "transcript_ids": [oldest_session['sessionId']],
+                            "limit": 1000,
+                            "similarity_threshold": 0.0
+                        },
                         headers={"Authorization": authorization} if authorization else {}
                     )
                     response.raise_for_status()
                     response_data = response.json()
+                    
+                    if isinstance(response_data, dict) and 'segments' in response_data:
+                        oldest_session_segments = response_data['segments']
+                    elif isinstance(response_data, list):
+                        oldest_session_segments = response_data
                 
-                # Extract segments from response
-                if isinstance(response_data, dict) and 'segments' in response_data:
-                    segments = response_data['segments']
-                elif isinstance(response_data, list):
-                    segments = response_data
-                else:
-                    logger.error(f"⚠️ API returned unexpected format: {type(response_data)}")
-                    segments = []
-                
-                # Log if we got few results
-                if len(segments) < 3:
-                    low_result_queries.append((query, purpose, len(segments)))
-                    logger.warning(f"  ⚠️ Query returned few results ({len(segments)}) with threshold {base_threshold:.2f}")
-                # Tag segments with their purpose (create new dicts to avoid mutation issues)
-                tagged_segments = []
-                for segment in segments:
-                    # Create a new dict with the segment data plus our tags
-                    if isinstance(segment, dict):
-                        tagged_segment = dict(segment)  # Create a copy
-                        tagged_segment["_search_purpose"] = purpose
-                        tagged_segment["_search_query"] = query
-                        tagged_segment["_relevance_score"] = segment.get("similarity_score", 1.0)  # Track relevance
-                        tagged_segments.append(tagged_segment)
-                    else:
-                        logger.warning(f"⚠️ Segment is not a dict, type: {type(segment)}")
-                
-                all_relevant_segments.extend(tagged_segments)
-                
-                # Create a safe scores preview for logging
-                scores_preview = []
-                for s in tagged_segments[:3]:
-                    score = s.get('_relevance_score', 'N/A')
-                    if isinstance(score, (int, float)):
-                        scores_preview.append(f'{score:.2f}')
-                    else:
-                        scores_preview.append('N/A')
-                
-                logger.info(f"✅ Found {len(segments)} relevant segments (scores: {scores_preview}...), added {len(tagged_segments)} to context")
-                
-                # Emit search result progress
+                logger.info(f"✅ Retrieved {len(oldest_session_segments)} segments from oldest session")
+            
                 await emit_progress(generation_id, {
                     "type": "progress_update",
-                    "stage": "semantic_search",
-                    "message": f"Found {len(segments)} relevant segments for {purpose}",
-                    "details": {"segments_found": len(segments), "purpose": purpose}
+                        "stage": "fetching_oldest_session",
+                        "message": f"Retrieved {len(oldest_session_segments)} segments from oldest session",
+                        "details": {"segments_count": len(oldest_session_segments)}
+                }, authorization)
+            
+            except Exception as e:
+                logger.error(f"❌ Failed to fetch oldest session: {e}")
+                # Fallback: proceed without oldest session context
+                oldest_session_segments = []
+            
+            # Build context from oldest session
+            if oldest_session_segments:
+                oldest_session_context = "\n".join([
+                    f"[{seg.get('speaker', 'Speaker')}]: {seg.get('text', '')}"
+                    for seg in oldest_session_segments[:50]  # Limit to first 50 segments to save tokens
+                ])
+            else:
+                oldest_session_context = ""
+            
+            # Generate queries using template + oldest session context
+            await emit_progress(generation_id, {
+                "type": "stage_started",
+                "stage": "generating_queries",
+                "message": "Using oldest session context to generate targeted search queries..."
+            }, authorization)
+            
+            logger.info(f"🤖 Generating contextual search queries from template + oldest session")
+            
+            analysis_prompt = f"""Analyze this clinical documentation template AND the context from the oldest therapy session. Your goal is to generate semantic search queries to accurately populate the template with relevant information from the REMAINING therapy session transcripts.
+
+Template:
+{template_content}
+
+Context from Oldest Session (for reference):
+{oldest_session_context[:3000] if oldest_session_context else "No context available"}
+
+Number of REMAINING sessions to search: {len(session_metadata_list) - 1}
+
+CRITICAL: The transcripts contain natural, conversational language between therapist and client - NOT clinical terminology. Your queries must use the language that would actually appear in a conversation.
+
+Use the oldest session context to:
+1. Identify specific topics, concerns, or themes that were discussed
+2. Note the client's language patterns and terminology
+3. Recognize therapeutic approaches being used
+4. Generate queries that connect to actual conversation content
+
+Examples of BAD vs GOOD queries:
+- BAD: "presenting mental health concerns and symptoms" 
+- GOOD: "feeling anxious worried about work struggling with sleep tired emotional"
+
+- BAD: "behavioral observations and affect"
+- GOOD: "seemed upset appeared distressed looked tired spoke quietly"
+
+- BAD: "therapeutic interventions used"
+- GOOD: "tried deep breathing practiced mindfulness worked on thought challenging we discussed coping strategies"
+
+Create search queries that:
+1. Use natural, conversational language from the actual session context
+2. Include specific topics, names, or situations mentioned
+3. Focus on what the client/therapist actually said, not clinical labels
+4. Capture the optimal number of distinct topics needed (avoid redundancy but ensure coverage)
+
+Return a JSON array:
+[
+  {{"query": "conversational natural language query with actual content from sessions", "purpose": "what this will populate", "max_results": 5-30}}
+]
+
+IMPORTANT: Return ONLY the JSON array, no other text or explanation."""
+            
+            try:
+                analysis_response = await openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are an expert at analyzing clinical documentation templates and therapy session content. Return only valid JSON arrays with no additional text or formatting."},
+                        {"role": "user", "content": analysis_prompt}
+                    ],
+                    temperature=0.2  # Lower temperature for more focused, consistent analysis
+                )
+                
+                response_content = analysis_response.choices[0].message.content.strip()
+                
+                # Clean up response if it has markdown code blocks
+                if response_content.startswith("```"):
+                    # Remove markdown code blocks
+                    response_content = response_content.split("```")[1]
+                    if response_content.startswith("json"):
+                        response_content = response_content[4:]
+                    response_content = response_content.strip()
+                
+                search_queries = json.loads(response_content)
+                logger.info(f"✅ Generated {len(search_queries)} contextual semantic search queries")
+                
+                await emit_progress(generation_id, {
+                    "type": "progress_update",
+                    "stage": "generating_queries",
+                    "message": f"Generated {len(search_queries)} contextual search queries",
+                    "details": {"query_count": len(search_queries)}
                 }, authorization)
                 
-            except Exception as search_error:
-                logger.error(f"Error in semantic search for '{query}': {search_error}")
-                # Continue with other searches even if one fails
-                continue
+                for i, query_obj in enumerate(search_queries):
+                    logger.info(f"  Query {i+1}: '{query_obj.get('query', 'N/A')[:60]}...' for {query_obj.get('purpose', 'N/A')}")
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse query generation response as JSON: {e}")
+                logger.error(f"Response was: {response_content}")
+                # Fallback to a generic search if analysis fails
+                search_queries = [
+                    {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
+                ]
+            except Exception as e:
+                logger.error(f"Error generating queries: {e}")
+                # Fallback to a generic search if analysis fails
+                search_queries = [
+                    {"query": "all important information discussed in the session", "purpose": "General Content", "max_results": 30}
+                ]
         
-        # Report on queries that had difficulty finding results
-        if low_result_queries:
-            logger.warning(f"📊 {len(low_result_queries)} queries returned limited results:")
-            for query, purpose, count in low_result_queries[:5]:  # Show first 5
-                logger.warning(f"   • '{query[:50]}...' ({purpose}): {count} results")
+        # STEP 2: Execute retrieval strategy
+        logger.info(f"🔎 STEP 2: Executing {'PULL ALL' if should_pull_all else 'SEMANTIC SEARCH'} strategy")
         
-        logger.info(f"📊 STEP 2 Complete: Total {len(all_relevant_segments)} relevant segments retrieved")
+        api_url = os.getenv("API_URL", "http://localhost:8080")
+        all_relevant_segments = []
         
-        await emit_progress(generation_id, {
-            "type": "progress_update",
-            "stage": "semantic_search",
-            "message": f"Retrieved {len(all_relevant_segments)} total relevant segments",
-            "details": {"total_segments": len(all_relevant_segments), "sections": len(context_by_purpose) if 'context_by_purpose' in locals() else 0}
-        }, authorization)
+        if should_pull_all:
+            # ===== PATH A: Pull all segments from all sessions =====
+            await emit_progress(generation_id, {
+                "type": "stage_started",
+                "stage": "retrieving_all",
+                "message": f"Retrieving all content from {len(session_ids)} session(s)..."
+            }, authorization)
+            
+            for idx, session_id in enumerate(session_ids):
+                logger.info(f"🔎 Fetching ALL segments from session {idx+1}/{len(session_ids)}: {session_id}")
+                
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as http_client:
+                        response = await http_client.post(
+                            f"{api_url}/api/v1/ai/semantic-search",
+                            json={
+                                "query": "session therapy conversation discussion",
+                                "transcript_ids": [session_id],
+                                "limit": 1000,
+                                "similarity_threshold": 0.0
+                            },
+                            headers={"Authorization": authorization} if authorization else {}
+                        )
+                        response.raise_for_status()
+                        response_data = response.json()
+                    
+                    if isinstance(response_data, dict) and 'segments' in response_data:
+                        segments = response_data['segments']
+                    elif isinstance(response_data, list):
+                        segments = response_data
+                    else:
+                        logger.error(f"⚠️ API returned unexpected format: {type(response_data)}")
+                        segments = []
+                    
+                    # Tag segments with their source
+                    for segment in segments:
+                        if isinstance(segment, dict):
+                            segment_copy = dict(segment)
+                            segment_copy["_search_purpose"] = "Full Session Content"
+                            segment_copy["_search_query"] = "All segments (pull all strategy)"
+                            segment_copy["_relevance_score"] = 1.0
+                            all_relevant_segments.append(segment_copy)
+                    
+                    logger.info(f"✅ Retrieved {len(segments)} segments from session {session_id}")
+                    
+                    await emit_progress(generation_id, {
+                        "type": "progress_update",
+                        "stage": "retrieving_all",
+                        "message": f"Retrieved {len(segments)} segments from session {idx+1}/{len(session_ids)}",
+                        "details": {"session": idx+1, "total_sessions": len(session_ids), "segments": len(segments)}
+                    }, authorization)
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching all segments from session {session_id}: {e}")
+                    continue
+            
+            logger.info(f"📊 STEP 2 Complete (PULL ALL): Retrieved {len(all_relevant_segments)} total segments")
+            
+        else:
+            # ===== PATH B: Semantic search on remaining sessions (exclude oldest) =====
+            # First, add oldest session segments to results
+            if oldest_session_segments:
+                for segment in oldest_session_segments:
+                    if isinstance(segment, dict):
+                        segment_copy = dict(segment)
+                        segment_copy["_search_purpose"] = "Oldest Session (Full Context)"
+                        segment_copy["_search_query"] = "Full oldest session for context"
+                        segment_copy["_relevance_score"] = 1.0
+                        all_relevant_segments.append(segment_copy)
+                
+                logger.info(f"✅ Added {len(oldest_session_segments)} segments from oldest session")
+            
+            # Now search remaining sessions
+            remaining_session_ids = [s['sessionId'] for s in session_metadata_list[1:]]  # Skip oldest
+            
+            await emit_progress(generation_id, {
+                "type": "stage_started",
+                "stage": "semantic_search",
+                "message": f"Executing {len(search_queries)} semantic searches across {len(remaining_session_ids)} remaining sessions..."
+            }, authorization)
+            
+            logger.info(f"🔎 Executing semantic search on {len(remaining_session_ids)} remaining sessions")
+            
+            base_threshold = SEMANTIC_SEARCH_CONFIG["base_similarity_threshold"]
+            low_result_queries = []
+            
+            for query_obj in search_queries:
+                query = query_obj.get("query", "")
+                max_results = query_obj.get("max_results", 15)
+                purpose = query_obj.get("purpose", "General")
+            
+                logger.info(f"🔎 Searching: '{query[:60]}...' (max: {max_results}) for {purpose}")
+            
+                    # Emit tool call progress
+                await emit_progress(generation_id, {
+                    "type": "tool_call",
+                    "stage": "semantic_search",
+                    "tool": "semantic_search_sessions",
+                    "message": f"Searching: '{query[:60]}...'",
+                    "progress": {"current": search_queries.index(query_obj) + 1, "total": len(search_queries)},
+                    "details": {"purpose": purpose, "max_results": max_results}
+                }, authorization)
+            
+                try:
+                        # Search only remaining sessions (not the oldest one)
+                    search_payload = {
+                        "query": query,
+                            "transcript_ids": remaining_session_ids,
+                        "limit": max_results,
+                        "similarity_threshold": base_threshold
+                    }
+                
+                    async with httpx.AsyncClient(timeout=30.0) as http_client:
+                        response = await http_client.post(
+                            f"{api_url}/api/v1/ai/semantic-search",
+                            json=search_payload,
+                            headers={"Authorization": authorization} if authorization else {}
+                        )
+                        response.raise_for_status()
+                        response_data = response.json()
+                
+                    # Extract segments from response
+                    if isinstance(response_data, dict) and 'segments' in response_data:
+                        segments = response_data['segments']
+                    elif isinstance(response_data, list):
+                        segments = response_data
+                    else:
+                        logger.error(f"⚠️ API returned unexpected format: {type(response_data)}")
+                        segments = []
+                
+                        # Log if we got few results
+                        if len(segments) < 3:
+                            low_result_queries.append((query, purpose, len(segments)))
+                            logger.warning(f"  ⚠️ Query returned few results ({len(segments)}) with threshold {base_threshold:.2f}")
+                
+                    # Tag segments with their purpose
+                        tagged_segments = []
+                    for segment in segments:
+                        if isinstance(segment, dict):
+                            tagged_segment = dict(segment)
+                            tagged_segment["_search_purpose"] = purpose
+                            tagged_segment["_search_query"] = query
+                            tagged_segment["_relevance_score"] = segment.get("similarity_score", 1.0)
+                            tagged_segments.append(tagged_segment)
+                    
+                        all_relevant_segments.extend(tagged_segments)
+                    
+                        # Create a safe scores preview for logging
+                        scores_preview = []
+                        for s in tagged_segments[:3]:
+                            score = s.get('_relevance_score', 'N/A')
+                            if isinstance(score, (int, float)):
+                                scores_preview.append(f'{score:.2f}')
+                            else:
+                                scores_preview.append('N/A')
+                    
+                        logger.info(f"✅ Found {len(segments)} relevant segments (scores: {scores_preview}...), added {len(tagged_segments)} to context")
+                    
+                        # Emit search result progress
+                        await emit_progress(generation_id, {
+                            "type": "progress_update",
+                            "stage": "semantic_search",
+                            "message": f"Found {len(segments)} relevant segments for {purpose}",
+                            "details": {"segments_found": len(segments), "purpose": purpose}
+                        }, authorization)
+                
+                except Exception as search_error:
+                    logger.error(f"Error in semantic search for '{query}': {search_error}")
+                        # Continue with other searches even if one fails
+                    continue
+        
+                # Report on queries that had difficulty finding results
+                if low_result_queries:
+                    logger.warning(f"📊 {len(low_result_queries)} queries returned limited results:")
+                    for query, purpose, count in low_result_queries[:5]:  # Show first 5
+                        logger.warning(f"   • '{query[:50]}...' ({purpose}): {count} results")
+            
+                logger.info(f"📊 STEP 2 Complete (SEMANTIC SEARCH): Total {len(all_relevant_segments)} relevant segments retrieved")
+            
+            await emit_progress(generation_id, {
+                "type": "progress_update",
+                "stage": "semantic_search",
+                "message": f"Retrieved {len(all_relevant_segments)} total relevant segments from semantic search",
+                "details": {"total_segments": len(all_relevant_segments)}
+            }, authorization)
         
         # ENHANCEMENT: Add temporal context around high-relevance segments
         # TEMPORARILY DISABLED - was causing 400 errors
