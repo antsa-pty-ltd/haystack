@@ -38,6 +38,10 @@ jobs:
         cp startup.sh deploy/
         # Copy components directory (custom Haystack components)
         cp -r components deploy/
+        # Copy new modular directories
+        cp -r agents deploy/
+        cp -r document_generation deploy/
+        cp -r utils deploy/
         
         # Verify main.py is present (critical for service)
         if [ ! -f deploy/main.py ]; then
