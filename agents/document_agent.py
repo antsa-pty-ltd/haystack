@@ -10,7 +10,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from haystack.components.agents import Agent
 from haystack.components.generators.chat import OpenAIChatGenerator
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import Tool
 from haystack.utils import Secret
 from agents.exploration_tools import (
@@ -208,7 +208,8 @@ class DocumentExplorationAgent:
         template_name: str,
         template_content: str,
         authorization: Optional[str] = None,
-        generation_id: Optional[str] = None
+        generation_id: Optional[str] = None,
+        emit_progress_func = None
     ) -> Dict[str, Any]:
         """
         Let the agent autonomously explore sessions and decide when to generate.
@@ -219,6 +220,7 @@ class DocumentExplorationAgent:
             template_content: Content of the template
             authorization: Authorization header for API calls
             generation_id: Generation ID for progress tracking
+            emit_progress_func: Function to emit progress updates (optional)
             
         Returns:
             Dict with accumulated segments and agent's decision trail
@@ -257,6 +259,23 @@ Start exploring!"""
             
             # Extract conversation history
             messages = result.get("messages", [])
+            
+            # Stream agent reasoning to UI if callback provided
+            if emit_progress_func and authorization:
+                for msg in messages:
+                    if msg.role == ChatRole.ASSISTANT and msg.text:
+                        # Extract the thinking text (before tool calls)
+                        thinking_text = msg.text.strip()
+                        if thinking_text and not thinking_text.startswith('{'):
+                            # Emit the agent's reasoning
+                            try:
+                                await emit_progress_func(generation_id, {
+                                    "type": "agent_thinking",
+                                    "stage": "agentic_exploration",
+                                    "message": thinking_text
+                                }, authorization)
+                            except Exception as e:
+                                logger.warning(f"Failed to emit agent reasoning: {e}")
             
             # Log agent's decision process
             logger.info(f"📊 Agent completed exploration:")
