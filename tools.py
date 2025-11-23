@@ -406,6 +406,65 @@ class ToolManager:
                 "implementation": self._get_latest_conversation
             },
 
+            "get_homework_result_detail": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_homework_result_detail",
+                        "description": "Get detailed results of a specific homework result/submission, including the client's responses, scores, feedback, and the actual questions answered. Use this to see WHAT the client answered on homework tasks like K10, AUDIT, questionnaires, etc. Requires homework_result_id which you can get from get_homework_results_by_assignment.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "homework_result_id": {
+                                    "type": "string",
+                                    "description": "The homework result ID (UUID) to get details for. Get this from get_homework_results_by_assignment.",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "include_questions": {
+                                    "type": "boolean",
+                                    "description": "Whether to include the full homework questions that were answered",
+                                    "default": True
+                                }
+                            },
+                            "required": ["homework_result_id"]
+                        }
+                    }
+                },
+                "implementation": self._get_homework_result_detail
+            },
+
+            "get_homework_results_by_assignment": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_homework_results_by_assignment",
+                        "description": "Get a list of all homework result submissions for a specific homework assignment. Returns homework_result_ids that can be used with get_homework_result_detail to see the actual answers. Use this when you want to see completed homework for an assignment.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "The client ID (UUID)",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "homework_assign_id": {
+                                    "type": "string",
+                                    "description": "The homework assignment ID (UUID) from get_client_homework_status",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results to return",
+                                    "default": 50
+                                }
+                            },
+                            "required": ["client_id", "homework_assign_id"]
+                        }
+                    }
+                },
+                "implementation": self._get_homework_results_by_assignment
+            },
+
             # Session Management Tools (for WEB_ASSISTANT)
             "search_sessions": {
                 "definition": {
@@ -1202,6 +1261,8 @@ class ToolManager:
                 self.tools["search_clients"]["definition"], 
                 self.tools["search_specific_clients"]["definition"],
                 self.tools["get_client_homework_status"]["definition"],
+                self.tools["get_homework_result_detail"]["definition"],
+                self.tools["get_homework_results_by_assignment"]["definition"],
                 self.tools["get_clinic_profile"]["definition"],
                 self.tools["list_practitioners"]["definition"],
                 self.tools["get_clinic_stats"]["definition"],
@@ -2868,6 +2929,142 @@ Please refine the following document according to these instructions:
                 "error": f"Failed to get latest conversation: {str(e)}",
                 "recent_messages": [],
                 "message_count": 0
+            }
+    
+    async def _get_homework_result_detail(self, homework_result_id: str, include_questions: bool = True) -> Dict[str, Any]:
+        """Get detailed results of a specific homework submission"""
+        try:
+            logger.info(f"🔍 _get_homework_result_detail called with: homework_result_id={homework_result_id}, include_questions={include_questions}")
+            
+            if not homework_result_id:
+                return {
+                    "error": "homework_result_id is required",
+                    "status": "Invalid Request"
+                }
+            
+            # Call the homework result detail endpoint
+            response = await self._make_api_request('GET', f'/practitioners/homework-history/result/{homework_result_id}')
+            
+            logger.info(f"✅ Homework result detail fetched successfully for result ID: {homework_result_id}")
+            
+            # Extract and format the response
+            result_detail = {
+                "homework_result_id": response.get("id", homework_result_id),
+                "created_at": response.get("createdAt"),
+                "status": response.get("status"),
+                "classification": response.get("classification"),
+                "rate": response.get("rate"),
+                "feedback": response.get("feedback"),
+                "reject_reason": response.get("rejectReason"),
+                "homework": {
+                    "id": response.get("homework", {}).get("id"),
+                    "title": response.get("homework", {}).get("title"),
+                    "description": response.get("homework", {}).get("description"),
+                    "type": response.get("homework", {}).get("type"),
+                    "video_link": response.get("homework", {}).get("videoLink")
+                },
+                "client_response": response.get("clientResponse", {}),
+                "result_data": response.get("result", {}),
+                "client_answer_images": response.get("clientAnswerImages", [])
+            }
+            
+            # Include questions if requested
+            if include_questions:
+                result_detail["homework_questions"] = response.get("homeworkQuestions", [])
+            
+            # Add summary information
+            result_detail["summary"] = {
+                "homework_title": response.get("homework", {}).get("title", "Unknown"),
+                "completion_status": response.get("status", "Unknown"),
+                "has_feedback": bool(response.get("feedback")),
+                "has_rating": response.get("rate") is not None,
+                "question_count": len(response.get("homeworkQuestions", [])),
+                "has_attachments": len(response.get("clientAnswerImages", [])) > 0
+            }
+            
+            return result_detail
+            
+        except Exception as e:
+            logger.error(f"Error getting homework result detail: {e}")
+            return {
+                "homework_result_id": homework_result_id,
+                "error": f"Failed to get homework result detail: {str(e)}",
+                "status": "Error"
+            }
+    
+    async def _get_homework_results_by_assignment(self, client_id: str, homework_assign_id: str, limit: int = 50) -> Dict[str, Any]:
+        """Get list of homework results for a specific assignment"""
+        try:
+            logger.info(f"🔍 _get_homework_results_by_assignment called with: client_id={client_id}, homework_assign_id={homework_assign_id}, limit={limit}")
+            
+            if not client_id or not homework_assign_id:
+                return {
+                    "error": "client_id and homework_assign_id are required",
+                    "status": "Invalid Request"
+                }
+            
+            # Use the practitioner homework history endpoint
+            # The endpoint expects: POST /practitioners/homework-history/:homeworkAssignId
+            # with body: { clientId, startDate, endDate, page, limit, timezone }
+            
+            # Set a wide date range to get all results
+            from datetime import datetime, timedelta
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=365 * 2)  # 2 years back
+            
+            body = {
+                "clientId": client_id,
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat(),
+                "page": 1,
+                "limit": limit,
+                "timezone": "UTC"
+            }
+            
+            response = await self._make_api_request('POST', f'/practitioners/homework-history/{homework_assign_id}', data=body)
+            
+            logger.info(f"✅ Homework results list fetched successfully for assignment ID: {homework_assign_id}")
+            
+            # Extract and format the response
+            data = response.get("data", [])
+            total = response.get("totalRecord", 0)
+            
+            results = []
+            for item in data:
+                results.append({
+                    "homework_result_id": item.get("id"),
+                    "status": item.get("status"),
+                    "created_at": item.get("createdAt"),
+                    "homework_title": item.get("homeworkTitle"),
+                    "homework_type": item.get("homeworkType"),
+                    "homework_assign_id": item.get("homeworkAssignId"),
+                    "classification": item.get("classification"),
+                    "rate": item.get("rate"),
+                    "client_response": item.get("clientResponse"),
+                    "feedback": item.get("feedback"),
+                    "reject_reason": item.get("rejectReason")
+                })
+            
+            return {
+                "client_id": client_id,
+                "homework_assign_id": homework_assign_id,
+                "total_results": total,
+                "returned_results": len(results),
+                "results": results,
+                "summary": {
+                    "has_results": len(results) > 0,
+                    "completed_count": len([r for r in results if r.get("status") == "COMPLETED"]),
+                    "total_found": total
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting homework results by assignment: {e}")
+            return {
+                "client_id": client_id,
+                "homework_assign_id": homework_assign_id,
+                "error": f"Failed to get homework results: {str(e)}",
+                "results": []
             }
     
     async def _mood_check_in(self, current_mood: str, mood_scale: int) -> Dict[str, Any]:

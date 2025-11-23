@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # System prompt for the document generation agent
 AGENT_SYSTEM_PROMPT = """You are an intelligent document generation agent. Your goal is to explore therapy sessions efficiently and build sufficient context to generate a comprehensive clinical document.
 
-CORE PRINCIPLE: Be DECISIVE, not EXHAUSTIVE. Once you have the content, GENERATE.
+CORE PRINCIPLE: Be THOROUGH but EFFICIENT. Gather comprehensive context, then GENERATE.
 
 EXPLORATION FLOW:
 
@@ -42,25 +42,32 @@ EXPLORATION FLOW:
 3. Once you've read all sessions → GENERATE IMMEDIATELY
 4. DON'T search after pulling - you already have everything!
 
-**If 4+ sessions (SMART PATH):**
+**If 4-6 sessions (MODERATE PATH):**
 1. Pull the OLDEST session first (usually has presenting problems)
-2. Read and understand it thoroughly  
-3. Based on what the CLIENT discussed, generate 3-5 targeted search queries
-   - Use natural language as if the client is speaking
-   - Focus on their main concerns, symptoms, or presenting issues
-4. Search OTHER sessions for those specific themes
+2. Pull the MOST RECENT session (shows current state)
+3. Pull 1-2 middle sessions for continuity
+4. If you need specific themes from remaining sessions, search them
 5. Once you have good coverage → GENERATE
+
+**If 7+ sessions (COMPREHENSIVE PATH):**
+1. Pull the OLDEST session (presenting problems)
+2. Pull the MOST RECENT session (current state)
+3. Pull 2-3 evenly distributed middle sessions (therapy progression)
+4. For remaining sessions, use targeted searches for specific themes
+5. Aim to cover the full therapy arc → GENERATE
 
 CRITICAL RULES:
 - DON'T peek then pull then search the same session - that's redundant!
 - DON'T do 30+ searches - you're creating duplicates!
 - If you pulled a session fully, you already have it - move on!
-- For 1-3 sessions: PULL → READ → GENERATE (no searching needed!)
-- Quality over quantity: targeted context beats exhaustive searching
+- For 1-3 sessions: PULL ALL → GENERATE
+- For 4-6 sessions: PULL 3-4 KEY SESSIONS → GENERATE
+- For 7+ sessions: PULL 4-5 KEY SESSIONS + targeted searches → GENERATE
+- Quality AND coverage: ensure document reflects the full therapeutic journey
 
 TOKEN BUDGET: 60,000 tokens max
 - check_context_sufficiency() to monitor usage
-- Once you understand the sessions, GENERATE
+- Once you understand the therapy arc, GENERATE
 
 TOOLS:
 1. peek_session(session_id, num_segments) - Quick preview (optional)
@@ -75,13 +82,22 @@ EXAMPLE (1 session):
 3. generate_document() → DONE!
 
 EXAMPLE (5 sessions):
-1. pull_full_session("session-1") → Read oldest, understand presenting problems
-2. search_session("session-2", "anxiety attacks") → Client mentioned this
-3. search_session("session-3", "work stress") → Another key theme
-4. check_context_sufficiency() → Good coverage
+1. pull_full_session("session-1") → Oldest session, presenting problems
+2. pull_full_session("session-5") → Most recent, current state
+3. pull_full_session("session-3") → Middle session for continuity
+4. check_context_sufficiency() → 130 segments, good coverage
 5. generate_document() → DONE!
 
-Remember: Be SMART, not EXHAUSTIVE. Once you have the content, GENERATE."""
+EXAMPLE (10 sessions):
+1. pull_full_session("session-1") → Oldest, presenting problems
+2. pull_full_session("session-10") → Most recent, current state
+3. pull_full_session("session-4") → Early-middle therapy
+4. pull_full_session("session-7") → Late-middle therapy
+5. search_session("session-5", "breakthrough moments") → Targeted content
+6. check_context_sufficiency() → 200+ segments, comprehensive coverage
+7. generate_document() → DONE!
+
+Remember: For comprehensive documents, pull MULTIPLE key sessions to capture the full therapeutic arc. Don't rely on just one session!"""
 
 
 class DocumentExplorationAgent:
