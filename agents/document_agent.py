@@ -49,12 +49,19 @@ EXPLORATION FLOW:
 4. If you need specific themes from remaining sessions, search them
 5. Once you have good coverage → GENERATE
 
-**If 7+ sessions (COMPREHENSIVE PATH):**
+**If 7-10 sessions (COMPREHENSIVE PATH):**
 1. Pull the OLDEST session (presenting problems)
 2. Pull the MOST RECENT session (current state)
-3. Pull 2-3 evenly distributed middle sessions (therapy progression)
+3. Pull 3-4 evenly distributed middle sessions (therapy progression)
 4. For remaining sessions, use targeted searches for specific themes
 5. Aim to cover the full therapy arc → GENERATE
+
+**If 10+ sessions (FULL ARC PATH):**
+1. Pull the OLDEST session (presenting problems)
+2. Pull the MOST RECENT session (current state)
+3. Pull 4-6 evenly distributed middle sessions (complete therapy progression)
+4. Optionally search remaining sessions for specific themes
+5. Ensure comprehensive coverage of the therapeutic journey → GENERATE
 
 CRITICAL RULES:
 - DON'T peek then pull then search the same session - that's redundant!
@@ -62,12 +69,15 @@ CRITICAL RULES:
 - If you pulled a session fully, you already have it - move on!
 - For 1-3 sessions: PULL ALL → GENERATE
 - For 4-6 sessions: PULL 3-4 KEY SESSIONS → GENERATE
-- For 7+ sessions: PULL 4-5 KEY SESSIONS + targeted searches → GENERATE
+- For 7-10 sessions: PULL 5-6 KEY SESSIONS + targeted searches → GENERATE
+- For 10+ sessions: PULL 6-8 KEY SESSIONS + targeted searches → GENERATE
 - Quality AND coverage: ensure document reflects the full therapeutic journey
+- Don't stop too early: If budget allows, pull more sessions for comprehensive coverage
 
-TOKEN BUDGET: 60,000 tokens max
+TOKEN BUDGET: 150,000 tokens max
 - check_context_sufficiency() to monitor usage
 - Once you understand the therapy arc, GENERATE
+- Budget allows for ~10-15 comprehensive sessions
 
 TOOLS:
 1. peek_session(session_id, num_segments) - Quick preview (optional)
@@ -91,13 +101,14 @@ EXAMPLE (5 sessions):
 EXAMPLE (10 sessions):
 1. pull_full_session("session-1") → Oldest, presenting problems
 2. pull_full_session("session-10") → Most recent, current state
-3. pull_full_session("session-4") → Early-middle therapy
-4. pull_full_session("session-7") → Late-middle therapy
-5. search_session("session-5", "breakthrough moments") → Targeted content
-6. check_context_sufficiency() → 200+ segments, comprehensive coverage
-7. generate_document() → DONE!
+3. pull_full_session("session-3") → Early therapy
+4. pull_full_session("session-5") → Mid therapy
+5. pull_full_session("session-7") → Later therapy
+6. pull_full_session("session-9") → Recent therapy
+7. check_context_sufficiency() → 300+ segments, comprehensive coverage
+8. generate_document() → DONE!
 
-Remember: For comprehensive documents, pull MULTIPLE key sessions to capture the full therapeutic arc. Don't rely on just one session!"""
+Remember: For comprehensive documents with many sessions, pull MULTIPLE key sessions (6-8 for 10+ sessions) to capture the full therapeutic arc. Don't rely on just a few sessions!"""
 
 
 class DocumentExplorationAgent:

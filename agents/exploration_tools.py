@@ -19,7 +19,7 @@ class ExplorationContext:
     def __init__(self):
         self.accumulated_segments: List[Dict[str, Any]] = []
         self.tokens_used: int = 0
-        self.token_budget: int = 60000
+        self.token_budget: int = 150000  # Increased to handle 10+ sessions comfortably
         self.sessions_explored: List[str] = []
         self.authorization: Optional[str] = None
         self.generation_id: Optional[str] = None
