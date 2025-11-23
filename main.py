@@ -321,12 +321,14 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     incoming_token = message_data.get("auth_token") or message_data.get("token")
     ui_state_token = await ui_state_manager.get_auth_token(session_id)
     
-    # Also check the stored session for auth token
+    # Also check the stored session for auth token and profile_id
     session_token = None
+    session_profile_id = None
     try:
         sess = await session_manager.get_session(session_id)
         if sess:
             session_token = sess.auth_token
+            session_profile_id = sess.profile_id
     except Exception:
         pass
     
@@ -335,8 +337,9 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, ui_state_token={bool(ui_state_token)}, session_token={bool(session_token)}, final_token={bool(token)}")
 
     if token:
-        profile_id = message_data.get("profile_id") or message_data.get("profileId")
-        logger.info(f"🔍 Debug profile_id extraction: from_message={profile_id}")
+        # Try to get profile_id from message, then fall back to session
+        profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
+        logger.info(f"🔍 Debug profile_id extraction: from_message={message_data.get('profile_id') or message_data.get('profileId')}, from_session={session_profile_id}, final={profile_id}")
         try:
             # Only attach profile_id for practitioner contexts; clients use JWT clientId, not profile header
             if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
@@ -349,7 +352,8 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
             pass
 
     # Set profile id explicitly only for practitioner contexts (avoid client-* IDs)
-    profile_id = message_data.get("profile_id") or message_data.get("profileId")
+    # Try message first, then session fallback
+    profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
     if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
         logger.info(f"🔍 Debug: explicitly setting profile_id={profile_id}")
         try:
@@ -358,6 +362,8 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
             pass
     elif profile_id and isinstance(profile_id, str) and profile_id.startswith("client-"):
         logger.info("🔍 Debug: skipping explicit profile_id set for client context")
+    else:
+        logger.warning(f"⚠️ No valid profile_id found for session {session_id} - tool calls requiring practitioner context may fail")
 
     # Attach page context derived from latest UI state for this session
     ui_state = await ui_state_manager.get_state(session_id)
