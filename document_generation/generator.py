@@ -49,7 +49,23 @@ async def generate_document_from_context(
         practitioner_name = practitioner_info.get('name', 'Practitioner')
         today = datetime.now().strftime("%B %d, %Y")
         
-        logger.info(f"🎨 Generating document: {len(segments)} segments, Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        # Log detailed segment information for debugging
+        unique_transcript_ids = set(seg.get('transcript_id', seg.get('transcriptId', 'unknown')) for seg in segments)
+        logger.info(f"🎨 Generating document: {len(segments)} segments from {len(unique_transcript_ids)} sessions, Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        
+        # Sort segments deterministically for consistent ordering
+        # Sort by: transcript_id, start_time to ensure consistent document generation
+        def get_segment_sort_key(seg):
+            transcript_id = seg.get('transcript_id', seg.get('transcriptId', ''))
+            start_time = seg.get('start_time', seg.get('startTime', 0))
+            try:
+                start_time = float(start_time) if start_time else 0
+            except (ValueError, TypeError):
+                start_time = 0
+            return (transcript_id, start_time)
+        
+        segments = sorted(segments, key=get_segment_sort_key)
+        logger.info(f"🔄 Sorted segments chronologically for deterministic processing")
         
         # Build organized transcript context
         context_by_purpose = {}
@@ -81,7 +97,10 @@ async def generate_document_from_context(
             transcript_text += "\n".join(segments_text)
             transcript_text += "\n"
         
+        # Log more detailed context information
+        total_segments_by_purpose = {purpose: len(segs) for purpose, segs in context_by_purpose.items()}
         logger.info(f"✅ Built context: {len(context_by_purpose)} sections, {len(transcript_text)} chars")
+        logger.info(f"📊 Segments by purpose: {total_segments_by_purpose}")
         
         # Build system prompt with anti-diagnosis instructions
         system_prompt = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
@@ -190,7 +209,8 @@ Always personalize the document by using the actual client and practitioner name
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.8,  # Higher for comprehensive detail
+            temperature=0.3,  # Lower temperature for consistent, deterministic outputs
+            seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
         )
         
         # Validate response

@@ -245,6 +245,12 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
         logger.info(f"   - Tokens: {exploration_result['tokens_used']}")
         logger.info(f"   - Sessions: {exploration_result['sessions_explored']}")
         
+        # CRITICAL: Check for empty or insufficient segments
+        if len(exploration_result['segments']) == 0:
+            logger.error(f"❌ [AGENTIC] No segments retrieved! This will produce a poor document.")
+        elif len(exploration_result['segments']) < 20:
+            logger.warning(f"⚠️ [AGENTIC] Only {len(exploration_result['segments'])} segments retrieved - may be insufficient for quality document")
+        
         await emit_progress_func(generation_id, {
             "type": "stage_completed",
             "stage": "agentic_exploration",

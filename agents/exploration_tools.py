@@ -23,12 +23,44 @@ class ExplorationContext:
         self.sessions_explored: List[str] = []
         self.authorization: Optional[str] = None
         self.generation_id: Optional[str] = None
+        self._segment_ids: set = set()  # Track segment IDs for deduplication
         
     def add_segments(self, segments: List[Dict[str, Any]]):
-        """Add segments and update token count"""
-        self.accumulated_segments.extend(segments)
+        """Add segments with deduplication and update token count"""
+        initial_count = len(self.accumulated_segments)
+        duplicates_found = 0
+        
+        for segment in segments:
+            # Create a unique identifier for each segment
+            # Use combination of session_id, start_time, and text to identify duplicates
+            segment_id = self._create_segment_id(segment)
+            
+            if segment_id not in self._segment_ids:
+                self._segment_ids.add(segment_id)
+                self.accumulated_segments.append(segment)
+            else:
+                duplicates_found += 1
+        
+        # Calculate tokens only for newly added segments
+        new_segments_added = len(self.accumulated_segments) - initial_count
         # Rough estimate: 1 segment ≈ 75 tokens
-        self.tokens_used += len(segments) * 75
+        self.tokens_used += new_segments_added * 75
+        
+        # Log deduplication stats if duplicates were found
+        if duplicates_found > 0:
+            logger.info(f"🔍 Deduplication: Filtered {duplicates_found} duplicate segments, added {new_segments_added} new segments")
+    
+    def _create_segment_id(self, segment: Dict[str, Any]) -> str:
+        """Create a unique identifier for a segment to enable deduplication"""
+        # Use multiple fields to create a robust unique identifier
+        transcript_id = segment.get('transcript_id', segment.get('transcriptId', ''))
+        start_time = segment.get('start_time', segment.get('startTime', 0))
+        text = segment.get('text', '')
+        
+        # Create a hash of the key fields
+        import hashlib
+        unique_string = f"{transcript_id}_{start_time}_{text[:100]}"  # Use first 100 chars of text
+        return hashlib.md5(unique_string.encode()).hexdigest()
         
     def has_budget(self, estimated_tokens: int) -> bool:
         """Check if there's budget for more tokens"""
@@ -279,6 +311,7 @@ def check_context_sufficiency() -> Dict[str, Any]:
     context = get_exploration_context()
     
     total_segments = len(context.accumulated_segments)
+    unique_segments = len(context._segment_ids)  # Track unique segments
     tokens_used = context.tokens_used
     token_budget_remaining = context.token_budget - tokens_used
     budget_used_pct = (tokens_used / context.token_budget) * 100
@@ -290,10 +323,12 @@ def check_context_sufficiency() -> Dict[str, Any]:
         budget_used_pct >= 20  # Used at least 20% of budget
     )
     
-    logger.info(f"Context check: {total_segments} segments, {tokens_used}/{context.token_budget} tokens ({budget_used_pct:.1f}%), {sessions_explored} sessions")
+    logger.info(f"Context check: {total_segments} segments ({unique_segments} unique), {tokens_used}/{context.token_budget} tokens ({budget_used_pct:.1f}%), {sessions_explored} sessions")
     
     return {
         "total_segments_collected": total_segments,
+        "unique_segments": unique_segments,
+        "duplicate_segments_filtered": total_segments - unique_segments,
         "tokens_used": tokens_used,
         "token_budget": context.token_budget,
         "token_budget_remaining": token_budget_remaining,
@@ -301,7 +336,7 @@ def check_context_sufficiency() -> Dict[str, Any]:
         "sessions_explored": sessions_explored,
         "is_sufficient": is_sufficient,
         "recommendation": "You have sufficient context to generate the document" if is_sufficient else "Continue exploring to gather more context",
-        "message": f"Collected {total_segments} segments using {tokens_used}/{context.token_budget} tokens ({budget_used_pct:.1f}%) from {sessions_explored} sessions"
+        "message": f"Collected {total_segments} segments ({unique_segments} unique) using {tokens_used}/{context.token_budget} tokens ({budget_used_pct:.1f}%) from {sessions_explored} sessions"
     }
 
 
