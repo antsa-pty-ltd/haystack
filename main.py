@@ -238,7 +238,16 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         
         context_parts = []
         context_parts.append(f"Page: {page_url}")
-        context_parts.append(f"Client: {client_name or client_id or 'None'}")
+        
+        # IMPORTANT: Only show client info if both name AND id are present (indicates active selection)
+        # Do NOT inject client_id alone as it may be stale from previous sessions
+        if client_name and client_id:
+            context_parts.append(f"Client: {client_name} ({client_id})")
+        elif client_name:
+            context_parts.append(f"Client: {client_name} (use search_clients to get ID)")
+        else:
+            context_parts.append(f"Client: None (use search_clients if needed)")
+        
         context_parts.append(f"Template: {selected_template.get('name') if selected_template else 'None'}")
         context_parts.append(f"Loaded Sessions: {len(loaded_sessions)}")
         context_parts.append(f"Generated Documents: {len(generated_documents)}")

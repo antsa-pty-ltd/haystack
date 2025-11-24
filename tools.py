@@ -1803,6 +1803,8 @@ class ToolManager:
     async def _get_client_homework_status(self, client_id: str, status_filter: str = "all", limit: int = 20, include_messages: bool = True) -> Dict[str, Any]:
         """Get homework/assignment status for a specific client"""
         try:
+            logger.info(f"🔍 _get_client_homework_status called with client_id={client_id}")
+            
             params = {
                 'client_id': client_id
             }
@@ -2575,7 +2577,6 @@ Please refine the following document according to these instructions:
     async def _get_client_summary(self, client_id: str, include_recent_sessions: bool = True) -> Dict[str, Any]:
         """Get client summary from API"""
         try:
-            # Debug logging to see what parameters we're getting
             logger.info(f"🔍 get_client_summary called with: client_id={client_id}")
             
             if not client_id:
@@ -2627,7 +2628,8 @@ Please refine the following document according to these instructions:
     async def _search_clients(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search clients via API"""
         try:
-
+            logger.info(f"🔍 search_clients called with query='{query}', limit={limit}")
+            
             params = {
                 'query': query,
                 'limit': limit
@@ -2635,6 +2637,8 @@ Please refine the following document according to these instructions:
             
             response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
             clients = response.get('clients', [])
+            
+            logger.info(f"✅ search_clients returned {len(clients)} clients")
             
             # Transform API response to expected format
             return [
@@ -2973,13 +2977,16 @@ Please refine the following document according to these instructions:
                 result_detail["homework_questions"] = response.get("homeworkQuestions", [])
             
             # Add summary information
+            homework_questions = response.get("homeworkQuestions") or []
+            client_answer_images = response.get("clientAnswerImages") or []
+            
             result_detail["summary"] = {
                 "homework_title": response.get("homework", {}).get("title", "Unknown"),
                 "completion_status": response.get("status", "Unknown"),
                 "has_feedback": bool(response.get("feedback")),
                 "has_rating": response.get("rate") is not None,
-                "question_count": len(response.get("homeworkQuestions", [])),
-                "has_attachments": len(response.get("clientAnswerImages", [])) > 0
+                "question_count": len(homework_questions),
+                "has_attachments": len(client_answer_images) > 0
             }
             
             return result_detail
@@ -3005,7 +3012,7 @@ Please refine the following document according to these instructions:
             
             # Use the practitioner homework history endpoint
             # The endpoint expects: POST /practitioners/homework-history/:homeworkAssignId
-            # with body: { clientId, startDate, endDate, page, limit, timezone }
+            # with body: { clientId, dateRange: [startDate, endDate], page, limit, timezone }
             
             # Set a wide date range to get all results
             from datetime import datetime, timedelta
@@ -3014,8 +3021,7 @@ Please refine the following document according to these instructions:
             
             body = {
                 "clientId": client_id,
-                "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
+                "dateRange": [start_date.isoformat(), end_date.isoformat()],
                 "page": 1,
                 "limit": limit,
                 "timezone": "UTC"
