@@ -8,8 +8,23 @@ import os
 import jwt
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+# OpenAI client will be initialized lazily when needed
+openai_client = None
+
+def get_openai_client():
+    """Get OpenAI client, initializing it lazily if needed"""
+    global openai_client
+    if openai_client is None:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("OPENAI_API_KEY environment variable not set for tools.")
+            return None
+        openai_client = OpenAI(api_key=openai_api_key)
+    return openai_client
 
 class ToolManager:
     """Manages tools for different personas"""
@@ -239,19 +254,19 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_homework_status",
-                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details.",
+                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details. IMPORTANT: You MUST first use search_clients or search_specific_clients to find the client and get their client_id, then use that exact client_id in this function. Never guess or fabricate a client_id.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "client_id": {
                                     "type": "string",
-                                    "description": "The unique identifier for the client (UUID)",
+                                    "description": "The exact UUID client_id returned from search_clients or search_specific_clients. You MUST obtain this from a search first - do not guess or make up a client_id.",
                                     "pattern": "^[0-9a-fA-F-]{30,}$"
                                 },
                                 "status_filter": {
                                     "type": "string",
                                     "enum": ["all", "active", "completed", "expired"],
-                                    "description": "Filter assignments by status",
+                                    "description": "Filter assignments. Use 'completed' to show assignments with completed homework items (what users mean by 'completed homework'). Use 'active' or 'expired' to filter by assignment status.",
                                     "default": "all"
                                 },
                                 "limit": {
@@ -391,6 +406,65 @@ class ToolManager:
                 "implementation": self._get_latest_conversation
             },
 
+            "get_homework_result_detail": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_homework_result_detail",
+                        "description": "Get detailed results of a specific homework result/submission, including the client's responses, scores, feedback, and the actual questions answered. Use this to see WHAT the client answered on homework tasks like K10, AUDIT, questionnaires, etc. Requires homework_result_id which you can get from get_homework_results_by_assignment.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "homework_result_id": {
+                                    "type": "string",
+                                    "description": "The homework result ID (UUID) to get details for. Get this from get_homework_results_by_assignment.",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "include_questions": {
+                                    "type": "boolean",
+                                    "description": "Whether to include the full homework questions that were answered",
+                                    "default": True
+                                }
+                            },
+                            "required": ["homework_result_id"]
+                        }
+                    }
+                },
+                "implementation": self._get_homework_result_detail
+            },
+
+            "get_homework_results_by_assignment": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_homework_results_by_assignment",
+                        "description": "Get a list of all homework result submissions for a specific homework assignment. Returns homework_result_ids that can be used with get_homework_result_detail to see the actual answers. Use this when you want to see completed homework for an assignment.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "The client ID (UUID)",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "homework_assign_id": {
+                                    "type": "string",
+                                    "description": "The homework assignment ID (UUID) from get_client_homework_status",
+                                    "pattern": "^[0-9a-fA-F-]{30,}$"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results to return",
+                                    "default": 50
+                                }
+                            },
+                            "required": ["client_id", "homework_assign_id"]
+                        }
+                    }
+                },
+                "implementation": self._get_homework_results_by_assignment
+            },
+
             # Session Management Tools (for WEB_ASSISTANT)
             "search_sessions": {
                 "definition": {
@@ -498,6 +572,42 @@ class ToolManager:
                     }
                 },
                 "implementation": self._validate_sessions
+            },
+
+            "semantic_search_sessions": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "semantic_search_sessions",
+                        "description": "Search for specific themes/topics across session transcripts using semantic similarity. Use when practitioner wants to focus on particular discussion topics (e.g., 'find discussions about anxiety coping strategies', 'segments mentioning sleep problems'). Returns the most relevant transcript segments.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Natural language query describing what to search for (e.g., 'discussions about sleep problems', 'anxiety coping strategies')"
+                                },
+                                "transcript_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Transcript IDs to search within (get these from search_sessions or load_session results)"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "default": 20,
+                                    "description": "Maximum number of segments to return (default: 20)"
+                                },
+                                "similarity_threshold": {
+                                    "type": "number",
+                                    "default": 0.7,
+                                    "description": "Minimum similarity score from 0.0 to 1.0 (default: 0.7)"
+                                }
+                            },
+                            "required": ["query", "transcript_ids"]
+                        }
+                    }
+                },
+                "implementation": self._semantic_search_sessions
             },
 
             "get_loaded_sessions": {
@@ -622,7 +732,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "set_client_selection",
-                        "description": "Set the client selection in the UI (like selecting from AutoComplete). Call this FIRST before loading any sessions.",
+                        "description": "Set the client selection in the UI (like selecting from AutoComplete). This is STEP 1 - you must then call load_session_direct or load_multiple_sessions as STEP 2 to actually load session content.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -692,7 +802,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "load_multiple_sessions",
-                        "description": "Load multiple sessions as separate tabs in the UI. Use when user requests to load several sessions at once (e.g. 'load session 1 and 3'). Call AFTER setting client selection.",
+                        "description": "Load multiple sessions as separate tabs in the UI. CRITICAL: When user asks to load sessions, you MUST call BOTH set_client_selection AND load_multiple_sessions in sequence. This tool loads the actual session content into the UI. Use validate_sessions first to check sessions are valid.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -1151,6 +1261,8 @@ class ToolManager:
                 self.tools["search_clients"]["definition"], 
                 self.tools["search_specific_clients"]["definition"],
                 self.tools["get_client_homework_status"]["definition"],
+                self.tools["get_homework_result_detail"]["definition"],
+                self.tools["get_homework_results_by_assignment"]["definition"],
                 self.tools["get_clinic_profile"]["definition"],
                 self.tools["list_practitioners"]["definition"],
                 self.tools["get_clinic_stats"]["definition"],
@@ -1160,6 +1272,7 @@ class ToolManager:
                 self.tools["get_latest_conversation"]["definition"],
                 self.tools["search_sessions"]["definition"],
                 self.tools["validate_sessions"]["definition"],
+                self.tools["semantic_search_sessions"]["definition"],
                 self.tools["load_session"]["definition"],
                 self.tools["analyze_session_content"]["definition"],
                 self.tools["set_client_selection"]["definition"],
@@ -1214,6 +1327,7 @@ class ToolManager:
                 "get_latest_conversation": self.tools["get_latest_conversation"]["implementation"],
                 "search_sessions": self.tools["search_sessions"]["implementation"],
                 "validate_sessions": self.tools["validate_sessions"]["implementation"],
+                "semantic_search_sessions": self.tools["semantic_search_sessions"]["implementation"],
                 "load_session": self.tools["load_session"]["implementation"],
                 "analyze_session_content": self.tools["analyze_session_content"]["implementation"],
                 "set_client_selection": self.tools["set_client_selection"]["implementation"],
@@ -1250,6 +1364,94 @@ class ToolManager:
             }
         else:
             return {}
+    
+    def get_haystack_component_tools(self, persona_type: str) -> List:
+        """
+        Get Haystack Tool objects for a specific persona.
+        
+        This method converts the tool manager's async tools into proper Haystack Tool format
+        that can be used directly in Haystack Pipelines with ToolInvoker.
+        
+        Args:
+            persona_type: The persona type ("web_assistant", "jaimee_therapist", etc.)
+            
+        Returns:
+            List of Haystack Tool objects ready for use in Pipeline
+        """
+        from haystack.tools import Tool
+        import asyncio
+        import json
+        
+        haystack_tools = []
+        
+        # Get the list of allowed tools for this persona
+        tool_definitions = self.get_tools_for_persona(persona_type)
+        allowed_tool_names = [
+            t.get("function", {}).get("name") 
+            for t in tool_definitions 
+            if isinstance(t.get("function"), dict)
+        ]
+        
+        for tool_name in allowed_tool_names:
+            if tool_name not in self.tools:
+                continue
+            
+            tool_cfg = self.tools[tool_name]
+            
+            try:
+                description = tool_cfg["definition"]["function"].get("description", tool_name)
+                parameters = tool_cfg["definition"]["function"].get("parameters", {})
+            except Exception:
+                logger.warning(f"Failed to extract definition for tool {tool_name}")
+                continue
+            
+            # Create a sync wrapper for the async tool
+            def make_sync_wrapper(tool_name: str):
+                """Create a synchronous wrapper for async tool execution"""
+                def sync_tool_wrapper(**kwargs):
+                    try:
+                        # Create a new event loop in a thread to avoid blocking
+                        def run_async():
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                result = loop.run_until_complete(
+                                    self.execute_tool(tool_name, kwargs, session_id=kwargs.pop('session_id', None))
+                                )
+                                return result
+                            finally:
+                                loop.close()
+                        
+                        # Run in thread pool to avoid blocking
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(run_async)
+                            result = future.result(timeout=120)
+                        
+                        # Haystack ToolInvoker expects string return
+                        if isinstance(result, dict):
+                            return json.dumps(result, ensure_ascii=False)
+                        return str(result)
+                        
+                    except Exception as e:
+                        logger.error(f"Tool execution error for {tool_name}: {e}")
+                        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+                
+                return sync_tool_wrapper
+            
+            # Create Haystack Tool object
+            haystack_tool = Tool(
+                name=tool_name,
+                description=description,
+                parameters=parameters,
+                function=make_sync_wrapper(tool_name)
+            )
+            
+            haystack_tools.append(haystack_tool)
+            logger.debug(f"Converted tool {tool_name} to Haystack Tool format")
+        
+        logger.info(f"✅ Created {len(haystack_tools)} Haystack tools for persona {persona_type}")
+        return haystack_tools
     
     def set_auth_token(self, token: str, profile_id: Optional[str] = None):
         """Set the JWT token for API calls and optionally set profile ID"""
@@ -1601,18 +1803,32 @@ class ToolManager:
     async def _get_client_homework_status(self, client_id: str, status_filter: str = "all", limit: int = 20, include_messages: bool = True) -> Dict[str, Any]:
         """Get homework/assignment status for a specific client"""
         try:
+            logger.info(f"🔍 _get_client_homework_status called with client_id={client_id}")
+            
             params = {
                 'client_id': client_id
             }
             
             response = await self._make_api_request('GET', '/haystack/conversations', params=params)
             
+            logger.info(f"🔍 _get_client_homework_status: Raw API response keys: {list(response.keys())}")
+            logger.info(f"🔍 _get_client_homework_status: Total conversations: {response.get('total', 0)}")
+            logger.info(f"🔍 _get_client_homework_status: Conversations count: {len(response.get('conversations', []))}")
+            if response.get('conversations'):
+                first_conv = response['conversations'][0]
+                logger.info(f"🔍 _get_client_homework_status: First conversation sample: {first_conv}")
+            
             client_name = response.get("client_name", "Unknown Client")
             conversations = response.get("conversations", [])
             total_assignments = response.get("total", len(conversations))
             
             # Filter by status if specified
-            if status_filter != "all":
+            # Note: "completed" filter should show assignments with completed items, not just assignment status
+            if status_filter == "completed":
+                # When user asks for "completed" homework, show assignments that have completed items
+                conversations = [c for c in conversations if c.get("has_completed_items", False) or c.get("completed_items", 0) > 0]
+            elif status_filter != "all":
+                # For other filters (active, expired, etc.), filter by assignment status
                 conversations = [c for c in conversations if c.get("status", "").lower() == status_filter.lower()]
             
             # Apply limit
@@ -1621,13 +1837,21 @@ class ToolManager:
             # Enhance conversation data
             enhanced_assignments = []
             for conv in conversations:
+                total_items = conv.get("total_items", 0)
+                completed_items = conv.get("completed_items", 0)
+                has_completed = conv.get("has_completed_items", False) or completed_items > 0
+                
                 assignment = {
                     "assignment_id": conv.get("assignment_id"),
                     "homework_id": conv.get("homework_id"),
                     "title": conv.get("title"),
                     "status": conv.get("status"),
                     "start_date": conv.get("start_date"),
-                    "end_date": conv.get("end_date")
+                    "end_date": conv.get("end_date"),
+                    "total_items": total_items,
+                    "completed_items": completed_items,
+                    "has_completed_items": has_completed,
+                    "completion_rate": f"{completed_items}/{total_items}" if total_items > 0 else "0/0"
                 }
                 
                 if include_messages:
@@ -1650,6 +1874,10 @@ class ToolManager:
             active_assignments = len([c for c in conversations if c.get("status", "").lower() == "active"])
             completed_assignments = len([c for c in conversations if c.get("status", "").lower() == "completed"])
             
+            # Count assignments with completed items (this is what users mean by "completed homework")
+            assignments_with_completed_items = len([c for c in conversations if c.get("has_completed_items", False) or c.get("completed_items", 0) > 0])
+            total_completed_items = sum(c.get("completed_items", 0) for c in conversations)
+            
             return {
                 "client_id": client_id,
                 "client_name": client_name,
@@ -1658,38 +1886,69 @@ class ToolManager:
                     "returned_assignments": len(enhanced_assignments),
                     "active_assignments": active_assignments,
                     "completed_assignments": completed_assignments,
+                    "assignments_with_completed_items": assignments_with_completed_items,
+                    "total_completed_items": total_completed_items,
                     "total_messages": total_messages,
                     "status_breakdown": status_counts
                 },
                 "assignments": enhanced_assignments,
-                "filter_applied": status_filter
+                "filter_applied": status_filter if status_filter != "all" else None
             }
             
         except Exception as e:
             logger.error(f"Error getting client homework status: {e}")
             return {"error": f"Failed to get homework status: {str(e)}", "assignments": []}
     
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a tool function"""
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Execute a tool function with session-based context"""
         try:
             if tool_name not in self.tools:
-                raise ValueError(f"Unknown tool: {tool_name}")
+                return {
+                    "success": False,
+                    "error": f"Unknown tool: {tool_name}",
+                    "tool": tool_name,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
             
+            # Check tool availability on current page (if session_id provided)
+            if session_id:
+                from ui_state_manager import ui_state_manager
+                
+                # Always use sync methods - execute_tool runs in ThreadPoolExecutor with its own event loop
+                # Calling async methods from here causes "Future attached to different loop" errors
+                ui_state = ui_state_manager.get_state_sync(session_id)
+                page_capabilities = ui_state_manager.get_page_capabilities_sync(session_id)
+                
+                # UI tools require page capability
+                ui_tools = [
+                    'set_client_selection', 'load_session_direct', 'load_multiple_sessions',
+                    'set_selected_template', 'select_template_by_name', 'generate_document_from_loaded',
+                    'get_loaded_sessions', 'get_session_content', 'analyze_loaded_session'
+                ]
+                
+                if tool_name in ui_tools and tool_name not in page_capabilities:
+                    page_type = ui_state.get("page_type", "unknown")
+                    return {
+                        "success": False,
+                        "error": f"Tool '{tool_name}' not available on '{page_type}' page",
+                        "suggestion": f"Navigate to transcribe page to use this tool",
+                        "tool": tool_name,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                
+                logger.info(f"🔧 Executing tool {tool_name} with page_type={ui_state.get('page_type', 'unknown')}")
+            
+            # Get tool implementation
             implementation = self.tools[tool_name]["implementation"]
             
-            # For UI-related tools, inject page context if available and tool supports it
-            ui_tools_with_context = ['set_client_selection', 'load_session_direct', 'load_multiple_sessions', 'set_selected_template']
+            # Inject session_id into tool arguments if the tool signature supports it
+            import inspect
+            sig = inspect.signature(implementation)
+            if 'session_id' in sig.parameters and session_id:
+                arguments['session_id'] = session_id
+                logger.info(f"🔄 Injected session_id into {tool_name}")
             
-            if tool_name in ui_tools_with_context and self.current_page_context:
-                # Add page_context to arguments if the tool function signature supports it
-                import inspect
-                sig = inspect.signature(implementation)
-                if 'page_context' in sig.parameters:
-                    arguments['page_context'] = self.current_page_context
-                    logger.info(f"🔄 Injecting page context into {tool_name}: {self.current_page_context.get('page_type', 'unknown')}")
-            elif tool_name in ui_tools_with_context:
-                logger.warning(f"⚠️ Tool {tool_name} is UI-related but no page context available")
-            
+            # Execute tool
             result = await implementation(**arguments)
             
             return {
@@ -1698,6 +1957,7 @@ class ToolManager:
                 "tool": tool_name,
                 "timestamp": datetime.utcnow().isoformat()
             }
+            
         except Exception as e:
             logger.error(f"Error executing tool {tool_name}: {e}")
             return {
@@ -1863,10 +2123,10 @@ class ToolManager:
             ui_sessions = []
             if page_context:
                 # Use the most recent UI state
-                all_summary = ui_state_manager.get_all_sessions_summary()
+                all_summary = ui_state_manager.get_all_sessions_summary_sync()
                 if all_summary:
                     latest_session_id = max(all_summary.keys(), key=lambda k: all_summary[k].get('last_updated', ''))
-                    ui_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
+                    ui_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
             
             selected_sessions = sessions or [
                 {
@@ -1946,7 +2206,7 @@ PERSONALIZATION INSTRUCTIONS:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             if not all_sessions_summary:
                 return {
                     "error": "No active UI session found. Template selection requires an active browser session.",
@@ -1957,7 +2217,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             if not selected_template or not selected_template.get("templateId"):
                 return {
                     "error": "No template is currently selected. Please select a template first or use set_selected_template.",
@@ -2018,8 +2278,8 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            # Use SYNC methods to avoid event loop conflicts when called from threads
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             if not all_sessions_summary:
                 return {
                     "ready_to_generate": False,
@@ -2033,17 +2293,17 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            # Check template status
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            # Check template status (SYNC)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             template_ready = bool(selected_template and selected_template.get("templateId"))
             
-            # Check sessions status
-            loaded_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
+            # Check sessions status (SYNC)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
             sessions_ready = bool(loaded_sessions)
             session_count = len(loaded_sessions) if loaded_sessions else 0
             
-            # Check client status
-            current_client = ui_state_manager.get_current_client(latest_session_id)
+            # Check client status (SYNC)
+            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
             client_ready = bool(current_client and current_client.get("clientName"))
             
             # Determine readiness and build response
@@ -2145,8 +2405,8 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            # Use SYNC methods to avoid event loop conflicts
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -2160,7 +2420,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
             
             if not generated_documents:
                 return {
@@ -2211,7 +2471,7 @@ PERSONALIZATION INSTRUCTIONS:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -2223,7 +2483,7 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            generated_documents = ui_state_manager.get_generated_documents(latest_session_id)
+            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
             
             # Find the document to refine
             target_document = None
@@ -2317,7 +2577,6 @@ Please refine the following document according to these instructions:
     async def _get_client_summary(self, client_id: str, include_recent_sessions: bool = True) -> Dict[str, Any]:
         """Get client summary from API"""
         try:
-            # Debug logging to see what parameters we're getting
             logger.info(f"🔍 get_client_summary called with: client_id={client_id}")
             
             if not client_id:
@@ -2369,7 +2628,8 @@ Please refine the following document according to these instructions:
     async def _search_clients(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search clients via API"""
         try:
-
+            logger.info(f"🔍 search_clients called with query='{query}', limit={limit}")
+            
             params = {
                 'query': query,
                 'limit': limit
@@ -2377,6 +2637,8 @@ Please refine the following document according to these instructions:
             
             response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
             clients = response.get('clients', [])
+            
+            logger.info(f"✅ search_clients returned {len(clients)} clients")
             
             # Transform API response to expected format
             return [
@@ -2398,13 +2660,39 @@ Please refine the following document according to these instructions:
             
         except Exception as e:
             logger.error(f"Error searching clients: {e}")
-            # Fallback response
+            
+            # Provide more helpful error context
+            error_message = str(e)
+            error_type = "Unknown Error"
+            user_guidance = "Please try again or contact support if the issue persists."
+            
+            # Detect specific error types
+            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+                error_type = "Authentication Error"
+                user_guidance = "Your session may have expired. Please refresh the page and try again."
+            elif "403" in error_message or "Forbidden" in error_message:
+                error_type = "Permission Error"
+                user_guidance = "You don't have permission to access this client information."
+            elif "404" in error_message or "Not Found" in error_message:
+                error_type = "Client Not Found"
+                user_guidance = f"No clients found matching '{query}'. Please check the spelling and try again."
+            elif "timeout" in error_message.lower() or "timed out" in error_message.lower():
+                error_type = "Connection Timeout"
+                user_guidance = "The server took too long to respond. Please try again in a moment."
+            elif "connection" in error_message.lower() or "network" in error_message.lower():
+                error_type = "Network Error"
+                user_guidance = "Unable to connect to the server. Please check your internet connection."
+            
+            # Fallback response with detailed error info
             return [
                 {
                     "client_id": "error",
-                    "name": f"Search Error for '{query}'",
+                    "name": f"Search Error: {error_type}",
                     "status": "Error",
-                    "error": f"Failed to search: {str(e)}",
+                    "error": error_message,
+                    "error_type": error_type,
+                    "user_guidance": user_guidance,
+                    "search_query": query,
                     "last_session": None
                 }
             ]
@@ -2645,6 +2933,144 @@ Please refine the following document according to these instructions:
                 "error": f"Failed to get latest conversation: {str(e)}",
                 "recent_messages": [],
                 "message_count": 0
+            }
+    
+    async def _get_homework_result_detail(self, homework_result_id: str, include_questions: bool = True) -> Dict[str, Any]:
+        """Get detailed results of a specific homework submission"""
+        try:
+            logger.info(f"🔍 _get_homework_result_detail called with: homework_result_id={homework_result_id}, include_questions={include_questions}")
+            
+            if not homework_result_id:
+                return {
+                    "error": "homework_result_id is required",
+                    "status": "Invalid Request"
+                }
+            
+            # Call the homework result detail endpoint
+            response = await self._make_api_request('GET', f'/practitioners/homework-history/result/{homework_result_id}')
+            
+            logger.info(f"✅ Homework result detail fetched successfully for result ID: {homework_result_id}")
+            
+            # Extract and format the response
+            result_detail = {
+                "homework_result_id": response.get("id", homework_result_id),
+                "created_at": response.get("createdAt"),
+                "status": response.get("status"),
+                "classification": response.get("classification"),
+                "rate": response.get("rate"),
+                "feedback": response.get("feedback"),
+                "reject_reason": response.get("rejectReason"),
+                "homework": {
+                    "id": response.get("homework", {}).get("id"),
+                    "title": response.get("homework", {}).get("title"),
+                    "description": response.get("homework", {}).get("description"),
+                    "type": response.get("homework", {}).get("type"),
+                    "video_link": response.get("homework", {}).get("videoLink")
+                },
+                "client_response": response.get("clientResponse", {}),
+                "result_data": response.get("result", {}),
+                "client_answer_images": response.get("clientAnswerImages", [])
+            }
+            
+            # Include questions if requested
+            if include_questions:
+                result_detail["homework_questions"] = response.get("homeworkQuestions", [])
+            
+            # Add summary information
+            homework_questions = response.get("homeworkQuestions") or []
+            client_answer_images = response.get("clientAnswerImages") or []
+            
+            result_detail["summary"] = {
+                "homework_title": response.get("homework", {}).get("title", "Unknown"),
+                "completion_status": response.get("status", "Unknown"),
+                "has_feedback": bool(response.get("feedback")),
+                "has_rating": response.get("rate") is not None,
+                "question_count": len(homework_questions),
+                "has_attachments": len(client_answer_images) > 0
+            }
+            
+            return result_detail
+            
+        except Exception as e:
+            logger.error(f"Error getting homework result detail: {e}")
+            return {
+                "homework_result_id": homework_result_id,
+                "error": f"Failed to get homework result detail: {str(e)}",
+                "status": "Error"
+            }
+    
+    async def _get_homework_results_by_assignment(self, client_id: str, homework_assign_id: str, limit: int = 50) -> Dict[str, Any]:
+        """Get list of homework results for a specific assignment"""
+        try:
+            logger.info(f"🔍 _get_homework_results_by_assignment called with: client_id={client_id}, homework_assign_id={homework_assign_id}, limit={limit}")
+            
+            if not client_id or not homework_assign_id:
+                return {
+                    "error": "client_id and homework_assign_id are required",
+                    "status": "Invalid Request"
+                }
+            
+            # Use the practitioner homework history endpoint
+            # The endpoint expects: POST /practitioners/homework-history/:homeworkAssignId
+            # with body: { clientId, dateRange: [startDate, endDate], page, limit, timezone }
+            
+            # Set a wide date range to get all results
+            from datetime import datetime, timedelta
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=365 * 2)  # 2 years back
+            
+            body = {
+                "clientId": client_id,
+                "dateRange": [start_date.isoformat(), end_date.isoformat()],
+                "page": 1,
+                "limit": limit,
+                "timezone": "UTC"
+            }
+            
+            response = await self._make_api_request('POST', f'/practitioners/homework-history/{homework_assign_id}', data=body)
+            
+            logger.info(f"✅ Homework results list fetched successfully for assignment ID: {homework_assign_id}")
+            
+            # Extract and format the response
+            data = response.get("data", [])
+            total = response.get("totalRecord", 0)
+            
+            results = []
+            for item in data:
+                results.append({
+                    "homework_result_id": item.get("id"),
+                    "status": item.get("status"),
+                    "created_at": item.get("createdAt"),
+                    "homework_title": item.get("homeworkTitle"),
+                    "homework_type": item.get("homeworkType"),
+                    "homework_assign_id": item.get("homeworkAssignId"),
+                    "classification": item.get("classification"),
+                    "rate": item.get("rate"),
+                    "client_response": item.get("clientResponse"),
+                    "feedback": item.get("feedback"),
+                    "reject_reason": item.get("rejectReason")
+                })
+            
+            return {
+                "client_id": client_id,
+                "homework_assign_id": homework_assign_id,
+                "total_results": total,
+                "returned_results": len(results),
+                "results": results,
+                "summary": {
+                    "has_results": len(results) > 0,
+                    "completed_count": len([r for r in results if r.get("status") == "COMPLETED"]),
+                    "total_found": total
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting homework results by assignment: {e}")
+            return {
+                "client_id": client_id,
+                "homework_assign_id": homework_assign_id,
+                "error": f"Failed to get homework results: {str(e)}",
+                "results": []
             }
     
     async def _mood_check_in(self, current_mood: str, mood_scale: int) -> Dict[str, Any]:
@@ -3200,10 +3626,41 @@ Please refine the following document according to these instructions:
             
         except Exception as e:
             logger.error(f"Error searching sessions: {e}")
+            
+            # Provide more helpful error context
+            error_message = str(e)
+            error_type = "Unknown Error"
+            user_guidance = "Please try again or contact support if the issue persists."
+            
+            # Detect specific error types
+            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+                error_type = "Authentication Error"
+                user_guidance = "Your session may have expired. Please refresh the page and try again."
+            elif "403" in error_message or "Forbidden" in error_message:
+                error_type = "Permission Error"
+                user_guidance = "You don't have permission to access session information."
+            elif "404" in error_message or "Not Found" in error_message:
+                error_type = "Sessions Not Found"
+                criteria = []
+                if client_name:
+                    criteria.append(f"client '{client_name}'")
+                if date_from or date_to:
+                    criteria.append(f"dates {date_from or 'any'} to {date_to or 'any'}")
+                criteria_str = " and ".join(criteria) if criteria else "the specified criteria"
+                user_guidance = f"No sessions found for {criteria_str}. The session may not exist or may not have been transcribed yet."
+            elif "timeout" in error_message.lower() or "timed out" in error_message.lower():
+                error_type = "Connection Timeout"
+                user_guidance = "The server took too long to respond. Please try again in a moment."
+            elif "connection" in error_message.lower() or "network" in error_message.lower():
+                error_type = "Network Error"
+                user_guidance = "Unable to connect to the server. Please check your internet connection."
+            
             return {
                 "sessions": [],
                 "total": 0,
-                "error": f"Failed to search sessions: {str(e)}",
+                "error": error_message,
+                "error_type": error_type,
+                "user_guidance": user_guidance,
                 "search_criteria": {
                     "client_name": client_name,
                     "client_id": client_id,
@@ -3580,6 +4037,82 @@ Please refine the following document according to these instructions:
                 "status": "error"
             }
 
+    async def _semantic_search_sessions(
+        self, 
+        query: str, 
+        transcript_ids: List[str],
+        limit: int = 20,
+        similarity_threshold: float = 0.7
+    ) -> Dict[str, Any]:
+        """
+        Semantic search across session transcripts using vector embeddings.
+        
+        Calls the API endpoint to perform semantic search using pgvector.
+        """
+        try:
+            if not query or not query.strip():
+                return {
+                    "error": "Query cannot be empty",
+                    "status": "invalid_request"
+                }
+            
+            if not transcript_ids or len(transcript_ids) == 0:
+                return {
+                    "error": "At least one transcript_id is required",
+                    "status": "invalid_request"
+                }
+            
+            logger.info(
+                f"🔍 semantic_search_sessions: query='{query[:50]}...', "
+                f"transcripts={len(transcript_ids)}, limit={limit}, threshold={similarity_threshold}"
+            )
+            
+            # Use synchronous httpx client (safe in thread pool)
+            import httpx
+            
+            # Make synchronous HTTP request to API endpoint
+            with httpx.Client() as client:
+                response = client.post(
+                    f"{self.api_base_url}/ai/semantic-search",
+                    json={
+                        "query": query,
+                        "transcript_ids": transcript_ids,
+                        "limit": limit,
+                        "similarity_threshold": similarity_threshold
+                    },
+                    headers=self._get_auth_headers(),
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                result = response.json()
+            
+            # Format response to match expected structure
+            segments = result.get("segments", [])
+            logger.info(f"✅ Found {len(segments)} matching segments")
+            
+            return {
+                "query": query,
+                "results_count": len(segments),
+                "segments": segments,
+                "transcript_ids_searched": transcript_ids,
+                "similarity_threshold": similarity_threshold,
+                "status": "success",
+                "message": f"Found {len(segments)} segments matching '{query[:50]}...'"
+            }
+            
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error in semantic_search_sessions: {e}", exc_info=True)
+            return {
+                "error": f"Failed to search sessions (HTTP error): {str(e)}",
+                "status": "error"
+            }
+        except Exception as e:
+            logger.error(f"Error in semantic_search_sessions: {e}", exc_info=True)
+            return {
+                "error": f"Failed to search sessions: {str(e)}",
+                "status": "error"
+            }
+
     async def _get_loaded_sessions(self) -> Dict[str, Any]:
         """Get list of sessions currently loaded in the UI"""
         try:
@@ -3589,7 +4122,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3603,9 +4136,9 @@ Please refine the following document according to these instructions:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            loaded_sessions = ui_state_manager.get_loaded_sessions(latest_session_id)
-            session_count = ui_state_manager.get_session_count(latest_session_id)
-            current_client = ui_state_manager.get_current_client(latest_session_id)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
+            session_count = len(loaded_sessions)  # Count sessions from loaded_sessions array
+            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
             
             logger.info(f"📂 Found {session_count} loaded sessions in UI context")
             
@@ -3648,7 +4181,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3661,7 +4194,7 @@ Please refine the following document according to these instructions:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            selected_template = ui_state_manager.get_selected_template(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
             
             if not selected_template or not selected_template.get("templateId"):
                 return {
@@ -3702,7 +4235,7 @@ Please refine the following document according to these instructions:
             from ui_state_manager import ui_state_manager
             
             # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             
             if not all_sessions_summary:
                 return {
@@ -3717,16 +4250,17 @@ Please refine the following document according to these instructions:
             found_session = None
             
             for ws_session_id in all_sessions_summary.keys():
-                content = ui_state_manager.get_session_content(ws_session_id, session_id)
-                if content:
-                    session_content = content
-                    
-                    # Get the full session metadata
-                    loaded_sessions = ui_state_manager.get_loaded_sessions(ws_session_id)
-                    for session in loaded_sessions:
-                        if session.get("sessionId") == session_id:
-                            found_session = session
-                            break
+                # Get loaded sessions for this WebSocket session
+                loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
+                
+                # Find the session with matching sessionId
+                for session in loaded_sessions:
+                    if session.get("sessionId") == session_id:
+                        session_content = session.get("content")
+                        found_session = session
+                        break
+                        
+                if found_session:
                     break
             
             if not session_content:
@@ -3763,14 +4297,14 @@ Please refine the following document according to these instructions:
             
             # Debug: Check what sessions are available in UI state
             from ui_state_manager import ui_state_manager
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary()
+            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
             logger.info(f"🔍 DEBUG: All UI sessions: {all_sessions_summary}")
             
             # Get the actual loaded session IDs
             actual_loaded_sessions = []
             if all_sessions_summary:
                 for ws_session_id in all_sessions_summary.keys():
-                    loaded_sessions = ui_state_manager.get_loaded_sessions(ws_session_id)
+                    loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
                     session_ids = [s.get('sessionId') for s in loaded_sessions if s.get('sessionId')]
                     logger.info(f"🔍 DEBUG: Loaded sessions for {ws_session_id}: {session_ids}")
                     actual_loaded_sessions.extend(session_ids)
@@ -3965,6 +4499,136 @@ Please refine the following document according to these instructions:
                 "status": "error"
             }
 
+
+
+def summarize_ai_conversations(conversations_data: List[Dict]) -> Dict:
+    """
+    Summarize multiple AI conversations between a client and assistant.
+    
+    Args:
+        conversations_data: List of conversation objects, each containing:
+            - messages: List of message objects with role and content
+            - createdAt: Conversation creation date
+            - id: Conversation identifier
+    
+    Returns:
+        Dict containing the summary and metadata
+    """
+    try:
+        logger.info(f"Starting AI conversation summarization for {len(conversations_data)} conversations")
+        
+        if not conversations_data:
+            return {
+                "error": "No conversations provided for summarization",
+                "status": "error"
+            }
+        
+        # Combine all conversations with clear separation
+        conversations_text = []
+        for index, conversation in enumerate(conversations_data):
+            messages = conversation.get('messages', [])
+            if not messages:
+                continue
+                
+            conversation_text = []
+            for message in messages:
+                role = message.get('role', 'unknown')
+                content = message.get('content', '')
+                speaker = 'Client' if role == 'user' else 'Assistant'
+                conversation_text.append(f"{speaker}: {content}")
+            
+            if conversation_text:
+                date_str = conversation.get('createdAt', 'Unknown date')
+                conversations_text.append(f"Conversation {index + 1} ({date_str}):\n" + '\n'.join(conversation_text))
+        
+        if not conversations_text:
+            return {
+                "error": "No valid conversation content found",
+                "status": "error"
+            }
+        
+        combined_text = '\n\n---\n\n'.join(conversations_text)
+        
+        # Create the summary prompt with anti-diagnosis instructions
+        system_prompt = """You are a professional clinical assistant tasked with creating detailed reports based on multiple conversations between a client and an AI assistant. 
+
+CRITICAL INSTRUCTIONS - NEVER PROVIDE MEDICAL DIAGNOSES:
+- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
+- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
+- NEVER imply, suggest, or state that someone has a specific mental health condition
+- Focus on observations, patterns, and themes from the conversations
+- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
+- Always defer diagnosis to qualified medical professionals
+
+Please analyze all conversations and create a comprehensive summary that includes:
+
+1. Overall Themes & Patterns
+2. Client's Progress Over Time  
+3. Key Insights from Each Conversation
+4. Notable Changes in Client's Perspective
+5. Recommendations Based on All Interactions
+
+Please structure your response with clear headings and maintain professional clinical language while avoiding any diagnostic terminology."""
+
+        user_prompt = f"""Below are {len(conversations_data)} conversations between the client and the AI assistant:
+
+{combined_text}
+
+Please analyze these conversations and provide a comprehensive summary following the requested structure."""
+
+        # Generate the summary using OpenAI
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        logger.info("Sending conversation summary request to OpenAI")
+        
+        # Get OpenAI client (lazy initialization)
+        client = get_openai_client()
+        if not client:
+            logger.error("OpenAI client not available - API key not configured")
+            return {
+                "error": "OpenAI service not available - API key not configured",
+                "status": "error"
+            }
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=3000
+        )
+        
+        summary_content = response.choices[0].message.content
+        
+        if not summary_content or summary_content.strip() == "":
+            logger.error("Empty summary content returned from OpenAI")
+            return {
+                "error": "Failed to generate summary - empty response",
+                "status": "error"
+            }
+        
+        logger.info("Successfully generated AI conversation summary")
+        
+        return {
+            "summary": summary_content,
+            "metadata": {
+                "conversation_count": len(conversations_data),
+                "total_messages": sum(len(conv.get('messages', [])) for conv in conversations_data),
+                "generated_at": datetime.now().isoformat(),
+                "word_count": len(summary_content.split()),
+                "estimated_read_time": max(1, len(summary_content.split()) // 200)
+            },
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in summarize_ai_conversations: {e}")
+        return {
+            "error": f"Failed to generate conversation summary: {str(e)}",
+            "status": "error"
+        }
 
 
 # Global tool manager instance

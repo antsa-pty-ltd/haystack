@@ -9,18 +9,22 @@ import asyncio
 import logging
 import json
 import uuid
+import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
-from haystack_pipeline import HaystackPipelineManager
-from personas import PersonaType
+from haystack_pipeline import haystack_pipeline_manager
+from personas import PersonaType, persona_manager
 from session_manager import session_manager
+from agents.document_agent import initialize_agent, get_document_agent
+from document_generation.generator import generate_document_from_context
+from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +40,9 @@ if not openai_api_key:
 
 # Create OpenAI client
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
+
+# API configuration for logging violations
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000/api/v1")
 
 # Simple tool loading (graceful fallback)
 def load_templates_safely():
@@ -55,7 +62,82 @@ def load_templates_safely():
 tool_manager = load_templates_safely()
 
 # Pipeline manager for tool-enabled conversations with history using Haystack
-pipeline_manager = HaystackPipelineManager()
+pipeline_manager = haystack_pipeline_manager
+
+# ===== SEMANTIC SEARCH CONFIGURATION =====
+# These settings control the quality vs. coverage tradeoff for document generation
+SEMANTIC_SEARCH_CONFIG = {
+    # Base similarity threshold (will be relaxed if results are sparse)
+    "base_similarity_threshold": 0.5,
+    
+    # Minimum similarity threshold (won't go below this)
+    "min_similarity_threshold": 0.2,
+    
+    # Threshold reduction per retry attempt
+    "threshold_reduction_step": 0.15,
+    
+    # Temporal context window (segments before/after high-relevance matches)
+    "temporal_context_window": 2,
+    
+    # Minimum relevance score to fetch temporal context (0.0-1.0)
+    "min_relevance_for_context": 0.6,
+    
+    # Maximum retry attempts when relaxing threshold
+    "max_threshold_attempts": 3,
+    
+    # Minimum expected results as fraction of requested (e.g., 0.33 = expect at least 1/3)
+    "min_result_fraction": 0.33,
+    
+    # ===== INTELLIGENT RETRIEVAL CONFIGURATION =====
+    # Token threshold for "pull all" strategy (~50K tokens, well under 128K context limit)
+    "pull_all_token_threshold": 50000,
+    
+    # Segment count threshold per session (< 100 segments = small session)
+    "small_session_segment_threshold": 100,
+    
+    # Max sessions for "pull all" strategy
+    "max_sessions_for_pull_all": 2,
+    
+    # Average tokens per segment (for estimation)
+    "avg_tokens_per_segment": 75,
+}
+# ==========================================
+
+# ===== PROGRESS EMISSION HELPER =====
+async def emit_progress(generation_id: str, data: dict, authorization: Optional[str] = None):
+    """
+    Emit progress update to API via HTTP POST, which will broadcast via WebSocket
+    """
+    if not generation_id:
+        # No generationId means no progress tracking (legacy mode)
+        return
+    
+    try:
+        api_url = os.getenv("API_URL", "http://localhost:8080")
+        
+        payload = {
+            "generationId": generation_id,
+            **data
+        }
+        
+        # Use Authorization header if provided
+        headers = {}
+        if authorization:
+            headers["Authorization"] = authorization
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{api_url}/api/v1/ai/websocket/document-progress",
+                json=payload,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to emit progress (HTTP {response.status_code}): {response.text}")
+    except Exception as e:
+        # Don't fail document generation if progress emission fails
+        logger.error(f"Failed to emit progress for generation {generation_id}: {e}")
+# ====================================
 
 # Create FastAPI app
 app = FastAPI(
@@ -68,9 +150,22 @@ app = FastAPI(
 @app.on_event("startup")
 async def on_startup():
     try:
+        await ui_state_manager.initialize()
+        logger.info("✅ UI State Manager initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ UI State Manager init warning: {e}")
+    try:
         await session_manager.initialize()
     except Exception as e:
         logger.warning(f"Session manager init warning: {e}")
+    
+    # Initialize document exploration agent
+    if openai_api_key:
+        try:
+            initialize_agent(openai_api_key, model="gpt-4o")
+            logger.info("✅ Document Exploration Agent initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Document Agent: {e}")
     try:
         await pipeline_manager.initialize()
     except Exception as e:
@@ -85,9 +180,9 @@ app.add_middleware(
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
 )
 
-# In-memory UI state only (sessions are persisted via SessionManager)
+# WebSocket connections and message buffers for ordering
 websocket_connections: Dict[str, WebSocket] = {}
-ui_states: Dict[str, Dict[str, Any]] = {}
+message_buffers: Dict[str, List[Dict[str, Any]]] = {}
 
 class CreateSessionRequest(BaseModel):
     persona_type: str = "web_assistant"
@@ -101,10 +196,12 @@ class SessionResponse(BaseModel):
 
 class GenerateDocumentRequest(BaseModel):
     template: Dict[str, Any]
-    transcript: Dict[str, Any]
+    sessionIds: List[str]
     clientInfo: Dict[str, Any]
     practitionerInfo: Dict[str, Any]
     generationInstructions: Optional[str] = None
+    clientContextData: Optional[Dict[str, Any]] = None
+    generationId: Optional[str] = None  # For progress tracking via WebSocket
 
 class GenerateDocumentResponse(BaseModel):
     content: str
@@ -112,97 +209,57 @@ class GenerateDocumentResponse(BaseModel):
     metadata: Dict[str, Any] = {}
 
 def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = None) -> str:
-    """Get enhanced system prompt with available capabilities"""
+    """Get enhanced system prompt using personas.py"""
+    try:
+        # Convert string to PersonaType enum
+        persona_enum = PersonaType(persona_type)
+    except ValueError:
+        persona_enum = PersonaType.WEB_ASSISTANT
     
-    base_prompt = """You are a helpful AI assistant for the ANTSA platform.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
+    # Get base system prompt from personas.py
+    base_prompt = persona_manager.get_system_prompt(persona_enum)
     
-    if persona_type == "web_assistant":
-        base_prompt = """You are a helpful AI web assistant designed to assist users with navigating and using the ANTSA platform. Provide concise and direct answers.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
-    elif persona_type == "data_assistant":
-        base_prompt = """You are a data analysis AI assistant. Your primary goal is to help users understand and interpret their data.
-
-CRITICAL: NEVER PROVIDE MEDICAL DIAGNOSES
-- NEVER diagnose mental health conditions, disorders, or illnesses under any circumstances
-- NEVER suggest diagnostic criteria are met or provide diagnostic terminology
-- NEVER imply, suggest, or state that someone has a specific mental health condition
-- Even if templates contain diagnostic sections, you must NOT provide diagnostic content
-- Document only what was explicitly stated in session transcripts
-- Use terms like "presenting concerns", "reported symptoms", or "client-described experiences"
-- Always defer diagnosis to qualified medical professionals
-- Focus on observations, treatment approaches, and documented client statements only"""
-    
-    # Add current page context if available
+    # Add UI-specific context enhancements
     if ui_state:
         derived_context = _build_page_context_from_ui_state(ui_state)
+        
+        # Add current page context
         if derived_context.get('page_display_name'):
-            base_prompt += f"\n\nCURRENT PAGE: You are currently viewing the {derived_context['page_display_name']} page."
-    
-    # Add template capabilities if available
-    capabilities = "\n\n🛠️ Available Capabilities:"
-    
-    if tool_manager:
-        capabilities += "\n- Template access: I can help you find and load templates"
-        capabilities += "\n- Client search: I can help you find client information"
-        capabilities += "\n- Document generation: I can help create documents from templates"
-    else:
-        capabilities += "\n- General chat and assistance"
-        capabilities += "\n- Guidance on using the platform"
-    
-    # Add current context
-    if ui_state:
-        page_url = ui_state.get('page_url', 'unknown')
-        client_id = ui_state.get('client_id')
+            base_prompt += f"\n\n📍 CURRENT PAGE: {derived_context['page_display_name']}"
+        
+        # Add UI state context
+        page_url = ui_state.get('page_url', '')
         client_name = ui_state.get('client_name')
+        client_id = ui_state.get('client_id')
         selected_template = ui_state.get('selected_template')
-        active_document = ui_state.get('active_document')
         loaded_sessions = ui_state.get('loadedSessions', [])
         generated_documents = ui_state.get('generatedDocuments', [])
+        active_document = ui_state.get('active_document')
         
-        capabilities += f"\n\n📍 Current Context:"
-        capabilities += f"\n- Page: {page_url}"
-        capabilities += f"\n- Client: {client_name if client_name else (client_id if client_id else 'None selected')}"
-        capabilities += f"\n- Template: {selected_template.get('name') if selected_template else 'None'}"
-        capabilities += f"\n- Loaded Sessions: {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0}"
-        capabilities += f"\n- Generated Documents: {len(generated_documents) if isinstance(generated_documents, list) else 0}"
+        context_parts = []
+        context_parts.append(f"Page: {page_url}")
         
-        # Add active document context
+        # IMPORTANT: Only show client info if both name AND id are present (indicates active selection)
+        # Do NOT inject client_id alone as it may be stale from previous sessions
+        if client_name and client_id:
+            context_parts.append(f"Client: {client_name} ({client_id})")
+        elif client_name:
+            context_parts.append(f"Client: {client_name} (use search_clients to get ID)")
+        else:
+            context_parts.append(f"Client: None (use search_clients if needed)")
+        
+        context_parts.append(f"Template: {selected_template.get('name') if selected_template else 'None'}")
+        context_parts.append(f"Loaded Sessions: {len(loaded_sessions)}")
+        context_parts.append(f"Generated Documents: {len(generated_documents)}")
+        
+        base_prompt += f"\n\n🔍 UI STATE:\n" + "\n".join(f"- {part}" for part in context_parts)
+        
+        # Add active document info
         if active_document and active_document.get('document'):
             doc = active_document['document']
-            capabilities += f"\n- Active Document: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId', 'Unknown')})"
-            if doc.get('isGenerated'):
-                capabilities += f" - Generated document"
-            capabilities += f"\n- Document Content Preview: {doc.get('documentContent', '')[:100]}{'...' if len(doc.get('documentContent', '')) > 100 else ''}"
-        
-        # Add instructions for document generation
-        if client_name and (loaded_sessions or generated_documents):
-            capabilities += f"\n\n🎯 IMPORTANT: When asked to regenerate or create documents:"
-            capabilities += f"\n- ALWAYS use the check_document_readiness tool first to analyze the current state"
-            capabilities += f"\n- The client's name is '{client_name}' - use this instead of 'client' or 'the client'"
-            capabilities += f"\n- You have access to {len(loaded_sessions) if isinstance(loaded_sessions, list) else 0} loaded session(s)"
-            if generated_documents and isinstance(generated_documents, list) and len(generated_documents) > 0:
-                capabilities += f"\n- There are {len(generated_documents)} existing document(s) that can be regenerated"
+            base_prompt += f"\n\n📄 ACTIVE DOCUMENT: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId')})"
     
-    return base_prompt + capabilities
+    return base_prompt
 
 
 def _get_human_readable_page_name(technical_name: str) -> str:
@@ -271,14 +328,16 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
 
     # Prefer token from incoming message, else from stored UI state manager, else from stored session
     incoming_token = message_data.get("auth_token") or message_data.get("token")
-    ui_state_token = ui_state_manager.get_auth_token(session_id)
+    ui_state_token = await ui_state_manager.get_auth_token(session_id)
     
-    # Also check the stored session for auth token
+    # Also check the stored session for auth token and profile_id
     session_token = None
+    session_profile_id = None
     try:
         sess = await session_manager.get_session(session_id)
         if sess:
             session_token = sess.auth_token
+            session_profile_id = sess.profile_id
     except Exception:
         pass
     
@@ -287,8 +346,9 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, ui_state_token={bool(ui_state_token)}, session_token={bool(session_token)}, final_token={bool(token)}")
 
     if token:
-        profile_id = message_data.get("profile_id") or message_data.get("profileId")
-        logger.info(f"🔍 Debug profile_id extraction: from_message={profile_id}")
+        # Try to get profile_id from message, then fall back to session
+        profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
+        logger.info(f"🔍 Debug profile_id extraction: from_message={message_data.get('profile_id') or message_data.get('profileId')}, from_session={session_profile_id}, final={profile_id}")
         try:
             # Only attach profile_id for practitioner contexts; clients use JWT clientId, not profile header
             if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
@@ -301,7 +361,8 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
             pass
 
     # Set profile id explicitly only for practitioner contexts (avoid client-* IDs)
-    profile_id = message_data.get("profile_id") or message_data.get("profileId")
+    # Try message first, then session fallback
+    profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
     if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
         logger.info(f"🔍 Debug: explicitly setting profile_id={profile_id}")
         try:
@@ -310,9 +371,11 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
             pass
     elif profile_id and isinstance(profile_id, str) and profile_id.startswith("client-"):
         logger.info("🔍 Debug: skipping explicit profile_id set for client context")
+    else:
+        logger.warning(f"⚠️ No valid profile_id found for session {session_id} - tool calls requiring practitioner context may fail")
 
     # Attach page context derived from latest UI state for this session
-    ui_state = ui_states.get(session_id) or {}
+    ui_state = await ui_state_manager.get_state(session_id)
     page_context = _build_page_context_from_ui_state(ui_state)
     if page_context:
         try:
@@ -372,216 +435,280 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
-async def generate_document_from_template(request: GenerateDocumentRequest, authorization: str = Header(None), profileid: str = Header(None)):
-    """Generate a document using a template and transcript data"""
+async def fetch_session_metadata(session_id: str, authorization: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Fetch metadata for a session including duration, segment count, and dates.
+    
+    Args:
+        session_id: The transcript/session ID
+        authorization: Authorization header for API requests
+        
+    Returns:
+        Dict with keys: totalSegments, duration, recordingDate, createdAt, sessionId
+        Returns None if fetch fails
+    """
     try:
-        logger.info(f"🎨 Generating document from template: {request.template.get('name', 'Unknown')}")
+        api_url = os.getenv("API_URL", "http://localhost:8080")
         
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {}
+            if authorization:
+                headers["Authorization"] = authorization
+            
+            response = await client.get(
+                f"{api_url}/api/v1/ai/transcriptions/{session_id}",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "sessionId": session_id,
+                    "totalSegments": data.get("totalSegments", 0),
+                    "duration": data.get("duration", 0),
+                    "recordingDate": data.get("recordingDate"),
+                    "createdAt": data.get("createdAt"),
+                }
+            else:
+                logger.warning(f"Failed to fetch metadata for session {session_id}: HTTP {response.status_code}")
+                return None
+                
+    except Exception as e:
+        logger.error(f"Error fetching session metadata for {session_id}: {e}")
+        return None
+
+
+def estimate_tokens_from_segments(segment_count: int) -> int:
+    """
+    Estimate token count from segment count.
+    
+    Uses conservative estimate of avg_tokens_per_segment from config.
+    
+    Args:
+        segment_count: Number of segments in the session
+        
+    Returns:
+        Estimated token count
+    """
+    return segment_count * SEMANTIC_SEARCH_CONFIG["avg_tokens_per_segment"]
+
+
+async def log_violation_to_api(
+    profile_id: str,
+    template_id: str,
+    template_name: str,
+    violation_type: str,
+    template_content: str,
+    reason: str,
+    confidence: str,
+    client_id: str = None,
+    metadata: Dict = None,
+    ip_address: str = None,
+    user_agent: str = None
+) -> None:
+    """Log policy violation to the API database"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            payload = {
+                "profileId": profile_id,
+                "templateId": template_id,
+                "templateName": template_name,
+                "violationType": violation_type,
+                "templateContent": template_content,
+                "reason": reason,
+                "confidence": confidence,
+                "clientId": client_id,
+                "metadata": metadata or {},
+                "ipAddress": ip_address,
+                "userAgent": user_agent,
+            }
+            
+            response = await client.post(
+                f"{API_BASE_URL}/admin/policy-violations",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ Successfully logged violation to API for profile {profile_id}")
+            else:
+                logger.error(f"❌ Failed to log violation to API: {response.status_code} - {response.text}")
+    
+    except Exception as e:
+        logger.error(f"❌ Error logging violation to API: {e}")
+        # Don't raise - we don't want to break the violation detection if API logging fails
+
+
+async def detect_policy_violation(template_content: str) -> Dict[str, Any]:
+    """
+    Detect if template content violates terms of service by requesting medical diagnosis
+    Uses LLM to intelligently analyze template content for policy violations
+    Returns: {"is_violation": bool, "violation_type": str, "reason": str}
+    """
+    try:
         if not openai_client:
-            raise HTTPException(status_code=500, detail="OpenAI client not configured")
+            logger.warning("OpenAI client not available for policy check, allowing template")
+            return {"is_violation": False, "violation_type": None, "reason": None}
         
-        # Extract data from request
-        template = request.template
-        transcript = request.transcript
-        client_info = request.clientInfo
-        practitioner_info = request.practitionerInfo
-        generation_instructions = request.generationInstructions
-        
-        # Build the transcript text from segments
-        transcript_text = ""
-        if transcript.get("segments"):
-            for segment in transcript["segments"]:
-                speaker = segment.get("speaker", "Speaker")
-                text = segment.get("text", "")
-                start_time = segment.get("startTime", 0)
-                
-                # Format time as MM:SS
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                time_str = f"{minutes:02d}:{seconds:02d}"
-                
-                transcript_text += f"[{time_str}] {speaker}: {text}\n"
-        
-        # Build the system prompt with anti-diagnosis instructions and intervention focus
-        system_prompt = """CRITICAL INSTRUCTIONS FOR AI ASSISTANT:
-- NEVER provide, suggest, or imply any medical diagnoses under any circumstances
-- NEVER diagnose mental health conditions, disorders, or illnesses
-- NEVER use diagnostic terminology or suggest diagnostic criteria are met
-- Even if the template contains diagnostic sections or asks for diagnosis, you must NOT provide diagnostic content
-- Instead, document only what was explicitly stated in the session transcript
-- Focus on observations, symptoms described, and treatment approaches discussed
-- Refer to "presenting concerns" or "reported symptoms" rather than diagnoses
-- Always defer diagnosis to qualified medical professionals
+        # Use LLM to analyze template for policy violations
+        system_prompt = """You are a content policy enforcement system for a mental health practice management platform.
 
-THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
-- Pay special attention to therapeutic strategies and interventions discussed by the practitioner
-- Accurately capture ALL therapeutic techniques mentioned (CBT, DBT, mindfulness, etc.) exactly as stated
-- Document homework assignments, coping strategies, and treatment plans precisely as discussed
-- Do NOT add, modify, or suggest interventions that were not explicitly mentioned in the transcript
-- Preserve the practitioner's exact therapeutic approach and language
-- If multiple sessions are included, track the evolution of therapeutic strategies over time
-- Prioritize documenting what the therapist actually said and did, not what you think they should have done
-- When documenting interventions, use direct quotes when possible to ensure accuracy
-- If the practitioner mentioned specific techniques or strategies, include those exact terms
-- Document any homework or between-session tasks exactly as assigned
+Your job is to analyze documentation templates and determine if they violate our Terms of Service.
 
-PERSONALIZATION REQUIREMENTS - ABSOLUTELY CRITICAL:
-- This is the MOST IMPORTANT requirement: You MUST use the specific names provided
-- NEVER EVER use generic terms like "Client", "the client", "client", "the patient", "patient", "the individual", "the counselor", "the therapist", or "the practitioner"
-- The CLIENT INFORMATION section contains the client's actual name - use it every single time
-- The PRACTITIONER INFORMATION section contains the practitioner's actual name - use it every single time
-- Every reference to the client or practitioner MUST use their specific names
-- This requirement overrides all other instructions - names are mandatory
-- Double-check every sentence to ensure you used the correct names
+STRICT POLICY - Templates that violate ToS:
+1. Templates that explicitly request medical diagnosis or diagnostic assessments
+2. Templates that ask the AI to determine if someone meets diagnostic criteria (DSM, ICD, etc.)
+3. Templates that ask to evaluate whether a client "has" or "should be diagnosed with" a specific condition
+4. Templates that request clinical diagnosis of mental health conditions
+5. Templates that ask the AI to make diagnostic determinations
 
-You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
-Use the provided template to structure the document, but fill it with information from the transcript.
-Be professional, accurate, and only include information that was actually discussed in the session.
-Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
-Always personalize the document by using the actual client and practitioner names provided.
-"""
-        
-        # Add generation instructions if provided
-        if generation_instructions:
-            system_prompt += f"\n\nADDITIONAL INSTRUCTIONS: {generation_instructions}\n"
-        
-        # Process template variables
-        template_content = template.get('content', '')
-        
-        # Replace common template variables
-        from datetime import datetime
-        today = datetime.now().strftime("%B %d, %Y")
-        
-        # Replace date placeholders
-        template_content = template_content.replace("(today's date)", today)
-        template_content = template_content.replace("{{date}}", today)
-        template_content = template_content.replace("{{today}}", today)
-        template_content = template_content.replace("[DATE]", today)
-        
-        # Replace client/practitioner variables if provided in template variables
-        if template.get('variables'):
-            for var in template['variables']:
-                var_name = var.get('name', '')
-                var_value = var.get('value', '')
-                template_content = template_content.replace(f"{{{{{var_name}}}}}", var_value)
-                template_content = template_content.replace(f"[{var_name.upper()}]", var_value)
-        
-        # Build the user prompt
-        client_name = client_info.get('name', 'Client')
-        practitioner_name = practitioner_info.get('name', 'Practitioner')
-        
-        logger.info(f"🏷️ Document generation with names - Client: '{client_name}', Practitioner: '{practitioner_name}'")
-        logger.info(f"🔍 Debug client_info received: {client_info}")
-        logger.info(f"🔍 Debug practitioner_info received: {practitioner_info}")
-        
-        
-        user_prompt = f"""Please generate a clinical document using the following template and transcript:
+ALLOWED - Templates that are acceptable:
+1. Templates for session notes documenting what was discussed
+2. Templates for treatment planning and progress tracking
+3. Templates that document "presenting concerns" or "reported symptoms"
+4. Templates that document practitioner observations (not AI diagnosis)
+5. Templates asking to document what the practitioner said/did in session
+6. Templates with anti-diagnosis warnings (these are our safety instructions)
 
-CLIENT INFORMATION:
-- Name: {client_name}
-- ID: {client_info.get('id', 'N/A')}
+IMPORTANT: 
+- Multiple anti-diagnosis warnings in a template are SAFETY INSTRUCTIONS, not violations
+- Only flag templates that are ASKING THE AI to diagnose, not templates preventing diagnosis
+- Be strict but fair - we want to catch actual misuse, not legitimate clinical documentation
 
-PRACTITIONER INFORMATION:
-- Name: {practitioner_name}
-- ID: {practitioner_info.get('id', 'N/A')}
+Analyze the template and respond ONLY with valid JSON in this exact format:
+{
+  "is_violation": true/false,
+  "violation_type": "medical_diagnosis_request" or null,
+  "reason": "Brief explanation" or null,
+  "confidence": "high/medium/low"
+}"""
 
-CRITICAL PERSONALIZATION REQUIREMENTS - READ THIS CAREFULLY:
-YOU MUST USE THESE EXACT NAMES THROUGHOUT THE ENTIRE DOCUMENT:
-- Client name: {client_name}
-- Practitioner name: {practitioner_name}
+        user_prompt = f"""Analyze this template for Terms of Service violations:
 
-FORBIDDEN TERMS - NEVER USE THESE:
-- "Client" or "the client" or "client" (use "{client_name}" instead)
-- "The counselor" or "counselor" (use "{practitioner_name}" instead) 
-- "The therapist" or "therapist" (use "{practitioner_name}" instead)
-- "The practitioner" or "practitioner" (use "{practitioner_name}" instead)
-- "The patient" or "patient" (use "{client_name}" instead)
-
-CORRECT EXAMPLES:
-✓ "{client_name} expressed feeling overwhelmed..."
-✓ "{practitioner_name} observed that {client_name} appeared anxious..."
-✓ "{practitioner_name} suggested a collaborative approach..."
-✓ "{client_name} reported difficulty sleeping..."
-
-INCORRECT EXAMPLES (DO NOT USE):
-✗ "The client expressed feeling overwhelmed..."
-✗ "The counselor observed that the client appeared anxious..."
-✗ "The therapist suggested a collaborative approach..."
-✗ "Client reported difficulty sleeping..."
-
-TEMPLATE (with variables processed):
+TEMPLATE CONTENT:
 {template_content}
 
-SESSION TRANSCRIPT:
-{transcript_text}
+Respond with JSON only."""
 
-FINAL REMINDER BEFORE YOU START WRITING:
-- Client name to use: {client_name}
-- Practitioner name to use: {practitioner_name}
-- Replace ALL instances of generic terms with these specific names
-- Check your output before finalizing to ensure you used the names correctly
-
-COMPREHENSIVE OUTPUT REQUIREMENTS:
-- Provide detailed, thorough responses for each section
-- Expand on observations with specific examples from the transcript
-- Include direct quotes when relevant to support your observations
-- Provide comprehensive analysis rather than brief bullet points
-- Aim for detailed, professional clinical documentation
-- Each section should be substantive and informative
-
-Please fill out the template using only the information available in the transcript. If a section cannot be completed based on the transcript content, indicate that the information was not discussed or is not available from this session.
-
-IMPORTANT: Replace any remaining placeholder text like "(today's date)" with actual values. Use today's date: {today}
-"""
-        
-        # Generate document using OpenAI - upgraded to gpt-4o for better intervention analysis
+        # Call LLM for analysis
         response = await openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",  # Fast and cost-effective for this task
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3
+            temperature=0.1,  # Low temperature for consistent policy enforcement
+            max_tokens=200
         )
         
-        # Defensive null checks
-        if not response or not response.choices or len(response.choices) == 0:
-            logger.error(f"Invalid OpenAI response structure: {response}")
-            raise HTTPException(status_code=500, detail="Invalid response from OpenAI API")
+        result_text = response.choices[0].message.content.strip()
         
-        if not response.choices[0].message:
-            logger.error(f"No message in OpenAI response: {response.choices[0]}")
-            raise HTTPException(status_code=500, detail="No message content in OpenAI response")
-            
-        generated_content = response.choices[0].message.content
+        # Parse JSON response
+        # Remove markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+            result_text = result_text.strip()
         
-        # Validate response content
-        if not generated_content or generated_content.strip() == "":
-            logger.error(f"Empty content returned from OpenAI - Completion: {response.choices[0]}, Usage: {getattr(response, 'usage', 'N/A')}")
-            raise HTTPException(
-                status_code=500, 
-                detail="Document generation failed: OpenAI returned empty content. This may be due to content filtering, token limits, or prompt issues."
-            )
+        result = json.loads(result_text)
         
-        logger.info(f"✅ Document generated successfully, length: {len(generated_content)} characters")
+        logger.info(f"🔍 Policy check result: {result}")
         
-        return GenerateDocumentResponse(
-            content=generated_content,
-            generatedAt=datetime.now(timezone.utc).isoformat(),
-            metadata={
-                "templateId": template.get("id"),
-                "templateName": template.get("name"),
-                "clientId": client_info.get("id"),
-                "practitionerId": practitioner_info.get("id"),
-                "wordCount": len(generated_content.split()),
-                "processingMethod": "haystack_openai"
-            }
-        )
-        
+        return {
+            "is_violation": result.get("is_violation", False),
+            "violation_type": result.get("violation_type"),
+            "reason": result.get("reason"),
+            "confidence": result.get("confidence", "unknown")
+        }
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse policy check response: {e}, Response: {result_text if 'result_text' in locals() else 'N/A'}")
+        # Fail open - allow template if we can't parse the response
+        return {"is_violation": False, "violation_type": None, "reason": None}
     except Exception as e:
-        logger.error(f"❌ Error generating document from template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate document: {str(e)}")
+        logger.error(f"Error detecting policy violation: {e}")
+        # Fail open - allow template on error to avoid breaking legitimate use
+        return {"is_violation": False, "violation_type": None, "reason": None}
+
+
+@app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
+async def generate_document_from_template(
+    request: GenerateDocumentRequest, 
+    http_request: Request,
+    authorization: str = Header(None), 
+    profileid: str = Header(None)
+):
+    """
+    Generate a document using agentic exploration of therapy sessions.
+    
+    This endpoint uses the DocumentExplorationAgent which is SEPARATE from
+    the web_assistant and jaimee_therapist agents. It doesn't interfere with
+    those agents - it's only used for document generation.
+    """
+    from document_generation.agentic_endpoint import generate_document_from_template_agentic
+    
+    return await generate_document_from_template_agentic(
+        request=request,
+        http_request=http_request,
+        authorization=authorization,
+        profileid=profileid,
+        openai_client=openai_client,
+        emit_progress_func=emit_progress,
+        detect_policy_violation_func=detect_policy_violation,
+        log_violation_func=log_violation_to_api
+    )
+@app.post("/summarize-ai-conversations")
+async def summarize_ai_conversations_endpoint(request: dict):
+    """
+    Summarize multiple AI conversations between a client and assistant.
+    
+    Expected request format:
+    {
+        "conversations": [
+            {
+                "id": "conversation_id",
+                "createdAt": "2024-01-01T00:00:00Z",
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi there!"}
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        logger.info("🔄 Processing AI conversation summarization request")
+        
+        conversations_data = request.get("conversations", [])
+        if not conversations_data:
+            raise HTTPException(status_code=400, detail="No conversations provided")
+        
+        logger.info(f"📊 Summarizing {len(conversations_data)} conversations")
+        
+        # Import the function from tools
+        from tools import summarize_ai_conversations
+        
+        # Generate the summary
+        result = summarize_ai_conversations(conversations_data)
+        
+        if result.get("status") == "error":
+            logger.error(f"❌ Summarization failed: {result.get('error')}")
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        
+        logger.info("✅ Successfully generated AI conversation summary")
+        
+        return {
+            "summary": result.get("summary"),
+            "metadata": result.get("metadata", {}),
+            "status": "success"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in conversation summarization endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to summarize conversations: {str(e)}")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
@@ -609,17 +736,97 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 continue
                 
             if message_data.get("type") == "ui_state_update":
-                # Store UI state and (optionally) auth token
-                state = message_data.get("state", {})
+                # Handle UI state update - supports BOTH formats:
+                # 1. Full state format: { type: "ui_state_update", state: {...}, auth_token: "..." }
+                # 2. Incremental format: { type: "ui_state_update", changeType: "...", payload: {...}, ... }
+                
+                # Extract auth token if present
                 auth_token = message_data.get("auth_token") or message_data.get("token")
-                ui_states[session_id] = state
-                try:
-                    ui_state_manager.update_state(session_id, state, auth_token=auth_token)
-                except Exception as e:
-                    logger.warning(f"Failed to persist UI state via manager: {e}")
-                logger.info(f"Updated UI state for session {session_id}")
+                
+                # Extract profile_id if present
+                profile_id = message_data.get("profile_id") or message_data.get("profileId")
+                
+                # Check which format we received
+                if "state" in message_data:
+                    # Full state format from ai-ui-integration.ts
+                    full_state = message_data.get("state", {})
+                    timestamp = full_state.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    
+                    # Add profile_id to state for tracking
+                    if profile_id:
+                        full_state["profile_id"] = profile_id
+                    
+                    # Store the full state directly
+                    try:
+                        await ui_state_manager.update_state(session_id, full_state, auth_token=auth_token)
+                        logger.info(f"✅ Updated full UI state for session {session_id}: {len(full_state.get('generatedDocuments', []))} docs, {len(full_state.get('loadedSessions', []))} sessions")
+                        success = True
+                    except Exception as e:
+                        logger.error(f"❌ Failed to update UI state for {session_id}: {e}")
+                        success = False
+                else:
+                    # Incremental format with changeType/payload
+                    change_type = message_data.get("changeType", "unknown")
+                    payload = message_data.get("payload", {})
+                    timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    page_type = message_data.get("page_type", "")
+                    page_url = message_data.get("page_url", "")
+                    sequence = message_data.get("sequence", 0)
+                    
+                    # Build incremental changes dict
+                    changes: Dict[str, Any] = {
+                        change_type: payload,
+                        "page_type": page_type,
+                        "page_url": page_url,
+                    }
+                    
+                    # Add profile_id to changes if present
+                    if profile_id:
+                        changes["profile_id"] = profile_id
+                    
+                    # Add sequence if provided
+                    if sequence:
+                        changes["sequence"] = sequence
+                    
+                    # Persist to Redis via ui_state_manager
+                    try:
+                        success = await ui_state_manager.update_incremental(
+                            session_id, changes, timestamp
+                        )
+                        
+                        # Also store auth token if provided
+                        if auth_token and success:
+                            await ui_state_manager.update_state(
+                                session_id, 
+                                await ui_state_manager.get_state(session_id),
+                                auth_token=auth_token
+                            )
+                        
+                        logger.info(f"✅ Updated UI state for session {session_id}: {change_type}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to update UI state for {session_id}: {e}")
+                        success = False
+                
+                # Send acknowledgment
+                await websocket.send_text(json.dumps({
+                    "type": "ui_state_ack",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "success": success,
+                    "session_id": session_id
+                }))
+                
                 # Proactively set tool context if available
                 await _ensure_tools_context(session_id, message_data)
+                
+                # Process any buffered chat messages waiting for state
+                if session_id in message_buffers and message_buffers[session_id]:
+                    logger.info(f"🔄 Processing {len(message_buffers[session_id])} buffered messages for {session_id}")
+                    buffered = message_buffers[session_id]
+                    message_buffers[session_id] = []
+                    for buffered_msg in buffered:
+                        # Re-process buffered message (will be handled by main loop)
+                        pass
+                
                 continue
             
             message = message_data.get("message", "")
@@ -639,7 +846,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await _ensure_tools_context(session_id, message_data)
 
                 # Build context for pipeline
-                ui_state = ui_states.get(session_id) or {}
+                ui_state = await ui_state_manager.get_state(session_id)
                 derived = _build_page_context_from_ui_state(ui_state)
                 
                 # Extract profile_id for session recovery
@@ -661,7 +868,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     persona_enum = PersonaType(persona_str)
                 except Exception:
                     persona_enum = PersonaType.WEB_ASSISTANT
-                auth_token = message_data.get("auth_token") or message_data.get("token") or ui_state_manager.get_auth_token(session_id)
+                auth_token = message_data.get("auth_token") or message_data.get("token") or await ui_state_manager.get_auth_token(session_id)
 
                 # Stream via Haystack pipeline manager (tool-enabled, history-aware)
                 full_content = ""
@@ -725,10 +932,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.info(f"WebSocket disconnected for session {session_id}")
         if session_id in websocket_connections:
             del websocket_connections[session_id]
+        # Note: UI state is NOT cleaned up here - it persists with 24h TTL in Redis
+        # This allows reconnection and state recovery
+        # Cleanup message buffer
+        message_buffers.pop(session_id, None)
     except Exception as e:
         logger.error(f"WebSocket error for session {session_id}: {e}")
         if session_id in websocket_connections:
             del websocket_connections[session_id]
+        # On error, also keep state for potential recovery
+        message_buffers.pop(session_id, None)
 
 async def handle_template_request(message: str, session_id: str) -> str:
     """Handle template-related requests"""
@@ -776,7 +989,7 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
         # Get session info
         sess = await session_manager.get_session(session_id)
         persona_type = (sess.persona_type if sess else "web_assistant")
-        ui_state = ui_states.get(session_id, {})
+        ui_state = await ui_state_manager.get_state(session_id)
         
         system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
         
@@ -850,6 +1063,66 @@ async def send_streaming_response(websocket: WebSocket, session_id: str, respons
         "type": "message_complete",
         "session_id": session_id
     }))
+
+# Debug endpoints for state inspection
+@app.get("/debug/sessions/{session_id}/state")
+async def debug_session_state(session_id: str, authorization: Optional[str] = Header(None)):
+    """Debug endpoint - get UI state for a specific session (requires auth in production)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    ui_state = await ui_state_manager.get_state(session_id)
+    capabilities = await ui_state_manager.get_page_capabilities(session_id)
+    
+    return {
+        "session_id": session_id,
+        "ui_state": ui_state,
+        "available_capabilities": capabilities,
+        "last_updated": ui_state.get("last_updated"),
+        "redis_connected": ui_state_manager._initialized
+    }
+
+@app.get("/debug/sessions")
+async def debug_all_sessions(authorization: Optional[str] = Header(None)):
+    """Debug endpoint - list all active sessions (requires auth in production)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    # Get all sessions summary from ui_state_manager
+    sessions = await ui_state_manager.get_all_sessions_summary()
+    
+    return {
+        "total_sessions": len(sessions),
+        "sessions": sessions,
+        "redis_connected": ui_state_manager._initialized
+    }
+
+@app.get("/debug/redis/health")
+async def debug_redis_health(authorization: Optional[str] = Header(None)):
+    """Debug endpoint - check Redis connection health"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
+    
+    try:
+        if ui_state_manager._initialized and ui_state_manager.redis_client:
+            await ui_state_manager.redis_client.ping()
+            return {
+                "redis_connected": True,
+                "status": "healthy",
+                "message": "Redis connection is working"
+            }
+        else:
+            return {
+                "redis_connected": False,
+                "status": "disconnected",
+                "message": "Redis client not initialized (using in-memory fallback)"
+            }
+    except Exception as e:
+        return {
+            "redis_connected": False,
+            "status": "error",
+            "message": f"Redis connection error: {str(e)}"
+        }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8001))
