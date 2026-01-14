@@ -102,7 +102,7 @@ async def peek_session(
         Dict with segments, total_segments, estimated_tokens, and preview_text
     """
     context = get_exploration_context()
-    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -177,7 +177,7 @@ async def search_session(
         Dict with matching segments and relevance scores
     """
     context = get_exploration_context()
-    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -245,7 +245,7 @@ async def pull_full_session(
         Dict with all segments from the session
     """
     context = get_exploration_context()
-    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

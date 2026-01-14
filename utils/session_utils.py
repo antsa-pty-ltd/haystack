@@ -23,7 +23,7 @@ async def fetch_session_metadata(session_id: str, authorization: str = None) -> 
         Returns None if fetch fails
     """
     try:
-        api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+        api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             headers = {}

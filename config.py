@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     database_url: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/dbname")
     
     # NestJS API Configuration
-    nestjs_api_url: str = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+    nestjs_api_url: str = os.getenv("NESTJS_API_URL", "http://localhost:8080")
     
     # Service Configuration
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

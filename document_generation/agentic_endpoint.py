@@ -176,7 +176,7 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 
                 # Pull all segments directly using segments-by-sessions endpoint
                 # (not semantic-search, which requires embeddings)
-                api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+                api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(
                         f"{api_url}/api/v1/ai/transcripts/segments-by-sessions",

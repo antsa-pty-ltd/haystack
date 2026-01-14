@@ -42,7 +42,7 @@ if not openai_api_key:
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
 
 # API configuration for logging violations
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000/api/v1")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
 
 # Simple tool loading (graceful fallback)
 def load_templates_safely():
@@ -113,7 +113,7 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
         return
     
     try:
-        api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+        api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
         
         payload = {
             "generationId": generation_id,
@@ -448,7 +448,7 @@ async def fetch_session_metadata(session_id: str, authorization: str = None) -> 
         Returns None if fetch fails
     """
     try:
-        api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+        api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             headers = {}
