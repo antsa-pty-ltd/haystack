@@ -13,7 +13,7 @@ HOST=0.0.0.0
 PORT=8001
 
 # NestJS API Configuration - Required for web assistant tools
-NESTJS_API_URL=http://localhost:3000
+NESTJS_API_URL=http://localhost:8080
 
 # Optional: Database connection for web assistant context
 # DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/dbname

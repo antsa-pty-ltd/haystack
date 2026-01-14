@@ -174,16 +174,15 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                     "message": f"Small session detected - retrieving all {metadata['totalSegments']} segments..."
                 }, authorization)
                 
-                # Pull all segments directly
-                api_url = os.getenv("API_URL", "http://localhost:8080")
+                # Pull all segments directly using segments-by-sessions endpoint
+                # (not semantic-search, which requires embeddings)
+                api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(
-                        f"{api_url}/api/v1/ai/semantic-search",
+                        f"{api_url}/api/v1/ai/transcripts/segments-by-sessions",
                         json={
-                            "query": "session conversation",
-                            "transcript_ids": [session_ids[0]],
-                            "limit": 1000,
-                            "similarity_threshold": 0.0
+                            "session_ids": [session_ids[0]],
+                            "limit_per_session": 1000
                         },
                         headers={"Authorization": authorization} if authorization else {}
                     )
