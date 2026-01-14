@@ -11,9 +11,9 @@ class PersonaConfig(BaseModel):
     name: str
     description: str
     system_prompt: str
-    model: str = "gpt-4o"
+    model: str = "gpt-5.2"
     temperature: float = 0.7
-    max_tokens: int = 1000
+    max_completion_tokens: int = 1000
     has_db_access: bool = False
     tools: List[Dict[str, Any]] = []  # OpenAI function definitions
     available_functions: Dict[str, Callable] = {}  # Function implementations
@@ -121,9 +121,9 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Plan before tool calls - think through data needs and sequence
 - Accumulate modification requests across conversation
 - Be helpful, accurate, empathetic, professional""",
-                model="gpt-4o",
+                model="gpt-5.2",
                 temperature=0.7,
-                max_tokens=32768,
+                max_completion_tokens=32768,
                 has_db_access=True,
                 tools=self.tool_manager.get_tools_for_persona("web_assistant"),
                 available_functions=self.tool_manager.get_functions_for_persona("web_assistant")
@@ -160,9 +160,9 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Prioritize client safety and well-being
 - Use person-first, non-judgmental language
 - Respect cultural and individual differences""",
-                model="gpt-4o",
+                model="gpt-5.2",
                 temperature=0.8,
-                max_tokens=32768,
+                max_completion_tokens=32768,
                 has_db_access=False,
                 tools=self.tool_manager.get_tools_for_persona("jaimee_therapist"),
                 available_functions=self.tool_manager.get_functions_for_persona("jaimee_therapist")
@@ -178,9 +178,9 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Preserve clinical sections and headings from template
 - If content missing (no template/sessions), provide concise guidance
 - Maintain privacy; don't expose sensitive identifiers beyond template requirements""",
-                model="gpt-4o",
+                model="gpt-5.2",
                 temperature=0.7,
-                max_tokens=32768,
+                max_completion_tokens=32768,
                 has_db_access=False,
                 tools=self.tool_manager.get_tools_for_persona("transcriber_agent"),
                 available_functions=self.tool_manager.get_functions_for_persona("transcriber_agent")

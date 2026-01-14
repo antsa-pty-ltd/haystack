@@ -116,13 +116,13 @@ class DocumentExplorationAgent:
     Autonomous agent for exploring therapy sessions and generating clinical documents.
     """
     
-    def __init__(self, openai_api_key: str, model: str = "gpt-4o"):
+    def __init__(self, openai_api_key: str, model: str = "gpt-5.2"):
         """
         Initialize the document exploration agent.
 
         Args:
             openai_api_key: OpenAI API key
-            model: Model to use (default: gpt-4o)
+            model: Model to use (default: gpt-5.2)
         """
         self.openai_api_key = openai_api_key
         self.model = model
@@ -365,7 +365,7 @@ Start exploring!"""
 _document_agent: Optional[DocumentExplorationAgent] = None
 
 
-def initialize_agent(openai_api_key: str, model: str = "gpt-4o"):
+def initialize_agent(openai_api_key: str, model: str = "gpt-5.2"):
     """Initialize the global document agent instance."""
     global _document_agent
     _document_agent = DocumentExplorationAgent(openai_api_key, model)

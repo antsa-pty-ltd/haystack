@@ -101,7 +101,7 @@ class HaystackPipelineManager:
             tools=tools,  # Pass tools to the generator so it knows what's available
             generation_kwargs={
                 "temperature": persona_config.temperature,
-                "max_tokens": persona_config.max_tokens
+                "max_completion_tokens": persona_config.max_completion_tokens
             }
         ))
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
@@ -154,7 +154,7 @@ class HaystackPipelineManager:
             tools=tools,  # Pass tools to the generator so it knows what's available
             generation_kwargs={
                 "temperature": persona_config.temperature,
-                "max_tokens": persona_config.max_tokens
+                "max_completion_tokens": persona_config.max_completion_tokens
             }
         ))
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
@@ -202,7 +202,7 @@ class HaystackPipelineManager:
             tools=tools,  # Pass tools to the generator so it knows what's available
             generation_kwargs={
                 "temperature": persona_config.temperature,
-                "max_tokens": persona_config.max_tokens
+                "max_completion_tokens": persona_config.max_completion_tokens
             }
         ))
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
