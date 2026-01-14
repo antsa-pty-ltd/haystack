@@ -11,7 +11,7 @@ class PersonaConfig(BaseModel):
     name: str
     description: str
     system_prompt: str
-    model: str = "gpt-4"
+    model: str = "gpt-5.2"
     temperature: float = 0.7
     max_tokens: int = 1000
     has_db_access: bool = False
@@ -121,7 +121,7 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Plan before tool calls - think through data needs and sequence
 - Accumulate modification requests across conversation
 - Be helpful, accurate, empathetic, professional""",
-                model="gpt-4.1",
+                model="gpt-5.2",
                 temperature=0.7,
                 max_tokens=32768,
                 has_db_access=True,
@@ -160,7 +160,7 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Prioritize client safety and well-being
 - Use person-first, non-judgmental language
 - Respect cultural and individual differences""",
-                model="gpt-4.1",
+                model="gpt-5.2",
                 temperature=0.8,
                 max_tokens=32768,
                 has_db_access=False,
@@ -178,7 +178,7 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
 - Preserve clinical sections and headings from template
 - If content missing (no template/sessions), provide concise guidance
 - Maintain privacy; don't expose sensitive identifiers beyond template requirements""",
-                model="gpt-4.1",
+                model="gpt-5.2",
                 temperature=0.7,
                 max_tokens=32768,
                 has_db_access=False,

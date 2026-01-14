@@ -102,18 +102,17 @@ async def peek_session(
         Dict with segments, total_segments, estimated_tokens, and preview_text
     """
     context = get_exploration_context()
-    api_url = os.getenv("API_URL", "http://localhost:8080")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Use semantic search with threshold 0.0 and limit to get first segments
+            # Use segments-by-sessions endpoint to get segments directly
+            # (not semantic-search, which requires embeddings and may return 0 results)
             response = await client.post(
-                f"{api_url}/api/v1/ai/semantic-search",
+                f"{api_url}/api/v1/ai/transcripts/segments-by-sessions",
                 json={
-                    "query": "session conversation",
-                    "transcript_ids": [session_id],
-                    "limit": num_segments,
-                    "similarity_threshold": 0.0
+                    "session_ids": [session_id],
+                    "limit_per_session": num_segments
                 },
                 headers={"Authorization": context.authorization} if context.authorization else {}
             )
@@ -178,7 +177,7 @@ async def search_session(
         Dict with matching segments and relevance scores
     """
     context = get_exploration_context()
-    api_url = os.getenv("API_URL", "http://localhost:8080")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -246,7 +245,7 @@ async def pull_full_session(
         Dict with all segments from the session
     """
     context = get_exploration_context()
-    api_url = os.getenv("API_URL", "http://localhost:8080")
+    api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

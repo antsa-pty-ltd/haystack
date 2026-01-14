@@ -113,7 +113,7 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
         return
     
     try:
-        api_url = os.getenv("API_URL", "http://localhost:8080")
+        api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
         
         payload = {
             "generationId": generation_id,
@@ -162,7 +162,7 @@ async def on_startup():
     # Initialize document exploration agent
     if openai_api_key:
         try:
-            initialize_agent(openai_api_key, model="gpt-4o")
+            initialize_agent(openai_api_key, model="gpt-5.2")
             logger.info("✅ Document Exploration Agent initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document Agent: {e}")
@@ -448,7 +448,7 @@ async def fetch_session_metadata(session_id: str, authorization: str = None) -> 
         Returns None if fetch fails
     """
     try:
-        api_url = os.getenv("API_URL", "http://localhost:8080")
+        api_url = os.getenv("NESTJS_API_URL", "http://localhost:3000")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             headers = {}
