@@ -215,7 +215,8 @@ class ChatRequest(BaseModel):
     context: Optional[Dict[str, Any]] = None
 
 class ChatResponse(BaseModel):
-    response: str
+    content: str  # API expects 'content' or 'message'
+    message: str  # Alias for compatibility
     session_id: str
     message_id: str
     timestamp: str
@@ -509,7 +510,8 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
         logger.info(f"✅ Chat response generated for session {session_id}")
         
         return ChatResponse(
-            response=response_text,
+            content=response_text,
+            message=response_text,
             session_id=session_id,
             message_id=message_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
