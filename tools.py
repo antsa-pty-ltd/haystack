@@ -2420,9 +2420,24 @@ PERSONALIZATION INSTRUCTIONS:
             latest_session_id = max(all_sessions_summary.keys(), 
                                   key=lambda k: all_sessions_summary[k].get('last_updated', ''))
             
-            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
+            all_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
+            
+            # Filter to only include ACTUAL generated documents (isGenerated=True)
+            # Loaded sessions have isGenerated=False and should NOT be listed here
+            generated_documents = [doc for doc in all_documents if doc.get("isGenerated") == True]
+            
+            # Count loaded sessions separately for context
+            loaded_sessions_count = len([doc for doc in all_documents if doc.get("isGenerated") == False])
             
             if not generated_documents:
+                if loaded_sessions_count > 0:
+                    return {
+                        "generated_documents": [],
+                        "document_count": 0,
+                        "loaded_sessions_count": loaded_sessions_count,
+                        "message": f"No generated documents yet, but you have {loaded_sessions_count} loaded session(s). Use generate_document_auto to create a document from them.",
+                        "status": "no_documents"
+                    }
                 return {
                     "generated_documents": [],
                     "document_count": 0,
@@ -2430,7 +2445,7 @@ PERSONALIZATION INSTRUCTIONS:
                     "status": "no_documents"
                 }
             
-            logger.info(f"📄 Found {len(generated_documents)} generated documents in UI")
+            logger.info(f"📄 Found {len(generated_documents)} generated documents in UI (plus {loaded_sessions_count} loaded sessions)")
             
             # Format documents for user-friendly display
             document_summaries = []
