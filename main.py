@@ -208,6 +208,19 @@ class GenerateDocumentResponse(BaseModel):
     generatedAt: str
     metadata: Dict[str, Any] = {}
 
+class ChatRequest(BaseModel):
+    message: str
+    persona_type: str = "web_assistant"
+    session_id: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+
+class ChatResponse(BaseModel):
+    response: str
+    session_id: str
+    message_id: str
+    timestamp: str
+    metadata: Optional[Dict[str, Any]] = None
+
 def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = None) -> str:
     """Get enhanced system prompt using personas.py"""
     try:
@@ -433,6 +446,78 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         
     except Exception as e:
         logger.error(f"Error creating session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest, authorization: str = Header(None), profileid: str = Header(None)):
+    """Send a chat message and get a complete response (non-streaming)"""
+    try:
+        logger.info(f"📨 Chat request received - persona: {request.persona_type}, session: {request.session_id}")
+        
+        # Extract auth token from Authorization header
+        auth_token = None
+        if authorization and authorization.startswith("Bearer "):
+            auth_token = authorization[7:]
+        
+        # Create session if not provided
+        session_id = request.session_id
+        if not session_id:
+            session_id = await session_manager.create_session(
+                persona_type=request.persona_type,
+                context=request.context or {},
+                auth_token=auth_token,
+                profile_id=profileid,
+            )
+            logger.info(f"Created new session for chat: {session_id}")
+        
+        # Get session info and UI state
+        sess = await session_manager.get_session(session_id)
+        persona_type = sess.persona_type if sess else request.persona_type
+        ui_state = await ui_state_manager.get_state(session_id)
+        
+        # Get enhanced system prompt
+        system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
+        
+        # Add user message to session history
+        await session_manager.add_message(session_id, "user", request.message)
+        
+        # Get conversation history
+        history = await session_manager.get_messages(session_id, limit=20)
+        
+        # Build messages for OpenAI
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in history:
+            messages.append({"role": msg.role, "content": msg.content})
+        
+        # Generate response using OpenAI
+        if not openai_client:
+            raise HTTPException(status_code=500, detail="OpenAI client not configured")
+        
+        response = await openai_client.chat.completions.create(
+            model="gpt-5.2",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=4096
+        )
+        
+        response_text = response.choices[0].message.content or ""
+        
+        # Add assistant response to session history
+        message_id = str(uuid.uuid4())
+        await session_manager.add_message(session_id, "assistant", response_text)
+        
+        logger.info(f"✅ Chat response generated for session {session_id}")
+        
+        return ChatResponse(
+            response=response_text,
+            session_id=session_id,
+            message_id=message_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            metadata={"persona_type": persona_type}
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 async def fetch_session_metadata(session_id: str, authorization: str = None) -> Optional[Dict[str, Any]]:
