@@ -162,7 +162,7 @@ async def on_startup():
     # Initialize document exploration agent
     if openai_api_key:
         try:
-            initialize_agent(openai_api_key, model="gpt-5.2")
+            initialize_agent(openai_api_key, model="gpt-4o")
             logger.info("✅ Document Exploration Agent initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document Agent: {e}")
@@ -495,7 +495,7 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
             raise HTTPException(status_code=500, detail="OpenAI client not configured")
         
         response = await openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-4o",
             messages=messages,
             temperature=0.7,
             max_tokens=4096

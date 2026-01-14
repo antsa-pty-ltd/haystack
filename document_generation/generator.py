@@ -204,7 +204,7 @@ Always personalize the document by using the actual client and practitioner name
         
         # Generate document using OpenAI
         response = await openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
