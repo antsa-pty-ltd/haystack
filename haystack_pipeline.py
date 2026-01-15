@@ -5,7 +5,7 @@ Following official Haystack recommendations with automatic agent loops
 import asyncio
 import json
 import logging
-from typing import Dict, List, Optional, Any, AsyncGenerator, Callable
+from typing import Dict, List, Optional, Any, AsyncGenerator, Callable, Awaitable
 from datetime import datetime
 
 # Haystack imports
@@ -23,6 +23,34 @@ from tools import tool_manager
 from components.ui_actions import UIActionCollector, MessageCollector
 
 logger = logging.getLogger(__name__)
+
+# Friendly display names for tools (shown to users during "thinking" state)
+TOOL_DISPLAY_NAMES = {
+    "search_clients": "Searching for clients",
+    "get_client_summary": "Getting client details",
+    "get_client_sessions": "Finding sessions",
+    "get_client_homework_status": "Checking homework status",
+    "load_session_direct": "Loading session",
+    "load_multiple_sessions": "Loading sessions",
+    "get_loaded_sessions": "Checking loaded sessions",
+    "get_session_content": "Reading session transcript",
+    "analyze_loaded_session": "Analysing session content",
+    "get_templates": "Looking up templates",
+    "set_selected_template": "Selecting template",
+    "select_template_by_name": "Finding template",
+    "check_document_readiness": "Checking document readiness",
+    "generate_document_auto": "Preparing document generation",
+    "generate_document_from_loaded": "Generating document",
+    "get_generated_documents": "Checking generated documents",
+    "refine_document": "Refining document",
+    "suggest_navigation": "Suggesting navigation",
+    "navigate_to_page": "Navigating",
+}
+
+
+def get_friendly_tool_name(tool_name: str) -> str:
+    """Convert tool name to a friendly display name"""
+    return TOOL_DISPLAY_NAMES.get(tool_name, tool_name.replace("_", " ").title())
 
 
 class HaystackPipelineManager:
@@ -273,7 +301,8 @@ class HaystackPipelineManager:
         user_message: str,
         context: Optional[Dict[str, Any]] = None,
         auth_token: Optional[str] = None,
-        pipeline_type: str = "multi_tool"  # For backwards compatibility
+        pipeline_type: str = "multi_tool",  # For backwards compatibility
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
     ) -> AsyncGenerator[str, None]:
         """
         Generate response using Haystack's declarative pipeline.
@@ -283,6 +312,11 @@ class HaystackPipelineManager:
         2. Runs the pipeline (which automatically handles tool loops)
         3. Streams the response in real-time
         4. Collects UI actions for frontend
+        5. Sends progress updates via callback (tool calls, thinking status)
+        
+        Args:
+            progress_callback: Optional async callback to receive progress updates.
+                              Called with dicts like {"type": "tool_call_started", "tools": [...]}
         """
         try:
             if not self._initialized:
@@ -372,12 +406,30 @@ class HaystackPipelineManager:
                 
                 # Check if we have tool calls
                 if "has_tool_calls" in router_result:
-                    # Execute tools
-                    if persona_type == PersonaType.WEB_ASSISTANT:
-                        tool_msg = f"\n\n[tools] Executing {len(replies[0].tool_calls)} tool call(s)...\n\n"
-                        full_response += tool_msg
-                        yield tool_msg
+                    # Extract tool call info for progress reporting
+                    tool_calls = replies[0].tool_calls if replies else []
+                    tool_info = []
+                    for tc in tool_calls:
+                        tool_info.append({
+                            "name": tc.tool_name,
+                            "displayName": get_friendly_tool_name(tc.tool_name),
+                            "arguments": tc.arguments if hasattr(tc, 'arguments') else {}
+                        })
                     
+                    # Send progress update via callback (if provided)
+                    if progress_callback:
+                        try:
+                            await progress_callback({
+                                "type": "tool_call_started",
+                                "tools": tool_info,
+                                "session_id": session_id
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to send tool_call_started progress: {e}")
+                    
+                    logger.info(f"🔧 Executing {len(tool_calls)} tool(s): {[t['name'] for t in tool_info]}")
+                    
+                    # Execute tools
                     tool_result = tool_invoker.run(messages=replies)
                     tool_messages = tool_result.get("tool_messages", [])
                     
@@ -390,10 +442,16 @@ class HaystackPipelineManager:
                     current_messages.extend(replies)
                     current_messages.extend(tool_messages)
                     
-                    if persona_type == PersonaType.WEB_ASSISTANT:
-                        done_msg = f"[tools] Completed\n\n"
-                        full_response += done_msg
-                        yield done_msg
+                    # Send tool completion progress
+                    if progress_callback:
+                        try:
+                            await progress_callback({
+                                "type": "tool_call_completed",
+                                "tools": tool_info,
+                                "session_id": session_id
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to send tool_call_completed progress: {e}")
                     
                     continue
                 

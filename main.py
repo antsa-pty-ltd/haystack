@@ -957,6 +957,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     persona_enum = PersonaType.WEB_ASSISTANT
                 auth_token = message_data.get("auth_token") or message_data.get("token") or await ui_state_manager.get_auth_token(session_id)
 
+                # Progress callback for tool call visibility
+                async def send_progress(data: dict):
+                    """Send progress updates to frontend via WebSocket"""
+                    try:
+                        await websocket.send_text(json.dumps(data))
+                    except Exception as e:
+                        logger.warning(f"Failed to send progress update: {e}")
+
                 # Stream via Haystack pipeline manager (tool-enabled, history-aware)
                 full_content = ""
                 async for out_chunk in pipeline_manager.generate_response_with_chaining(
@@ -965,6 +973,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     user_message=message,
                     context=context_for_pipeline,
                     auth_token=auth_token,
+                    progress_callback=send_progress,
                 ):
                     if not isinstance(out_chunk, str):
                         continue
