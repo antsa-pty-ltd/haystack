@@ -60,11 +60,15 @@ async def generate_document_from_template_agentic(
         # Extract data from request
         template = request.template
         session_ids = request.sessionIds
+        dictated_notes = request.dictatedNotes or []  # List of practitioner notes
         client_info = request.clientInfo
         practitioner_info = request.practitionerInfo
         generation_instructions = request.generationInstructions
         
-        logger.info(f"📋 [AGENTIC] Generating from {len(session_ids)} sessions using '{template.get('name', 'Unknown')}'")
+        has_sessions = len(session_ids) > 0
+        has_notes = len(dictated_notes) > 0
+        
+        logger.info(f"📋 [AGENTIC] Generating from {len(session_ids)} sessions and {len(dictated_notes)} notes using '{template.get('name', 'Unknown')}'")
         
         # ===== POLICY CHECK (keep existing logic) =====
         await emit_progress_func(generation_id, {
@@ -161,6 +165,53 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 }
             )
         
+        # ===== FAST PATH: Notes Only (no sessions) =====
+        if not has_sessions and has_notes:
+            logger.info(f"✅ [FAST PATH] Notes-only generation ({len(dictated_notes)} notes)")
+            
+            await emit_progress_func(generation_id, {
+                "type": "progress_update",
+                "stage": "analysing_notes",
+                "message": f"Processing {len(dictated_notes)} practitioner note(s)...",
+                "details": {"noteCount": len(dictated_notes)}
+            }, authorization)
+            
+            await emit_progress_func(generation_id, {
+                "type": "progress_update",
+                "stage": "writing_document",
+                "message": f"Writing document using '{template.get('name', 'template')}'...",
+                "details": {"templateName": template.get('name')}
+            }, authorization)
+            
+            # Generate directly from notes (no session segments)
+            result = await generate_document_from_context(
+                segments=[],  # No session segments
+                template=template,
+                client_info=client_info,
+                practitioner_info=practitioner_info,
+                generation_instructions=generation_instructions,
+                openai_client=openai_client,
+                dictated_notes=dictated_notes  # Pass notes to generation
+            )
+            
+            await emit_progress_func(generation_id, {
+                "type": "stage_completed",
+                "stage": "document_ready",
+                "message": "Document generated successfully!",
+            }, authorization)
+            
+            from pydantic import BaseModel
+            class GenerateDocumentResponse(BaseModel):
+                content: str
+                generatedAt: str
+                metadata: dict
+            
+            return GenerateDocumentResponse(
+                content=result['content'],
+                generatedAt=result['generated_at'],
+                metadata=result['metadata']
+            )
+        
         # ===== FAST PATH: Single Small Session =====
         if len(session_ids) == 1:
             metadata = await fetch_session_metadata(session_ids[0], authorization)
@@ -172,7 +223,7 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                     "type": "progress_update",
                     "stage": "analysing_sessions",
                     "message": "Analysing session size and content...",
-                    "details": {"sessionCount": 1}
+                    "details": {"sessionCount": 1, "noteCount": len(dictated_notes)}
                 }, authorization)
                 
                 await emit_progress_func(generation_id, {
@@ -211,7 +262,8 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                     client_info=client_info,
                     practitioner_info=practitioner_info,
                     generation_instructions=generation_instructions,
-                    openai_client=openai_client
+                    openai_client=openai_client,
+                    dictated_notes=dictated_notes  # Include notes in generation
                 )
                 
                 await emit_progress_func(generation_id, {
@@ -302,7 +354,8 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
             client_info=client_info,
             practitioner_info=practitioner_info,
             generation_instructions=generation_instructions,
-            openai_client=openai_client
+            openai_client=openai_client,
+            dictated_notes=dictated_notes  # Include notes in generation
         )
         
         # Add agent metadata

@@ -194,9 +194,16 @@ class SessionResponse(BaseModel):
     persona_type: str
     created_at: str
 
+class DictatedNote(BaseModel):
+    id: str
+    title: str
+    content: str
+    createdAt: str
+
 class GenerateDocumentRequest(BaseModel):
     template: Dict[str, Any]
     sessionIds: List[str]
+    dictatedNotes: Optional[List[DictatedNote]] = None  # Practitioner notes to include in generation
     clientInfo: Dict[str, Any]
     practitionerInfo: Dict[str, Any]
     generationInstructions: Optional[str] = None

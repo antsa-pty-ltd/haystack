@@ -22,15 +22,17 @@ async def generate_document_from_context(
     client_info: Dict[str, Any],
     practitioner_info: Dict[str, Any],
     generation_instructions: Optional[str],
-    openai_client
+    openai_client,
+    dictated_notes: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
-    Generate a clinical document from accumulated context segments.
+    Generate a clinical document from accumulated context segments and/or notes.
     
     This is the shared generation logic that works with any segments source:
     - Fast path (all segments from small session)
     - Agentic exploration (agent-selected segments)
     - Legacy semantic search (query-based segments)
+    - Notes-only generation (practitioner dictated notes)
     
     Args:
         segments: List of transcript segments with metadata
@@ -39,6 +41,7 @@ async def generate_document_from_context(
         practitioner_info: Practitioner info dict with 'name', 'id' keys
         generation_instructions: Optional additional instructions
         openai_client: OpenAI client instance
+        dictated_notes: Optional list of practitioner notes with 'title', 'content', 'createdAt' keys
         
     Returns:
         Dict with 'content', 'generated_at', 'metadata' keys
@@ -97,9 +100,31 @@ async def generate_document_from_context(
             transcript_text += "\n".join(segments_text)
             transcript_text += "\n"
         
+        # Build notes context if notes are provided
+        notes_text = ""
+        if dictated_notes and len(dictated_notes) > 0:
+            notes_text = "\n--- Practitioner Notes ---\n"
+            for note in dictated_notes:
+                # Handle both dict and Pydantic model objects
+                if hasattr(note, 'title'):
+                    # Pydantic model
+                    note_title = note.title or 'Untitled Note'
+                    note_content = note.content or ''
+                    note_date = note.createdAt or 'Unknown date'
+                else:
+                    # Dict
+                    note_title = note.get('title', 'Untitled Note')
+                    note_content = note.get('content', '')
+                    note_date = note.get('createdAt', 'Unknown date')
+                
+                if isinstance(note_date, str) and 'T' in note_date:
+                    note_date = note_date.split('T')[0]  # Get just the date part
+                notes_text += f"\n[{note_date}] {note_title}:\n{note_content}\n"
+            logger.info(f"📝 Added {len(dictated_notes)} practitioner notes to context")
+        
         # Log more detailed context information
         total_segments_by_purpose = {purpose: len(segs) for purpose, segs in context_by_purpose.items()}
-        logger.info(f"✅ Built context: {len(context_by_purpose)} sections, {len(transcript_text)} chars")
+        logger.info(f"✅ Built context: {len(context_by_purpose)} sections, {len(transcript_text)} chars, {len(notes_text)} notes chars")
         logger.info(f"📊 Segments by purpose: {total_segments_by_purpose}")
         
         # Build system prompt with anti-diagnosis instructions
@@ -157,6 +182,13 @@ Always personalize the document by using the actual client and practitioner name
         # Check if this is a modification/regeneration request
         is_regeneration = template_content.startswith("CRITICAL MODIFICATION REQUEST")
         
+        # Build source content section (transcript and/or notes)
+        source_content = ""
+        if transcript_text:
+            source_content += f"**Session Transcript:**\n{transcript_text}\n"
+        if notes_text:
+            source_content += f"\n{notes_text}\n"
+        
         if is_regeneration:
             user_prompt = f"""Modify the existing document based on the modification request.
 
@@ -167,20 +199,25 @@ Always personalize the document by using the actual client and practitioner name
 **Template (contains modification request and current document):**
 {template_content}
 
-**Session Transcript (for reference):**
-{transcript_text}
+**Source Content (for reference):**
+{source_content}
 
 **Instructions:** Follow the modification request in the template. Keep comprehensive detail.
 """
         else:
             # Normal generation
-            if len(segments) > 0:
+            has_transcript = len(segments) > 0
+            has_notes = dictated_notes and len(dictated_notes) > 0
+            
+            if has_transcript:
                 if any(seg.get("_search_query", "").startswith("All segments") for seg in segments):
                     context_source_note = f"\n\n**NOTE**: Semantic search found no relevant matches, so ALL session content ({len(segments)} segments) is provided below for your review."
                 else:
                     context_source_note = f"\n\n**NOTE**: The session content below ({len(segments)} segments) was intelligently retrieved based on the template structure."
+            elif has_notes:
+                context_source_note = f"\n\n**NOTE**: This document is being generated from {len(dictated_notes)} practitioner note(s). No session transcript is available."
             else:
-                context_source_note = "\n\n**NOTE**: No session transcript content is available. Generate a note indicating what information is missing from the provided sessions."
+                context_source_note = "\n\n**NOTE**: No session transcript or notes content is available. Generate a note indicating what information is missing."
             
             user_prompt = f"""Generate a comprehensive clinical document.
 
@@ -191,15 +228,15 @@ Always personalize the document by using the actual client and practitioner name
 **Template:**
 {template_content}
 
-**Session Transcript:**{context_source_note}
-{transcript_text}
+**Source Content:**{context_source_note}
+{source_content}
 
 **Key Requirements:**
 - Use {client_name} and {practitioner_name} throughout (never "the client" or "the therapist")
 - Replace template placeholders (like {{{{date}}}}, {{{{practitionerName}}}}) with actual values
 - Be thorough and detailed - aim for 800-1500+ words with full paragraphs
 - Document everything discussed with specific examples and quotes
-- If info isn't in transcript, note "not discussed in this session"
+- If info isn't in the source content, note "not discussed in this session" or "not included in notes"
 """
         
         # Generate document using OpenAI
@@ -248,6 +285,10 @@ Always personalize the document by using the actual client and practitioner name
                 "practitionerId": practitioner_info.get("id"),
                 "wordCount": len(generated_content.split()),
                 "segmentsUsed": len(segments),
+                "notesUsed": len(dictated_notes) if dictated_notes else 0,
+                "sourceType": "notes_only" if (dictated_notes and len(dictated_notes) > 0 and len(segments) == 0) 
+                             else "sessions_and_notes" if (dictated_notes and len(dictated_notes) > 0) 
+                             else "sessions_only"
             }
         }
         
