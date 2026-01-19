@@ -275,6 +275,18 @@ Start exploring!"""
         
         logger.info(f"🤖 Agent starting exploration of {len(session_ids)} sessions")
         
+        # Emit initial exploration progress
+        if emit_progress_func and generation_id:
+            try:
+                await emit_progress_func(generation_id, {
+                    "type": "progress_update",
+                    "stage": "agent_starting",
+                    "message": f"Starting intelligent analysis of {len(session_ids)} session(s)...",
+                    "details": {"sessionIds": session_ids}
+                }, authorization)
+            except Exception as e:
+                logger.warning(f"Failed to emit agent start progress: {e}")
+        
         # Run the agent
         try:
             result = self.agent.run(
@@ -287,22 +299,49 @@ Start exploring!"""
             # Extract conversation history
             messages = result.get("messages", [])
             
-            # Stream agent reasoning to UI if callback provided
+            # Stream agent reasoning and tool calls to UI if callback provided
             if emit_progress_func and authorization:
+                tool_call_count = 0
                 for msg in messages:
-                    if msg.role == ChatRole.ASSISTANT and msg.text:
-                        # Extract the thinking text (before tool calls)
-                        thinking_text = msg.text.strip()
-                        if thinking_text and not thinking_text.startswith('{'):
-                            # Emit the agent's reasoning
-                            try:
-                                await emit_progress_func(generation_id, {
-                                    "type": "agent_thinking",
-                                    "stage": "agentic_exploration",
-                                    "message": thinking_text
-                                }, authorization)
-                            except Exception as e:
-                                logger.warning(f"Failed to emit agent reasoning: {e}")
+                    if msg.role == ChatRole.ASSISTANT:
+                        # Check for tool calls
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            for tool_call in msg.tool_calls:
+                                tool_call_count += 1
+                                tool_name = tool_call.tool_name if hasattr(tool_call, 'tool_name') else 'unknown'
+                                
+                                # Map tool names to friendly messages
+                                tool_messages = {
+                                    'peek_session': 'Previewing session content',
+                                    'pull_full_session': 'Loading full session transcript',
+                                    'search_session': 'Searching for relevant content',
+                                    'check_context_sufficiency': 'Checking gathered context',
+                                    'generate_document': 'Preparing to write document'
+                                }
+                                friendly_message = tool_messages.get(tool_name, f'Executing {tool_name}')
+                                
+                                try:
+                                    await emit_progress_func(generation_id, {
+                                        "type": "agent_tool_call",
+                                        "stage": "agentic_exploration",
+                                        "message": friendly_message,
+                                        "details": {"tool": tool_name, "step": tool_call_count}
+                                    }, authorization)
+                                except Exception as e:
+                                    logger.warning(f"Failed to emit agent tool call: {e}")
+                        
+                        # Also emit reasoning text if present
+                        if msg.text:
+                            thinking_text = msg.text.strip()
+                            if thinking_text and not thinking_text.startswith('{') and len(thinking_text) > 20:
+                                try:
+                                    await emit_progress_func(generation_id, {
+                                        "type": "agent_thinking",
+                                        "stage": "agentic_exploration",
+                                        "message": thinking_text[:200] + ('...' if len(thinking_text) > 200 else '')
+                                    }, authorization)
+                                except Exception as e:
+                                    logger.warning(f"Failed to emit agent reasoning: {e}")
             
             # Log agent's decision process
             logger.info(f"📊 Agent completed exploration:")

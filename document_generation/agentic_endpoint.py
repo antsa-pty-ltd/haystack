@@ -60,11 +60,15 @@ async def generate_document_from_template_agentic(
         # Extract data from request
         template = request.template
         session_ids = request.sessionIds
+        dictated_notes = request.dictatedNotes or []  # List of practitioner notes
         client_info = request.clientInfo
         practitioner_info = request.practitionerInfo
         generation_instructions = request.generationInstructions
         
-        logger.info(f"📋 [AGENTIC] Generating from {len(session_ids)} sessions using '{template.get('name', 'Unknown')}'")
+        has_sessions = len(session_ids) > 0
+        has_notes = len(dictated_notes) > 0
+        
+        logger.info(f"📋 [AGENTIC] Generating from {len(session_ids)} sessions and {len(dictated_notes)} notes using '{template.get('name', 'Unknown')}'")
         
         # ===== POLICY CHECK (keep existing logic) =====
         await emit_progress_func(generation_id, {
@@ -161,6 +165,53 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 }
             )
         
+        # ===== FAST PATH: Notes Only (no sessions) =====
+        if not has_sessions and has_notes:
+            logger.info(f"✅ [FAST PATH] Notes-only generation ({len(dictated_notes)} notes)")
+            
+            await emit_progress_func(generation_id, {
+                "type": "progress_update",
+                "stage": "analysing_notes",
+                "message": f"Processing {len(dictated_notes)} practitioner note(s)...",
+                "details": {"noteCount": len(dictated_notes)}
+            }, authorization)
+            
+            await emit_progress_func(generation_id, {
+                "type": "progress_update",
+                "stage": "writing_document",
+                "message": f"Writing document using '{template.get('name', 'template')}'...",
+                "details": {"templateName": template.get('name')}
+            }, authorization)
+            
+            # Generate directly from notes (no session segments)
+            result = await generate_document_from_context(
+                segments=[],  # No session segments
+                template=template,
+                client_info=client_info,
+                practitioner_info=practitioner_info,
+                generation_instructions=generation_instructions,
+                openai_client=openai_client,
+                dictated_notes=dictated_notes  # Pass notes to generation
+            )
+            
+            await emit_progress_func(generation_id, {
+                "type": "stage_completed",
+                "stage": "document_ready",
+                "message": "Document generated successfully!",
+            }, authorization)
+            
+            from pydantic import BaseModel
+            class GenerateDocumentResponse(BaseModel):
+                content: str
+                generatedAt: str
+                metadata: dict
+            
+            return GenerateDocumentResponse(
+                content=result['content'],
+                generatedAt=result['generated_at'],
+                metadata=result['metadata']
+            )
+        
         # ===== FAST PATH: Single Small Session =====
         if len(session_ids) == 1:
             metadata = await fetch_session_metadata(session_ids[0], authorization)
@@ -169,9 +220,17 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 logger.info(f"✅ [FAST PATH] Single small session ({metadata['totalSegments']} segments, ~{estimated_tokens} tokens)")
                 
                 await emit_progress_func(generation_id, {
-                    "type": "stage_started",
-                    "stage": "direct_generation",
-                    "message": f"Small session detected - retrieving all {metadata['totalSegments']} segments..."
+                    "type": "progress_update",
+                    "stage": "analysing_sessions",
+                    "message": "Analysing session size and content...",
+                    "details": {"sessionCount": 1, "noteCount": len(dictated_notes)}
+                }, authorization)
+                
+                await emit_progress_func(generation_id, {
+                    "type": "progress_update",
+                    "stage": "retrieving_content",
+                    "message": f"Loading transcript ({metadata['totalSegments']} segments)...",
+                    "details": {"segments": metadata['totalSegments'], "tokens": estimated_tokens}
                 }, authorization)
                 
                 # Pull all segments directly using segments-by-sessions endpoint
@@ -189,6 +248,13 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                     response_data = response.json()
                     segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
                 
+                await emit_progress_func(generation_id, {
+                    "type": "progress_update",
+                    "stage": "writing_document",
+                    "message": f"Writing document using '{template.get('name', 'template')}'...",
+                    "details": {"templateName": template.get('name')}
+                }, authorization)
+                
                 # Generate directly (skip agent)
                 result = await generate_document_from_context(
                     segments=segments,
@@ -196,8 +262,15 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                     client_info=client_info,
                     practitioner_info=practitioner_info,
                     generation_instructions=generation_instructions,
-                    openai_client=openai_client
+                    openai_client=openai_client,
+                    dictated_notes=dictated_notes  # Include notes in generation
                 )
+                
+                await emit_progress_func(generation_id, {
+                    "type": "stage_completed",
+                    "stage": "document_ready",
+                    "message": "Document generated successfully!",
+                }, authorization)
                 
                 from pydantic import BaseModel
                 class GenerateDocumentResponse(BaseModel):
@@ -215,9 +288,16 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
         logger.info(f"🤖 [AGENTIC] Using DocumentExplorationAgent for {len(session_ids)} sessions")
         
         await emit_progress_func(generation_id, {
+            "type": "progress_update",
+            "stage": "preparing_agent",
+            "message": f"Preparing to analyse {len(session_ids)} session(s)...",
+            "details": {"sessionCount": len(session_ids)}
+        }, authorization)
+        
+        await emit_progress_func(generation_id, {
             "type": "stage_started",
             "stage": "agentic_exploration",
-            "message": "AI agent is analyzing sessions..."
+            "message": "AI agent is exploring session content..."
         }, authorization)
         
         # Get the document agent (doesn't affect other agents)
@@ -274,7 +354,8 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
             client_info=client_info,
             practitioner_info=practitioner_info,
             generation_instructions=generation_instructions,
-            openai_client=openai_client
+            openai_client=openai_client,
+            dictated_notes=dictated_notes  # Include notes in generation
         )
         
         # Add agent metadata
@@ -284,6 +365,16 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
             "decision_trail_length": len(exploration_result.get('decision_trail', []))
         }
         result['metadata']['processingMethod'] = 'agentic_exploration'
+        
+        await emit_progress_func(generation_id, {
+            "type": "stage_completed",
+            "stage": "document_ready",
+            "message": "Document generated successfully!",
+            "details": {
+                "segments_used": len(exploration_result['segments']),
+                "sessions_explored": len(exploration_result['sessions_explored'])
+            }
+        }, authorization)
         
         from pydantic import BaseModel
         class GenerateDocumentResponse(BaseModel):
