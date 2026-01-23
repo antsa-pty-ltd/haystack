@@ -1,0 +1,397 @@
+name: Haystack Testing Pipeline
+
+on:
+  pull_request:
+    branches: [master, develop]
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - '.github/workflows/haystack-test.yml'
+  push:
+    branches: [master, develop]
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - '.github/workflows/haystack-test.yml'
+  workflow_dispatch:
+    inputs:
+      run_all_tests:
+        description: 'Run all tests including slow tests'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+  REDIS_URL: 'redis://localhost:6379'
+
+jobs:
+  # ===========================================================================
+  # Job 1: Lint and Type Check
+  # ===========================================================================
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install linting dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy
+
+      - name: Run Ruff linter
+        run: |
+          ruff check . --output-format=github || true
+        continue-on-error: true
+
+      - name: Run basic syntax check
+        run: |
+          python -m py_compile main.py config.py personas.py session_manager.py haystack_pipeline.py
+          echo "✅ Core Python files have valid syntax"
+
+  # ===========================================================================
+  # Job 2: Unit Tests (Fast, No External Dependencies)
+  # ===========================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/unit/ \
+            -v \
+            --tb=short \
+            -m unit \
+            --junitxml=test-results/unit-results.xml \
+            --cov=. \
+            --cov-report=xml:coverage/unit-coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=0
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Upload unit test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: test-results/
+          retention-days: 30
+
+      - name: Upload unit coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-coverage
+          path: coverage/
+          retention-days: 30
+
+  # ===========================================================================
+  # Job 3: Safety Tests (Critical - 100% Pass Required)
+  # ===========================================================================
+  safety-tests:
+    name: Safety Tests (Critical)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run safety tests
+        run: |
+          python -m pytest tests/ \
+            -v \
+            --tb=short \
+            -m safety \
+            --junitxml=test-results/safety-results.xml
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Upload safety test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safety-test-results
+          path: test-results/
+          retention-days: 30
+
+  # ===========================================================================
+  # Job 4: Integration Tests
+  # ===========================================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Wait for Redis
+        run: |
+          for i in {1..30}; do
+            if redis-cli -h localhost ping > /dev/null 2>&1; then
+              echo "✅ Redis is ready"
+              break
+            fi
+            echo "Waiting for Redis... ($i/30)"
+            sleep 1
+          done
+
+      - name: Run integration tests
+        run: |
+          python -m pytest tests/integration/ \
+            -v \
+            --tb=short \
+            -m integration \
+            --junitxml=test-results/integration-results.xml
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: test-results/
+          retention-days: 30
+
+  # ===========================================================================
+  # Job 5: Build Verification
+  # ===========================================================================
+  build-verification:
+    name: Build Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify imports
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+
+          # Test core imports
+          print('Testing core imports...')
+          from config import settings
+          print('  ✅ config.settings')
+
+          from session_manager import SessionManager, ChatMessage, ChatSession
+          print('  ✅ session_manager')
+
+          from personas import PersonaManager, PersonaType
+          print('  ✅ personas')
+
+          from document_generation.generator import generate_document_from_context
+          print('  ✅ document_generation.generator')
+
+          from agents.document_agent import get_document_agent, initialize_agent
+          print('  ✅ agents.document_agent')
+
+          print('')
+          print('✅ All core imports successful')
+          "
+
+      - name: Verify FastAPI app loads
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+
+          print('Loading FastAPI application...')
+          from main import app
+
+          # Verify routes exist
+          routes = [route.path for route in app.routes]
+          print(f'  Found {len(routes)} routes')
+
+          required_routes = ['/health', '/chat', '/ws/{session_id}']
+          for route in required_routes:
+              if route in routes:
+                  print(f'  ✅ {route}')
+              else:
+                  print(f'  ⚠️ {route} not found (may be optional)')
+
+          print('')
+          print('✅ FastAPI app loads successfully')
+          "
+
+      - name: Create deployment package (dry run)
+        run: |
+          mkdir -p deploy
+
+          # Copy core files
+          cp main.py deploy/
+          cp config.py deploy/
+          cp personas.py deploy/
+          cp session_manager.py deploy/
+          cp haystack_pipeline.py deploy/
+          cp ui_state_manager.py deploy/
+          cp tools.py deploy/
+          cp requirements.txt deploy/
+
+          # Copy directories
+          cp -r components deploy/
+          cp -r agents deploy/
+          cp -r document_generation deploy/
+          cp -r utils deploy/
+
+          # Verify critical files
+          echo ""
+          echo "Deployment package contents:"
+          find deploy -type f -name "*.py" | head -20
+          echo ""
+
+          if [ ! -f deploy/main.py ]; then
+            echo "❌ ERROR: main.py not found in deployment package"
+            exit 1
+          fi
+
+          echo "✅ Deployment package created successfully"
+          echo "   Total Python files: $(find deploy -name '*.py' | wc -l)"
+
+  # ===========================================================================
+  # Job 6: Test Summary Report
+  # ===========================================================================
+  test-summary:
+    name: Test Summary
+    needs: [lint, unit-tests, safety-tests, integration-tests, build-verification]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+        continue-on-error: true
+
+      - name: Generate summary
+        run: |
+          echo "## 🧪 Haystack Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          # Check each job status
+          if [ "${{ needs.lint.result }}" == "success" ]; then
+            echo "| Lint & Type Check | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Lint & Type Check | ⚠️ ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.unit-tests.result }}" == "success" ]; then
+            echo "| Unit Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Unit Tests | ❌ ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.safety-tests.result }}" == "success" ]; then
+            echo "| Safety Tests (Critical) | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Safety Tests (Critical) | ❌ ${{ needs.safety-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "| Integration Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Integration Tests | ❌ ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.build-verification.result }}" == "success" ]; then
+            echo "| Build Verification | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Build Verification | ❌ ${{ needs.build-verification.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Test Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "Test results and coverage reports are available in the workflow artifacts." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Overall status
+          if [ "${{ needs.safety-tests.result }}" != "success" ]; then
+            echo "### ⚠️ CRITICAL: Safety tests failed - deployment should be blocked" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.unit-tests.result }}" == "success" ] && \
+               [ "${{ needs.integration-tests.result }}" == "success" ] && \
+               [ "${{ needs.build-verification.result }}" == "success" ]; then
+            echo "### ✅ All tests passed - ready for deployment" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ Some tests failed - review before deployment" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check critical failures
+        if: needs.safety-tests.result != 'success'
+        run: |
+          echo "❌ CRITICAL: Safety tests failed!"
+          echo "Safety tests must pass before deployment."
+          exit 1

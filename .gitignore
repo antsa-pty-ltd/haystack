@@ -51,3 +51,8 @@ logs/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Promptfoo
+.promptfoo/
+promptfoo/output/
+promptfoo/*.json

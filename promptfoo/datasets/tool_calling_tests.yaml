@@ -1,0 +1,269 @@
+# Antsa AI Tool Calling Tests
+# Tests for correct tool selection and parameter accuracy
+
+description: "Tool Calling Accuracy Tests for Antsa AI Web Assistant"
+
+tests:
+  # ============================================================================
+  # CLIENT SEARCH TOOLS
+  # ============================================================================
+
+  - vars:
+      query: "Find client John Smith"
+    assert:
+      - type: contains
+        value: "search_clients"
+      - type: not-contains
+        value: "client-"  # Should NOT fabricate UUIDs
+      - type: llm-rubric
+        value: "Response uses search_clients tool with the name 'John Smith'"
+
+  - vars:
+      query: "Look up Sarah Johnson"
+    assert:
+      - type: contains
+        value: "search_clients"
+      - type: not-contains
+        value: "00000000"  # No fake UUIDs
+
+  - vars:
+      query: "Who is client ABC123?"
+    assert:
+      - type: llm-rubric
+        value: "Response uses search tool to find client by ID or name"
+
+  - vars:
+      query: "Show me all my clients"
+    assert:
+      - type: llm-rubric
+        value: "Response attempts to list or search clients"
+
+  # ============================================================================
+  # CLIENT SUMMARY AND DETAILS
+  # ============================================================================
+
+  - vars:
+      query: "Get a summary for client Sarah"
+    assert:
+      - type: llm-rubric
+        value: "Response uses search_clients first, then get_client_summary with resulting ID"
+
+  - vars:
+      query: "What homework does John have?"
+    assert:
+      - type: llm-rubric
+        value: "Response uses search then get_client_homework_status"
+
+  - vars:
+      query: "Show Sarah's mood profile"
+    assert:
+      - type: llm-rubric
+        value: "Response searches for Sarah then retrieves mood data"
+
+  # ============================================================================
+  # SESSION MANAGEMENT
+  # ============================================================================
+
+  - vars:
+      query: "Load session 2 from the list"
+    assert:
+      - type: llm-rubric
+        value: "Response references session from previous context, uses actual session ID"
+      - type: not-contains
+        value: "session-fake"
+
+  - vars:
+      query: "Show me the client's recent sessions"
+    assert:
+      - type: contains-any
+        value: ["search_sessions", "get_client_summary"]
+
+  - vars:
+      query: "Search sessions about anxiety coping strategies"
+    assert:
+      - type: contains
+        value: "semantic_search_sessions"
+      - type: llm-rubric
+        value: "Response uses semantic search with appropriate query"
+
+  - vars:
+      query: "Load the most recent session"
+    assert:
+      - type: contains-any
+        value: ["search_sessions", "load_session"]
+
+  - vars:
+      query: "Load multiple sessions from January"
+    assert:
+      - type: llm-rubric
+        value: "Response uses load_multiple_sessions or iterates with load_session"
+
+  # ============================================================================
+  # DOCUMENT GENERATION WORKFLOW
+  # ============================================================================
+
+  - vars:
+      query: "Generate a SOAP note"
+    assert:
+      - type: contains-any
+        value: ["check_document_readiness", "get_templates", "generate_document"]
+      - type: llm-rubric
+        value: "Response follows document generation workflow"
+
+  - vars:
+      query: "What templates are available?"
+    assert:
+      - type: contains
+        value: "get_templates"
+
+  - vars:
+      query: "Use the Session Notes template"
+    assert:
+      - type: contains-any
+        value: ["select_template_by_name", "set_selected_template"]
+
+  - vars:
+      query: "Is everything ready to generate a document?"
+    assert:
+      - type: contains
+        value: "check_document_readiness"
+
+  - vars:
+      query: "Generate document from loaded sessions"
+    assert:
+      - type: contains
+        value: "generate_document_from_loaded"
+
+  - vars:
+      query: "Create an auto-generated document"
+    assert:
+      - type: contains
+        value: "generate_document_auto"
+
+  - vars:
+      query: "Show me the documents I've generated"
+    assert:
+      - type: contains
+        value: "get_generated_documents"
+
+  - vars:
+      query: "Make the document more formal"
+    assert:
+      - type: contains
+        value: "refine_document"
+      - type: llm-rubric
+        value: "Response uses refine_document with appropriate instructions"
+
+  # ============================================================================
+  # PRACTICE/CLINIC TOOLS
+  # ============================================================================
+
+  - vars:
+      query: "What's our clinic profile?"
+    assert:
+      - type: contains
+        value: "get_clinic_profile"
+
+  - vars:
+      query: "Show me the clinic statistics"
+    assert:
+      - type: contains
+        value: "get_clinic_stats"
+
+  - vars:
+      query: "List all practitioners"
+    assert:
+      - type: contains
+        value: "list_practitioners"
+
+  - vars:
+      query: "Generate a monthly report"
+    assert:
+      - type: contains
+        value: "generate_report"
+
+  # ============================================================================
+  # CONVERSATION TOOLS
+  # ============================================================================
+
+  - vars:
+      query: "Get the client's conversations"
+    assert:
+      - type: contains
+        value: "get_conversations"
+
+  - vars:
+      query: "Show the latest conversation"
+    assert:
+      - type: contains
+        value: "get_latest_conversation"
+
+  - vars:
+      query: "What messages are in that conversation?"
+    assert:
+      - type: contains
+        value: "get_conversation_messages"
+
+  # ============================================================================
+  # ANALYSIS TOOLS
+  # ============================================================================
+
+  - vars:
+      query: "Analyze the loaded session"
+    assert:
+      - type: contains
+        value: "analyze_loaded_session"
+
+  - vars:
+      query: "What sessions are currently loaded?"
+    assert:
+      - type: contains
+        value: "get_loaded_sessions"
+
+  - vars:
+      query: "Get the content of session 1"
+    assert:
+      - type: contains
+        value: "get_session_content"
+
+  # ============================================================================
+  # TOOL CHAINING TESTS
+  # ============================================================================
+
+  - vars:
+      query: "Generate SOAP notes for client Sarah Johnson's latest session"
+    assert:
+      - type: llm-rubric
+        value: |
+          Response must chain tools correctly:
+          1. search_clients to find Sarah Johnson
+          2. search_sessions or get_client_summary for sessions
+          3. load_session for the latest
+          4. Document generation workflow
+      - type: not-contains
+        value: "fake-id"
+
+  - vars:
+      query: "Show me John's homework and create a progress note"
+    assert:
+      - type: llm-rubric
+        value: |
+          Response chains: search_clients -> get_client_homework_status -> document generation
+
+  # ============================================================================
+  # NEGATIVE TESTS - SHOULD NOT DO
+  # ============================================================================
+
+  - vars:
+      query: "Get client with ID abc-123-def"
+    assert:
+      - type: llm-rubric
+        value: "Response either validates the ID format or uses search tool first"
+      - type: not-contains
+        value: "fabricated"
+
+  - vars:
+      query: "Load session xyz"
+    assert:
+      - type: llm-rubric
+        value: "Response searches or validates before loading, doesn't assume ID"
