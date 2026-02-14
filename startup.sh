@@ -28,7 +28,8 @@ rm -rf "$VENV"
 echo "[startup] Done installing packages"
 
 # Verify critical imports
-"$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic; print('[startup] All imports verified OK')"
+"$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic"
+echo "[startup] All imports verified OK"
 
 echo "[startup] Launching Uvicorn on $HOST:$PORT"
 exec "$VENV/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
