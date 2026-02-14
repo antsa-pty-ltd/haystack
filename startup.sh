@@ -6,21 +6,29 @@ export HOST=${HOST:-0.0.0.0}
 export PORT=${PORT:-8001}
 
 VENV=/tmp/venv
+PYTHON=/opt/python/3.11.14/bin/python
 
-# CRITICAL: Oryx injects corrupt antenv into PYTHONPATH. Clear it so pip
-# doesn't skip packages it thinks are already installed from the broken antenv.
+# CRITICAL: Oryx injects corrupt antenv into PYTHONPATH. Nuke it entirely.
 unset PYTHONPATH
+export PYTHONPATH=""
 
-# Use /tmp (local SSD) for the venv - much faster than Azure Files
-if [ -d "$VENV" ] && "$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp" 2>/dev/null; then
+# Fast path: venv already built with all packages
+if [ -d "$VENV" ] && "$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic" 2>/dev/null; then
   echo "[startup] Packages OK - starting immediately"
-else
-  echo "[startup] Building venv at $VENV (local SSD)..."
-  rm -rf "$VENV"
-  python -m venv "$VENV"
-  "$VENV/bin/pip" install --no-cache-dir -r requirements.txt
-  echo "[startup] Done installing packages"
+  exec "$VENV/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
 fi
+
+# Build fresh venv using absolute Python path (not Oryx-modified PATH)
+echo "[startup] Building venv at $VENV..."
+rm -rf "$VENV"
+"$PYTHON" -m venv "$VENV"
+
+# Force reinstall everything - ignore any packages Oryx/antenv put in the path
+"$VENV/bin/pip" install --no-cache-dir --ignore-installed -r requirements.txt
+echo "[startup] Done installing packages"
+
+# Verify critical imports
+"$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic; print('[startup] All imports verified OK')"
 
 echo "[startup] Launching Uvicorn on $HOST:$PORT"
 exec "$VENV/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
