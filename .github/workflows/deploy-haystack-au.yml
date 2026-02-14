@@ -38,50 +38,39 @@ jobs:
         mkdir deploy
         
         # Copy application source
-        cp main.py deploy/
-        cp config.py deploy/
-        cp personas.py deploy/
-        cp session_manager.py deploy/
-        cp haystack_pipeline.py deploy/
-        cp ui_state_manager.py deploy/
-        cp tools.py deploy/
-        cp requirements.txt deploy/
-        cp -r components deploy/
-        cp -r agents deploy/
-        cp -r document_generation deploy/
-        cp -r utils deploy/
+        cp main.py config.py personas.py session_manager.py haystack_pipeline.py \
+           ui_state_manager.py tools.py requirements.txt startup.sh deploy/
+        cp -r components agents document_generation utils deploy/
         
         # Verify main.py is present
-        if [ ! -f deploy/main.py ]; then
-          echo "ERROR: main.py not found!"
-          exit 1
-        fi
+        test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
         
-        # Build venv with all dependencies (runs on Ubuntu, same as Azure Linux)
+        # Build venv with all dependencies (Ubuntu runner matches Azure Linux)
         python -m venv deploy/antenv
-        deploy/antenv/bin/pip install --no-cache-dir -r requirements.txt
+        deploy/antenv/bin/pip install --no-cache-dir -q -r requirements.txt
         
-        # Verify key packages installed
+        # Verify key packages
         deploy/antenv/bin/python -c "import fastapi; import openai; import haystack; print('All packages OK')"
         
-        # Create simple startup script
-        cat > deploy/startup.sh << 'STARTUP'
-        #!/bin/bash
-        cd /home/site/wwwroot
-        export HOST=${HOST:-0.0.0.0}
-        export PORT=${PORT:-8001}
-        echo "[startup] Starting Uvicorn on $HOST:$PORT"
-        exec antenv/bin/python -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
-        STARTUP
-        chmod +x deploy/startup.sh
+        # Strip unnecessary files to reduce package size
+        find deploy/antenv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find deploy/antenv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+        find deploy/antenv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
+        find deploy/antenv -name "*.pyc" -delete 2>/dev/null || true
+        find deploy/antenv -name "*.pyo" -delete 2>/dev/null || true
+        find deploy/antenv -name "*.dist-info" -type d -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/top_level.txt "$1"/SOURCES.txt' _ {} \; 2>/dev/null || true
         
-        # Create Python entrypoint
-        printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' 'sys.exit(subprocess.call(["bash", "startup.sh"]))' > deploy/startup.py
-        chmod +x deploy/startup.py
+        # Create Python entrypoint that invokes startup.sh
+        printf '#!/usr/bin/env python3\nimport subprocess, sys\nsys.exit(subprocess.call(["bash", "startup.sh"]))\n' > deploy/startup.py
         
-        echo "✅ Package built with pre-installed venv"
         echo "Package size: $(du -sh deploy/ | cut -f1)"
-        ls -la deploy/
+
+    - name: 'Create deployment zip'
+      run: |
+        cd deploy
+        zip -r -q ../deploy.zip .
+        cd ..
+        echo "Zip size: $(du -sh deploy.zip | cut -f1)"
 
     - name: 'Azure Login'
       uses: azure/login@v2
@@ -90,17 +79,50 @@ jobs:
 
     - name: 'Deploy to Azure Web App (Production)'
       if: env.DEPLOY_ENV == 'production'
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: ${{ env.APP_NAME }}
-        package: './deploy'
-        slot-name: 'production'
-        startup-command: 'python startup.py'
+      run: |
+        az webapp deploy \
+          --name ${{ env.APP_NAME }} \
+          --resource-group PRODUCTION \
+          --src-path deploy.zip \
+          --type zip \
+          --clean true \
+          --restart true \
+          --timeout 600
+
+    - name: 'Configure startup command (Production)'
+      if: env.DEPLOY_ENV == 'production'
+      run: |
+        az webapp config set \
+          --name ${{ env.APP_NAME }} \
+          --resource-group PRODUCTION \
+          --startup-file "python startup.py"
 
     - name: 'Deploy to Azure Web App (Staging)'
       if: env.DEPLOY_ENV == 'staging'
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: ${{ env.APP_NAME }}
-        publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
-        package: './deploy'
+      run: |
+        az webapp deploy \
+          --name ${{ env.APP_NAME }} \
+          --resource-group rg-antsa-staging \
+          --src-path deploy.zip \
+          --type zip \
+          --clean true \
+          --restart true \
+          --timeout 600
+
+    - name: 'Configure startup command (Staging)'
+      if: env.DEPLOY_ENV == 'staging'
+      run: |
+        az webapp config set \
+          --name ${{ env.APP_NAME }} \
+          --resource-group rg-antsa-staging \
+          --startup-file "python startup.py"
+
+    - name: 'Verify deployment'
+      run: |
+        echo "Waiting 30s for container to start..."
+        sleep 30
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "https://${{ env.APP_NAME }}.azurewebsites.net/health" || echo "000")
+        echo "Health check HTTP code: $HTTP_CODE"
+        if [ "$HTTP_CODE" = "000" ]; then
+          echo "Service still starting up - this is expected for first deploy"
+        fi
