@@ -13,12 +13,14 @@ if [ ! -d "$VENV_DIR" ]; then
   python -m venv "$VENV_DIR"
 fi
 
-echo "[startup] Upgrading pip..."
-"$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
-
-if [ -f requirements.txt ]; then
-  echo "[startup] Installing requirements..."
+# Only install requirements if key packages are missing.
+# Oryx already installs them during deployment - avoid duplicate pip install
+# which can cause the startup probe to timeout (230s).
+if ! "$VENV_DIR/bin/python" -c "import fastapi; import openai; import haystack" 2>/dev/null; then
+  echo "[startup] Key packages missing, installing requirements..."
   "$VENV_DIR/bin/pip" install --no-cache-dir -r requirements.txt
+else
+  echo "[startup] Packages already installed by Oryx, skipping pip install"
 fi
 
 echo "[startup] Launching Uvicorn on $HOST:$PORT"
