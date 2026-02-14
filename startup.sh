@@ -7,8 +7,11 @@ export PORT=${PORT:-8001}
 
 VENV=/tmp/venv
 
+# CRITICAL: Oryx injects corrupt antenv into PYTHONPATH. Clear it so pip
+# doesn't skip packages it thinks are already installed from the broken antenv.
+unset PYTHONPATH
+
 # Use /tmp (local SSD) for the venv - much faster than Azure Files
-# The venv is rebuilt on each container start but takes ~5 min on local disk
 if [ -d "$VENV" ] && "$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp" 2>/dev/null; then
   echo "[startup] Packages OK - starting immediately"
 else
