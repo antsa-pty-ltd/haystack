@@ -1,8 +1,8 @@
-name: Deploy Haystack to Azure AU
+name: Deploy Haystack to Azure
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, develop ]
   workflow_dispatch:
 
 jobs:
@@ -18,76 +18,64 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: 'Install dependencies'
+    - name: 'Set environment variables'
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+          ENV="production"
+          APP_NAME="antsa-haystack-au-production"
+        elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          ENV="staging"
+          APP_NAME="antsa-haystack-au-staging"
+        else
+          ENV="production"
+          APP_NAME="antsa-haystack-au-production"
+        fi
+        echo "DEPLOY_ENV=${ENV}" >> $GITHUB_ENV
+        echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
+
+    - name: 'Validate dependencies'
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+        python -c "import fastapi; import openai; import haystack; print('All imports OK')"
 
     - name: 'Create deployment package'
       run: |
         mkdir deploy
-        # Copy full FastAPI Haystack service
-        cp main.py deploy/
-        cp config.py deploy/
-        cp personas.py deploy/
-        cp session_manager.py deploy/
-        cp haystack_pipeline.py deploy/
-        cp ui_state_manager.py deploy/
-        cp tools.py deploy/
-        cp requirements.txt deploy/
-        cp startup.sh deploy/
-        # Copy components directory (custom Haystack components)
-        cp -r components deploy/
-        # Copy new modular directories
-        cp -r agents deploy/
-        cp -r document_generation deploy/
-        cp -r utils deploy/
         
-        # Verify main.py is present (critical for service)
-        if [ ! -f deploy/main.py ]; then
-          echo "ERROR: main.py not found - Service will not work!"
-          exit 1
-        fi
+        # Copy application source only (no venv - built on Azure at runtime)
+        cp main.py config.py personas.py session_manager.py haystack_pipeline.py \
+           ui_state_manager.py tools.py requirements.txt startup.sh deploy/
+        cp -r components agents document_generation utils deploy/
         
-        # Provide a Python entrypoint that invokes our startup.sh (robust quoting)
-        printf '%s\n' '#!/usr/bin/env python3' 'import subprocess' 'subprocess.run(["bash", "startup.sh"], check=True)' > deploy/startup.py
-        chmod +x deploy/startup.py
+        # Verify main.py is present
+        test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
         
-        echo "✅ Full FastAPI Haystack service with WebSocket support packaged"
+        # Create Python entrypoint
+        printf '#!/usr/bin/env python3\nimport subprocess, sys\nsys.exit(subprocess.call(["bash", "startup.sh"]))\n' > deploy/startup.py
+        
+        echo "Package contents:"
         ls -la deploy/
-
-    - name: 'Validate startup.py'
-      run: |
-        echo "--- startup.py ---"
-        sed -n '1,120p' deploy/startup.py
-        echo "---------------"
-        python -c "import ast,sys,pathlib;code=pathlib.Path('deploy/startup.py').read_text(encoding='utf-8');ast.parse(code);print('startup.py syntax OK')"
+        echo "Package size: $(du -sh deploy/ | cut -f1)"
 
     - name: 'Azure Login'
       uses: azure/login@v2
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS_AU }}
+        creds: ${{ env.DEPLOY_ENV == 'production' && secrets.AZURE_CREDENTIALS_AU || secrets.AZURE_CREDENTIALS_STAGING }}
 
-    - name: 'Deploy to Azure Web App'
+    - name: 'Deploy to Azure Web App (Production)'
+      if: env.DEPLOY_ENV == 'production'
       uses: azure/webapps-deploy@v2
       with:
-        app-name: 'antsa-haystack-au-production'
+        app-name: ${{ env.APP_NAME }}
         package: './deploy'
         slot-name: 'production'
         startup-command: 'python startup.py'
-      env:
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_AU }}
-        REDIS_URL: ${{ secrets.REDIS_URL_AU }}
-        DATABASE_URL: ${{ secrets.DATABASE_URL_AU }}
-        NESTJS_API_URL: 'https://au.api.antsa.ai'
-        LOG_LEVEL: 'INFO'
-        HOST: '0.0.0.0'
-        PORT: '8000'
-        SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'
-        ENABLE_ORYX_BUILD: 'true'
-        SHOW_TOOL_BANNER: 'true'
-        SHOW_RAW_TOOL_JSON: 'false'
-        MAX_REQUESTS_PER_USER: '10'
-        SESSION_TIMEOUT_MINUTES: '240'
-        MAX_CONCURRENT_REQUESTS: '10000'
-        COUNTRY_CODE: 'au'
+
+    - name: 'Deploy to Azure Web App (Staging)'
+      if: env.DEPLOY_ENV == 'staging'
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.APP_NAME }}
+        publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
+        package: './deploy'

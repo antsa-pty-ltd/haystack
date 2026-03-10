@@ -1,25 +1,35 @@
 #!/bin/bash
 set -euo pipefail
 
+cd /home/site/wwwroot
 export HOST=${HOST:-0.0.0.0}
 export PORT=${PORT:-8001}
-export VENV_DIR=${VENV_DIR:-"$PWD/antenv"}
 
-echo "[startup] Using Python: $(python --version 2>/dev/null || echo 'not found')"
-echo "[startup] Ensuring virtualenv at: $VENV_DIR"
+VENV=/tmp/venv
+PYTHON=/opt/python/3.11.14/bin/python
 
-if [ ! -d "$VENV_DIR" ]; then
-  echo "[startup] Creating virtual environment..."
-  python -m venv "$VENV_DIR"
+# CRITICAL: Oryx injects corrupt antenv into PYTHONPATH. Nuke it entirely.
+unset PYTHONPATH
+export PYTHONPATH=""
+
+# Fast path: venv already built with all packages
+if [ -d "$VENV" ] && "$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic" 2>/dev/null; then
+  echo "[startup] Packages OK - starting immediately"
+  exec "$VENV/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
 fi
 
-echo "[startup] Upgrading pip..."
-"$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+# Build fresh venv using absolute Python path (not Oryx-modified PATH)
+echo "[startup] Building venv at $VENV..."
+rm -rf "$VENV"
+"$PYTHON" -m venv "$VENV"
 
-if [ -f requirements.txt ]; then
-  echo "[startup] Installing requirements..."
-  "$VENV_DIR/bin/pip" install --no-cache-dir -r requirements.txt
-fi
+# Force reinstall everything - ignore any packages Oryx/antenv put in the path
+"$VENV/bin/pip" install --no-cache-dir --ignore-installed -r requirements.txt
+echo "[startup] Done installing packages"
+
+# Verify critical imports
+"$VENV/bin/python" -c "import fastapi, openai, haystack, aiohttp, httpx, pydantic"
+echo "[startup] All imports verified OK"
 
 echo "[startup] Launching Uvicorn on $HOST:$PORT"
-exec "$VENV_DIR/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
+exec "$VENV/bin/python" -m uvicorn main:app --host "$HOST" --port "$PORT" --log-level info
