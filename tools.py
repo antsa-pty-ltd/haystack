@@ -2405,22 +2405,47 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Use SYNC methods to avoid event loop conflicts
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            
-            if not all_sessions_summary:
-                return {
-                    "generated_documents": [],
-                    "document_count": 0,
-                    "message": "No active UI session found. Document access requires an active browser session.",
-                    "status": "no_active_session"
-                }
-            
-            # Get the most recent session's UI state
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
-            all_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
+            # Strategy: check the current session first (most reliable — avoids race conditions
+            # where a newly-created session hasn't had its state pushed yet), then fall back
+            # to aggregating documents from ALL sessions.  This is safer than picking only the
+            # "most recently updated" session, which may be a stale empty session.
+            current_session_id = getattr(self, 'session_id', None)
+
+            all_documents: list = []
+
+            if current_session_id:
+                all_documents = ui_state_manager.get_generated_documents_sync(current_session_id)
+                logger.info(f"📋 Current session {current_session_id}: {len(all_documents)} document entries")
+
+            # If current session has no documents, aggregate from ALL sessions
+            has_current_docs = any(d.get("isGenerated") == True for d in all_documents)
+            if not has_current_docs:
+                all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
+                logger.info(f"🔍 Checking all {len(all_sessions_summary)} sessions for documents")
+
+                # Collect documents from every session, deduplicating by documentId
+                seen_ids: set = set()
+                aggregated: list = []
+                for sid in all_sessions_summary.keys():
+                    if sid == current_session_id:
+                        continue  # Already checked
+                    docs = ui_state_manager.get_generated_documents_sync(sid)
+                    for doc in docs:
+                        doc_id = doc.get("documentId", "")
+                        if doc_id and doc_id not in seen_ids:
+                            seen_ids.add(doc_id)
+                            aggregated.append(doc)
+
+                if aggregated:
+                    logger.info(f"📂 Found {len(aggregated)} documents across other sessions")
+                    all_documents = aggregated
+                elif not all_sessions_summary:
+                    return {
+                        "generated_documents": [],
+                        "document_count": 0,
+                        "message": "No active UI session found. Document access requires an active browser session.",
+                        "status": "no_active_session"
+                    }
             
             # Filter to only include ACTUAL generated documents (isGenerated=True)
             # Loaded sessions have isGenerated=False and should NOT be listed here
