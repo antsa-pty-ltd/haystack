@@ -8,8 +8,10 @@ making decisions about how to retrieve and analyze content.
 import os
 import httpx
 import logging
+import contextvars
 from typing import Dict, Any, List, Optional, Annotated
 from utils.session_utils import estimate_tokens_from_segments
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,7 @@ class ExplorationContext:
     def __init__(self):
         self.accumulated_segments: List[Dict[str, Any]] = []
         self.tokens_used: int = 0
-        self.token_budget: int = 150000  # Increased to handle 10+ sessions comfortably
+        self.token_budget: int = settings.token_budget
         self.sessions_explored: List[str] = []
         self.authorization: Optional[str] = None
         self.generation_id: Optional[str] = None
@@ -43,8 +45,7 @@ class ExplorationContext:
         
         # Calculate tokens only for newly added segments
         new_segments_added = len(self.accumulated_segments) - initial_count
-        # Rough estimate: 1 segment ≈ 75 tokens
-        self.tokens_used += new_segments_added * 75
+        self.tokens_used += new_segments_added * settings.tokens_per_segment
         
         # Log deduplication stats if duplicates were found
         if duplicates_found > 0:
@@ -67,21 +68,26 @@ class ExplorationContext:
         return (self.tokens_used + estimated_tokens) <= self.token_budget
 
 
-# Global context instance (will be reset for each document generation)
-_exploration_context = ExplorationContext()
+# Thread-safe context using contextvars (scoped per async task / request)
+_exploration_context_var: contextvars.ContextVar[ExplorationContext] = contextvars.ContextVar('exploration_context')
 
 
 def get_exploration_context() -> ExplorationContext:
-    """Get the current exploration context"""
-    return _exploration_context
+    """Get the current exploration context (per-request via ContextVar)"""
+    try:
+        return _exploration_context_var.get()
+    except LookupError:
+        ctx = ExplorationContext()
+        _exploration_context_var.set(ctx)
+        return ctx
 
 
 def reset_exploration_context(authorization: str = None, generation_id: str = None):
     """Reset exploration context for a new document generation"""
-    global _exploration_context
-    _exploration_context = ExplorationContext()
-    _exploration_context.authorization = authorization
-    _exploration_context.generation_id = generation_id
+    ctx = ExplorationContext()
+    ctx.authorization = authorization
+    ctx.generation_id = generation_id
+    _exploration_context_var.set(ctx)
 
 
 async def peek_session(

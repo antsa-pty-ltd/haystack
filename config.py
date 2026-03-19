@@ -30,7 +30,24 @@ class Settings(BaseSettings):
     # FastAPI Configuration
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8001"))
-    
+
+    # Model Configuration
+    generation_model: str = os.getenv("GENERATION_MODEL", "gpt-5.2")
+    generation_temperature: float = float(os.getenv("GENERATION_TEMPERATURE", "0.3"))
+    generation_seed: int = int(os.getenv("GENERATION_SEED", "42"))
+    chat_model: str = os.getenv("CHAT_MODEL", "gpt-5.2")
+    chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
+    lightweight_model: str = os.getenv("LIGHTWEIGHT_MODEL", "gpt-4o-mini")
+    policy_check_temperature: float = float(os.getenv("POLICY_CHECK_TEMPERATURE", "0.1"))
+
+    # Token Budget Configuration
+    token_budget: int = int(os.getenv("TOKEN_BUDGET", "150000"))
+    tokens_per_segment: int = int(os.getenv("TOKENS_PER_SEGMENT", "75"))
+
+    # Debug Endpoints
+    enable_debug_endpoints: bool = os.getenv("ENABLE_DEBUG_ENDPOINTS", "false").lower() in ("1", "true", "yes", "y")
+    debug_token: str = os.getenv("DEBUG_TOKEN", "")
+
     class Config:
         env_file = ".env"
 

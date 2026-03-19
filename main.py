@@ -25,6 +25,7 @@ from session_manager import session_manager
 from agents.document_agent import initialize_agent, get_document_agent
 from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
+from config import settings
 
 # Load environment variables
 load_dotenv()
@@ -99,7 +100,7 @@ SEMANTIC_SEARCH_CONFIG = {
     "max_sessions_for_pull_all": 2,
     
     # Average tokens per segment (for estimation)
-    "avg_tokens_per_segment": 75,
+    "avg_tokens_per_segment": settings.tokens_per_segment,
 }
 # ==========================================
 
@@ -162,7 +163,7 @@ async def on_startup():
     # Initialize document exploration agent
     if openai_api_key:
         try:
-            initialize_agent(openai_api_key, model="gpt-5.2")
+            initialize_agent(openai_api_key, model=settings.generation_model)
             logger.info("✅ Document Exploration Agent initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document Agent: {e}")
@@ -180,9 +181,8 @@ app.add_middleware(
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
 )
 
-# WebSocket connections and message buffers for ordering
+# WebSocket connections
 websocket_connections: Dict[str, WebSocket] = {}
-message_buffers: Dict[str, List[Dict[str, Any]]] = {}
 
 class CreateSessionRequest(BaseModel):
     persona_type: str = "web_assistant"
@@ -502,9 +502,9 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
             raise HTTPException(status_code=500, detail="OpenAI client not configured")
         
         response = await openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model=settings.chat_model,
             messages=messages,
-            temperature=0.7,
+            temperature=settings.chat_temperature,
             max_completion_tokens=4096
         )
         
@@ -686,12 +686,12 @@ Respond with JSON only."""
 
         # Call LLM for analysis
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Fast and cost-effective for this task
+            model=settings.lightweight_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1,  # Low temperature for consistent policy enforcement
+            temperature=settings.policy_check_temperature,
             max_completion_tokens=200
         )
         
@@ -717,13 +717,13 @@ Respond with JSON only."""
         }
     
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse policy check response: {e}, Response: {result_text if 'result_text' in locals() else 'N/A'}")
-        # Fail open - allow template if we can't parse the response
-        return {"is_violation": False, "violation_type": None, "reason": None}
+        logger.error(f"Policy check failed to parse response: {e}, Response: {result_text if 'result_text' in locals() else 'N/A'}")
+        # Fail closed - block on parse error as a precaution
+        return {"is_violation": True, "violation_type": None, "reason": "Policy check error — blocking as precaution"}
     except Exception as e:
-        logger.error(f"Error detecting policy violation: {e}")
-        # Fail open - allow template on error to avoid breaking legitimate use
-        return {"is_violation": False, "violation_type": None, "reason": None}
+        logger.error(f"Policy check failed to parse response: {e}")
+        # Fail closed - block on error as a precaution
+        return {"is_violation": True, "violation_type": None, "reason": "Policy check error — blocking as precaution"}
 
 
 @app.post("/generate-document-from-template", response_model=GenerateDocumentResponse)
@@ -912,15 +912,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Proactively set tool context if available
                 await _ensure_tools_context(session_id, message_data)
                 
-                # Process any buffered chat messages waiting for state
-                if session_id in message_buffers and message_buffers[session_id]:
-                    logger.info(f"🔄 Processing {len(message_buffers[session_id])} buffered messages for {session_id}")
-                    buffered = message_buffers[session_id]
-                    message_buffers[session_id] = []
-                    for buffered_msg in buffered:
-                        # Re-process buffered message (will be handled by main loop)
-                        pass
-                
                 continue
             
             message = message_data.get("message", "")
@@ -1037,14 +1028,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             del websocket_connections[session_id]
         # Note: UI state is NOT cleaned up here - it persists with 24h TTL in Redis
         # This allows reconnection and state recovery
-        # Cleanup message buffer
-        message_buffers.pop(session_id, None)
     except Exception as e:
         logger.error(f"WebSocket error for session {session_id}: {e}")
         if session_id in websocket_connections:
             del websocket_connections[session_id]
-        # On error, also keep state for potential recovery
-        message_buffers.pop(session_id, None)
 
 async def handle_template_request(message: str, session_id: str) -> str:
     """Handle template-related requests"""
@@ -1109,11 +1096,11 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
         
         # OpenAI streaming
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.lightweight_model,
             messages=messages,
             stream=True,
             max_tokens=1000,
-            temperature=0.7
+            temperature=settings.chat_temperature
         )
         
         full_content = ""
@@ -1168,64 +1155,78 @@ async def send_streaming_response(websocket: WebSocket, session_id: str, respons
     }))
 
 # Debug endpoints for state inspection
-@app.get("/debug/sessions/{session_id}/state")
-async def debug_session_state(session_id: str, authorization: Optional[str] = Header(None)):
-    """Debug endpoint - get UI state for a specific session (requires auth in production)"""
+# Only registered when ENABLE_DEBUG_ENDPOINTS=true
+def _validate_debug_token(authorization: Optional[str]):
+    """Validate the debug endpoint authorization token against the configured secret."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
-    ui_state = await ui_state_manager.get_state(session_id)
-    capabilities = await ui_state_manager.get_page_capabilities(session_id)
-    
-    return {
-        "session_id": session_id,
-        "ui_state": ui_state,
-        "available_capabilities": capabilities,
-        "last_updated": ui_state.get("last_updated"),
-        "redis_connected": ui_state_manager._initialized
-    }
+    if not settings.debug_token:
+        raise HTTPException(status_code=403, detail="Debug endpoints not configured - DEBUG_TOKEN not set")
+    # Support both raw token and "Bearer <token>" format
+    token = authorization.removeprefix("Bearer ").strip()
+    if token != settings.debug_token:
+        raise HTTPException(status_code=403, detail="Forbidden - Invalid debug token")
 
-@app.get("/debug/sessions")
-async def debug_all_sessions(authorization: Optional[str] = Header(None)):
-    """Debug endpoint - list all active sessions (requires auth in production)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
-    # Get all sessions summary from ui_state_manager
-    sessions = await ui_state_manager.get_all_sessions_summary()
-    
-    return {
-        "total_sessions": len(sessions),
-        "sessions": sessions,
-        "redis_connected": ui_state_manager._initialized
-    }
 
-@app.get("/debug/redis/health")
-async def debug_redis_health(authorization: Optional[str] = Header(None)):
-    """Debug endpoint - check Redis connection health"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
-    try:
-        if ui_state_manager._initialized and ui_state_manager.redis_client:
-            await ui_state_manager.redis_client.ping()
-            return {
-                "redis_connected": True,
-                "status": "healthy",
-                "message": "Redis connection is working"
-            }
-        else:
+if settings.enable_debug_endpoints:
+    logger.info("Debug endpoints enabled (ENABLE_DEBUG_ENDPOINTS=true)")
+
+    @app.get("/debug/sessions/{session_id}/state")
+    async def debug_session_state(session_id: str, authorization: Optional[str] = Header(None)):
+        """Debug endpoint - get UI state for a specific session"""
+        _validate_debug_token(authorization)
+
+        ui_state = await ui_state_manager.get_state(session_id)
+        capabilities = await ui_state_manager.get_page_capabilities(session_id)
+
+        return {
+            "session_id": session_id,
+            "ui_state": ui_state,
+            "available_capabilities": capabilities,
+            "last_updated": ui_state.get("last_updated"),
+            "redis_connected": ui_state_manager._initialized
+        }
+
+    @app.get("/debug/sessions")
+    async def debug_all_sessions(authorization: Optional[str] = Header(None)):
+        """Debug endpoint - list all active sessions"""
+        _validate_debug_token(authorization)
+
+        sessions = await ui_state_manager.get_all_sessions_summary()
+
+        return {
+            "total_sessions": len(sessions),
+            "sessions": sessions,
+            "redis_connected": ui_state_manager._initialized
+        }
+
+    @app.get("/debug/redis/health")
+    async def debug_redis_health(authorization: Optional[str] = Header(None)):
+        """Debug endpoint - check Redis connection health"""
+        _validate_debug_token(authorization)
+
+        try:
+            if ui_state_manager._initialized and ui_state_manager.redis_client:
+                await ui_state_manager.redis_client.ping()
+                return {
+                    "redis_connected": True,
+                    "status": "healthy",
+                    "message": "Redis connection is working"
+                }
+            else:
+                return {
+                    "redis_connected": False,
+                    "status": "disconnected",
+                    "message": "Redis client not initialized (using in-memory fallback)"
+                }
+        except Exception as e:
             return {
                 "redis_connected": False,
-                "status": "disconnected",
-                "message": "Redis client not initialized (using in-memory fallback)"
+                "status": "error",
+                "message": f"Redis connection error: {str(e)}"
             }
-    except Exception as e:
-        return {
-            "redis_connected": False,
-            "status": "error",
-            "message": f"Redis connection error: {str(e)}"
-        }
+else:
+    logger.info("Debug endpoints disabled (set ENABLE_DEBUG_ENDPOINTS=true to enable)")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8001))
