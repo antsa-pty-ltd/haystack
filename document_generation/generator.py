@@ -180,7 +180,7 @@ Always personalize the document by using the actual client and practitioner name
             system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nIMPORTANT: This additional context should be integrated into your understanding of the transcript and used to correct any assumptions or add missing background information. Regenerate the document incorporating this new information.\n"
         
         # Check if this is a modification/regeneration request
-        is_regeneration = template_content.startswith("CRITICAL MODIFICATION REQUEST")
+        is_regeneration = template_content.startswith("CRITICAL INSTRUCTIONS FOR AI ASSISTANT:")
         
         # Build source content section (transcript and/or notes)
         source_content = ""
