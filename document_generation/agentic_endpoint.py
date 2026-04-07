@@ -60,16 +60,22 @@ async def generate_document_from_template_agentic(
         # Extract data from request
         template = request.template
         session_ids = request.sessionIds
+        session_data = request.sessionData or []  # Full session transcript data from NestJS API
         dictated_notes = request.dictatedNotes or []  # List of practitioner notes
         client_info = request.clientInfo
         practitioner_info = request.practitionerInfo
         generation_instructions = request.generationInstructions
-        
+
         has_sessions = len(session_ids) > 0
         has_notes = len(dictated_notes) > 0
-        
+        has_session_data = len(session_data) > 0  # Check if full transcript data was provided
+
         logger.info(f"📋 [AGENTIC] Generating from {len(session_ids)} sessions and {len(dictated_notes)} notes using '{template.get('name', 'Unknown')}'")
-        
+        if has_session_data:
+            logger.info(f"✅ [AGENTIC] Received full sessionData from NestJS API ({len(session_data)} sessions with transcript segments)")
+        else:
+            logger.info(f"⚠️ [AGENTIC] No sessionData in request - will fetch segments from API")
+
         # ===== POLICY CHECK (keep existing logic) =====
         await emit_progress_func(generation_id, {
             "type": "stage_started",
@@ -214,39 +220,55 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
         
         # ===== FAST PATH: Single Small Session =====
         if len(session_ids) == 1:
-            metadata = await fetch_session_metadata(session_ids[0], authorization)
-            if metadata and metadata['totalSegments'] < 150:
-                estimated_tokens = estimate_tokens_from_segments(metadata['totalSegments'])
-                logger.info(f"✅ [FAST PATH] Single small session ({metadata['totalSegments']} segments, ~{estimated_tokens} tokens)")
-                
+            # Try to use sessionData from request if available (more efficient, avoids extra API call)
+            segments = None
+            total_segments = 0
+
+            if has_session_data and len(session_data) > 0:
+                # Extract segments from the sessionData provided by NestJS API
+                session = session_data[0]
+                segments = session.get('segments', [])
+                total_segments = len(segments)
+                logger.info(f"✅ [FAST PATH] Using sessionData from request ({total_segments} segments)")
+            else:
+                # Fallback: fetch metadata and then fetch segments from API
+                metadata = await fetch_session_metadata(session_ids[0], authorization)
+                if metadata:
+                    total_segments = metadata['totalSegments']
+
+            if total_segments > 0 and total_segments < 150:
+                estimated_tokens = estimate_tokens_from_segments(total_segments)
+                logger.info(f"✅ [FAST PATH] Single small session ({total_segments} segments, ~{estimated_tokens} tokens)")
+
                 await emit_progress_func(generation_id, {
                     "type": "progress_update",
                     "stage": "analysing_sessions",
                     "message": "Analysing session size and content...",
                     "details": {"sessionCount": 1, "noteCount": len(dictated_notes)}
                 }, authorization)
-                
+
                 await emit_progress_func(generation_id, {
                     "type": "progress_update",
                     "stage": "retrieving_content",
-                    "message": f"Loading transcript ({metadata['totalSegments']} segments)...",
-                    "details": {"segments": metadata['totalSegments'], "tokens": estimated_tokens}
+                    "message": f"Loading transcript ({total_segments} segments)...",
+                    "details": {"segments": total_segments, "tokens": estimated_tokens}
                 }, authorization)
-                
-                # Pull all segments directly using segments-by-sessions endpoint
-                # (not semantic-search, which requires embeddings)
-                api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        f"{api_url}/api/v1/ai/transcripts/segments-by-sessions",
-                        json={
-                            "session_ids": [session_ids[0]],
-                            "limit_per_session": 1000
-                        },
-                        headers={"Authorization": authorization} if authorization else {}
-                    )
-                    response_data = response.json()
-                    segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
+
+                # If we didn't get segments from sessionData, fetch from API
+                if segments is None:
+                    logger.info(f"📡 [FALLBACK] Fetching segments from API (sessionData not provided)")
+                    api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            f"{api_url}/api/v1/ai/transcripts/segments-by-sessions",
+                            json={
+                                "session_ids": [session_ids[0]],
+                                "limit_per_session": 1000
+                            },
+                            headers={"Authorization": authorization} if authorization else {}
+                        )
+                        response_data = response.json()
+                        segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
                 
                 await emit_progress_func(generation_id, {
                     "type": "progress_update",
