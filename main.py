@@ -203,6 +203,7 @@ class DictatedNote(BaseModel):
 class GenerateDocumentRequest(BaseModel):
     template: Dict[str, Any]
     sessionIds: List[str]
+    sessionData: Optional[List[Dict[str, Any]]] = None  # Full session transcript data (segments, raw text, etc.)
     dictatedNotes: Optional[List[DictatedNote]] = None  # Practitioner notes to include in generation
     clientInfo: Dict[str, Any]
     practitionerInfo: Dict[str, Any]
