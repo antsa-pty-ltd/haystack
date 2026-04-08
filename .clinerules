@@ -252,6 +252,367 @@ Suggested fix:
 Waiting for your instruction before proceeding.
 ```
 
+### 5. When to Ask vs. When to Proceed
+
+**Ask First**:
+- Breaking changes to existing functionality
+- Uncertain about business logic or user requirements
+- Multiple valid implementation approaches with different tradeoffs
+- Security-sensitive changes (auth, permissions, data access)
+- Architectural decisions that affect multiple components
+- Removing features or deprecated code
+- Changes to database schema or migrations
+
+**Proceed Without Asking**:
+- Bug fixes with obvious solutions
+- Code quality improvements (refactoring, type safety)
+- Following established patterns in the codebase
+- Documentation updates
+- Lint/formatting fixes
+- Adding missing error handling
+- Performance optimizations (within established patterns)
+
+### 6. Code Review Checklist
+
+**Before Committing (Self-Review)**:
+- [ ] No console.log statements in production code
+- [ ] No commented-out code blocks
+- [ ] No hardcoded URLs or secrets
+- [ ] All imports are used (no unused imports)
+- [ ] No `any` types in TypeScript
+- [ ] Error handling is present for async operations
+- [ ] Loading states are shown for user actions
+- [ ] Build passes (`npm run build`)
+- [ ] Lint passes (`npm run lint`)
+- [ ] Tests pass (`npm test`)
+- [ ] Commit messages follow conventional commits format
+- [ ] Co-Authored-By line is present
+- [ ] No TODO comments without GitHub issue reference
+- [ ] No debugging code (debugger statements, console.time, etc.)
+
+### 7. Naming Conventions
+
+**Consistent Naming Across Codebase**:
+- **React Components**: PascalCase (e.g., `UserProfile.tsx`, `AIAssistantSidebar.tsx`)
+- **Hooks**: camelCase starting with "use" (e.g., `useAuth`, `useAsyncAction`)
+- **Services**: camelCase ending with "Service" (e.g., `haystackService`, `authService`)
+- **Constants**: UPPER_SNAKE_CASE (e.g., `API_BASE_URL`, `MAX_FILE_SIZE_MB`)
+- **Interfaces**: PascalCase starting with "I" (e.g., `IUserProfile`, `ISessionData`)
+- **Types**: PascalCase (e.g., `UserRole`, `SessionStatus`)
+- **Enums**: PascalCase starting with "E" (e.g., `EUserType`, `ESortType`)
+- **Files**: kebab-case (e.g., `user-profile-page.tsx`, `ai-ui-integration.ts`)
+- **Folders**: kebab-case (e.g., `live-transcribe/`, `ai-assistant/`)
+- **CSS Classes**: kebab-case (e.g., `user-profile-card`, `chat-message-bubble`)
+- **Environment Variables**: UPPER_SNAKE_CASE (e.g., `VITE_API_URL`, `NODE_ENV`)
+
+### 8. Environment Variables Protocol
+
+**Adding New Environment Variables**:
+1. Add to ALL `.env.*.example` files (au, us, uk)
+2. Document the variable purpose and valid values in comments
+3. Add to GitHub Actions secrets if needed (coordinate with user)
+4. Update deployment workflows if the variable affects build
+5. Notify user which secrets need to be added to Azure/GitHub
+6. Update relevant documentation (README, deployment docs)
+
+**Environment Variable Naming**:
+- Use descriptive names: `STRIPE_SECRET_KEY_AU` not `SK_AU`
+- Group related vars with prefixes: `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`
+- Country-specific vars end with country code: `_AU`, `_US`, `_UK`
+- Follow existing patterns in the codebase
+
+**Never**:
+- Commit actual `.env` files (only `.env.*.example`)
+- Hardcode values that should be in environment variables
+- Use environment variables in frontend for secrets (only public config)
+
+### 9. Breaking Changes Protocol
+
+**Making Breaking Changes**:
+- **API Endpoints**: Version the API (e.g., `/v2/endpoint`) instead of modifying existing
+- **Database Schema**: Create migration with backward compatibility period
+- **Frontend Components**: Deprecate old props before removing (add console.warn)
+- **Function Signatures**: Add new parameters as optional first, deprecate old signature
+- **Always**: Document breaking changes in commit message with `BREAKING CHANGE:` footer
+- **Always**: Update relevant documentation and migration guides
+- **Never**: Break production without user approval
+- **Never**: Remove features without deprecation period
+
+**Breaking Change Commit Format**:
+```bash
+git commit -m "feat: New authentication system
+
+Migrates from JWT to OAuth2 for better security.
+
+BREAKING CHANGE: Old JWT tokens will no longer work. Users must re-authenticate.
+Migration guide: docs/auth-migration.md
+
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+```
+
+### 10. Logging Standards
+
+**What to Log**:
+- **DO LOG**:
+  - API requests/responses (sanitize sensitive data)
+  - Error stack traces with context
+  - State changes in critical workflows
+  - Performance metrics for slow operations (>1s)
+  - Authentication events (login, logout, failed attempts)
+  - Database queries that fail or take >500ms
+  - External API calls and responses
+
+- **DON'T LOG**:
+  - Passwords, tokens, or API keys
+  - Full user objects with sensitive data (email, phone, address)
+  - Credit card information
+  - Personally identifiable information (PII) without sanitization
+  - Medical/health information (HIPAA compliance)
+  - Session tokens or cookies
+
+**Logging Format**:
+```typescript
+// Good logging
+logger.info('User authenticated', { userId: user.id, role: user.role });
+logger.error('Payment failed', { orderId, error: error.message, stack: error.stack });
+
+// Bad logging
+logger.info('User data', user); // Contains PII
+logger.error('Error', error); // No context
+```
+
+**Haystack Python Logging**:
+```python
+# Use emoji prefixes for better log scanning
+logger.info(f"🔍 Retrieved UI state for {session_id}: page_type={page_type}")
+logger.warning(f"⚠️ No UI state provided for session {session_id}")
+logger.error(f"❌ Failed to process message: {error}")
+```
+
+### 11. Performance Guidelines
+
+**Performance Best Practices**:
+
+**React Performance**:
+- Lazy load heavy components: `const Heavy = React.lazy(() => import('./Heavy'))`
+- Memoize expensive calculations: `useMemo(() => expensiveCalc(data), [data])`
+- Memoize callback functions: `useCallback(() => handler(), [deps])`
+- Memoize components that re-render frequently: `React.memo(Component)`
+- Use code splitting for routes: Dynamic imports for route components
+- Avoid inline object/array creation in render: Move to useMemo or useState
+
+**Asset Optimization**:
+- Optimize images: Use WebP format, appropriate sizes
+- Lazy load images: Use `loading="lazy"` attribute
+- Use CDN for static assets
+- Minimize bundle size: Check build output for large chunks
+
+**API Performance**:
+- Debounce user input: Use debounce for search, autocomplete (300-500ms)
+- Implement pagination: Don't load all data at once
+- Use WebSocket for real-time features: Not polling
+- Cache API responses: Use React Query or SWR
+- Minimize API calls: Batch requests when possible
+
+**Database Performance**:
+- Index frequently queried fields
+- Use pagination for large datasets
+- Avoid N+1 queries: Use joins or batch loading
+- Monitor slow queries: Log queries >500ms
+
+**Monitoring**:
+- Monitor bundle size: Check Vite build output
+- Track Core Web Vitals: LCP, FID, CLS
+- Log slow operations: >1s for backend, >100ms for frontend
+
+### 12. Dependency Update Guidelines
+
+**Updating Dependencies**:
+
+**Patch versions (1.0.x)**:
+- Safe to update, test basic functionality
+- Run build and lint after updating
+- Check for any runtime errors
+
+**Minor versions (1.x.0)**:
+- Review changelog for new features
+- Test thoroughly, especially new features you use
+- Update if needed for new functionality
+- Run full test suite
+
+**Major versions (x.0.0)**:
+- Create separate branch: `chore/update-[package]-v[version]`
+- Review breaking changes in changelog
+- Update code to handle breaking changes
+- Test extensively (all affected features)
+- Consider not updating if change is too large
+
+**Always**:
+- Run build, lint, and tests after updating
+- Check for peer dependency warnings
+- Update lock file: `npm install` after changing package.json
+- Test the app manually, not just automated tests
+- Document breaking changes in commit message
+
+**Never**:
+- Update multiple major versions simultaneously
+- Update without testing
+- Ignore peer dependency warnings
+- Update dependencies right before a release
+
+**Update Commands**:
+```bash
+# Check for updates
+npm outdated
+
+# Update specific package
+npm update [package-name]
+
+# Update to latest (including major)
+npm install [package-name]@latest
+
+# After updating
+npm run build
+npm run lint
+npm test
+```
+
+### 13. Database Migration Guidelines
+
+**Creating Database Migrations**:
+- **Always** create migrations in `api/src/databases/migrations` folder
+- Use timestamp-based naming: `[TIMESTAMP]-description.ts`
+- **Never** edit existing migrations that have run in production
+- Test migrations both up and down before committing
+- Add migrations to git BEFORE running them locally
+- Document breaking schema changes in commit message
+
+**Migration Best Practices**:
+- Make migrations reversible: Always implement `down()` method
+- Use transactions: Wrap in transaction for data integrity
+- Add indexes separately: Don't add indexes in same migration as table creation
+- Make additive changes: Add new columns as nullable or with defaults
+- Handle existing data: Provide data migration logic if schema changes
+- Test on copy of production data: Ensure migration works on real data
+
+**Migration Example**:
+```typescript
+export class AddUserPreferences1234567890 implements MigrationInterface {
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`
+      ALTER TABLE "users"
+      ADD COLUMN "preferences" jsonb DEFAULT '{}'::jsonb
+    `);
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`
+      ALTER TABLE "users"
+      DROP COLUMN "preferences"
+    `);
+  }
+}
+```
+
+### 14. Deployment Rollback Procedures
+
+**If Deployment Fails**:
+
+1. **Check Logs First**:
+   - Check GitHub Actions logs for specific error
+   - Check Azure Portal logs (Azure Web Apps → Log stream)
+   - Look for common issues: missing env vars, build failures, startup errors
+
+2. **Quick Fixes** (if obvious):
+   - Missing environment variable: Add in Azure Portal
+   - Configuration error: Fix in Azure Portal settings
+   - Small code fix: Push fix to branch, let CI/CD redeploy
+
+3. **Rollback** (if can't fix quickly):
+   ```bash
+   # Revert the merge commit
+   git revert [merge-commit-hash]
+   git push origin develop
+
+   # Or reset to previous commit (use with caution)
+   git reset --hard [previous-commit-hash]
+   git push origin develop --force  # Only if user approves
+   ```
+
+4. **Fix and Redeploy**:
+   - Create new branch with fix
+   - Test thoroughly locally
+   - Run all quality checks
+   - Deploy to staging first
+   - Then deploy to production
+
+5. **Post-Mortem** (for major incidents):
+   - Document what happened
+   - Document why it happened
+   - Document how to prevent it
+   - Update deployment checklist
+   - Add automated checks if possible
+
+**Azure-Specific Rollback**:
+- Use deployment slots: Swap back to previous slot
+- Use Azure Portal: Deployments → Select previous deployment → Redeploy
+
+### 15. Incident Response
+
+**Production Issues Protocol**:
+
+**1. Assess Severity**:
+- **Critical**: App down, data corrupted, security breach
+- **High**: Major feature broken, affecting multiple users
+- **Medium**: Minor feature broken, affecting some users
+- **Low**: UI issue, cosmetic bug, edge case
+
+**2. Immediate Action**:
+- **Critical**:
+  - Notify user immediately via urgent message
+  - Stop deployment if in progress
+  - Gather error logs and reproduction steps
+  - Prepare rollback plan
+
+- **High**:
+  - Document error with screenshots/logs
+  - Gather reproduction steps
+  - Notify user with severity and ETA
+
+- **Medium/Low**:
+  - Create GitHub issue with details
+  - Add to backlog for user prioritization
+
+**3. Gather Information**:
+- Error logs from Azure Portal
+- Reproduction steps (detailed)
+- User reports or tickets
+- Time of incident
+- Affected users/features
+- Recent deployments or changes
+
+**4. Fix**:
+- Create hotfix branch: `hotfix/critical-[description]`
+- Make minimal changes to fix the issue
+- Test thoroughly (don't introduce new bugs)
+- Run all quality checks
+- Deploy ASAP to staging, then production
+- Monitor logs after deployment
+
+**5. Communication**:
+- Keep user updated on progress
+- Provide ETA when possible (but don't overpromise)
+- Confirm fix with user after deployment
+- Document resolution
+
+**6. Post-Mortem** (for Critical/High incidents):
+- Document what happened
+- Document root cause
+- Document fix applied
+- Document prevention measures
+- Update monitoring/alerts
+- Update .clinerules if process failed
+
 ## Project-Specific Guidelines
 
 ### Web Frontend (`/web`)
