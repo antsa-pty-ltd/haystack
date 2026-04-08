@@ -18,8 +18,9 @@ This rule applies to:
 2. Make changes on that branch
 3. Commit to the branch
 4. Push the branch to origin
-5. Merge to `develop` (only after pushing the branch)
-6. Push `develop` to origin
+5. **STOP - Wait for user approval before merging**
+6. Only merge to `develop` if user explicitly approves
+7. Push `develop` to origin (only after user approval)
 
 **WRONG ❌**:
 ```bash
@@ -38,10 +39,12 @@ git checkout -b feature/my-change
 # make changes
 git add .
 git commit -m "changes"
-git push -u origin feature/my-change  # Push branch first
+git push -u origin feature/my-change
+# STOP HERE - Wait for user to say "merge this" or "looks good, merge it"
+# Only continue below if user explicitly approves:
 git checkout develop
 git merge feature/my-change --no-ff
-git push origin develop  # Now push develop
+git push origin develop
 ```
 
 If you find yourself about to push directly to `develop` or `master`, STOP and create a branch first.
@@ -65,9 +68,13 @@ ANTSA is a multi-platform clinical practice management system with:
   - Even for single-line fixes, documentation updates, or "quick changes"
   - The only exception is if the user explicitly tells you to push directly (rare)
 - **Branch naming**: `feature/description`, `bugfix/description`, `hotfix/description`, `docs/description`
-- **Branch-first workflow**: Always create and push the branch BEFORE merging to develop
+- **Branch-first workflow**: Always create and push the branch, then STOP
+- **⚠️ CRITICAL: Do NOT merge to develop without explicit user approval**
+  - After pushing the branch, wait for user to say "merge this" or "looks good"
+  - NEVER assume you should merge just because the branch is pushed
+  - The user needs to review and approve before merging
 - **Commit messages**: Use conventional commits format with "Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
-- **Merge strategy**: Use `--no-ff` for feature merges to preserve history
+- **Merge strategy**: Use `--no-ff` for feature merges to preserve history (after user approval)
 - **Build verification**: ALWAYS run `npm run build` (web) or equivalent before committing
 - **Lint compliance**: Fix ALL lint errors - builds will fail in CI/CD otherwise
 
