@@ -16,11 +16,16 @@ This rule applies to:
 **Workflow (MANDATORY)**:
 1. Create new branch from `develop`
 2. Make changes on that branch
-3. Commit to the branch
-4. Push the branch to origin
-5. **STOP - Wait for user approval before merging**
-6. Only merge to `develop` if user explicitly approves
-7. Push `develop` to origin (only after user approval)
+3. **Run quality checks BEFORE committing**:
+   - Build: `npm run build` (web) or equivalent
+   - Lint: `npm run lint` or `eslint .`
+   - Tests: `npm test` (if applicable)
+   - **If ANY check fails, notify the user immediately - DO NOT commit**
+4. Commit to the branch (only if all checks pass)
+5. Push the branch to origin
+6. **STOP - Wait for user approval before merging**
+7. Only merge to `develop` if user explicitly approves
+8. Push `develop` to origin (only after user approval)
 
 **WRONG ❌**:
 ```bash
@@ -37,6 +42,13 @@ git checkout develop
 git pull origin develop
 git checkout -b feature/my-change
 # make changes
+
+# Run quality checks BEFORE committing
+npm run build        # Must pass
+npm run lint         # Must pass
+npm test             # Must pass (if tests exist)
+# If ANY check fails, notify user and STOP
+
 git add .
 git commit -m "changes"
 git push -u origin feature/my-change
@@ -75,8 +87,13 @@ ANTSA is a multi-platform clinical practice management system with:
   - The user needs to review and approve before merging
 - **Commit messages**: Use conventional commits format with "Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 - **Merge strategy**: Use `--no-ff` for feature merges to preserve history (after user approval)
-- **Build verification**: ALWAYS run `npm run build` (web) or equivalent before committing
-- **Lint compliance**: Fix ALL lint errors - builds will fail in CI/CD otherwise
+- **🚨 MANDATORY Quality Checks BEFORE Committing**:
+  - **Build**: Run `npm run build` (web) or equivalent - must pass
+  - **Lint**: Run `npm run lint` or `eslint .` - must pass with zero errors
+  - **Tests**: Run `npm test` - must pass (if tests exist)
+  - **If ANY check fails**: Notify the user immediately with the error details and STOP
+  - **DO NOT commit** code that fails any quality check
+  - **DO NOT use `--no-verify`** to skip pre-commit hooks
 
 ### 2. Code Quality Standards
 - **TypeScript**: Strict mode enabled
@@ -105,7 +122,14 @@ git checkout develop
 git pull origin develop
 git checkout -b feature/my-feature
 # ... make changes ...
-npm run build  # VERIFY BUILD PASSES
+
+# MANDATORY QUALITY CHECKS (do NOT commit if any fail)
+npm run build     # Must pass
+npm run lint      # Must pass
+npm test          # Must pass (if tests exist)
+# If ANY check fails, notify user and STOP
+
+# Only proceed if all checks pass
 git add <files>
 git commit -m "feat: Description
 
@@ -113,9 +137,93 @@ Detailed explanation if needed
 
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 git push -u origin feature/my-feature
+
+# STOP HERE - Wait for user approval to merge
+# Only continue if user says "merge this"
 git checkout develop
 git merge feature/my-feature --no-ff -m "Merge feature: Description"
 git push origin develop
+```
+
+### 4. Quality Check Procedures
+
+**MANDATORY checks before EVERY commit**:
+
+#### Web Frontend
+```bash
+# 1. Build check (REQUIRED)
+npm run build
+# If fails: Fix errors, do NOT commit
+
+# 2. Lint check (REQUIRED)
+npm run lint
+# If fails: Run `npm run lint:fix` first, then check again
+# If still fails: Fix remaining errors manually, do NOT commit
+
+# 3. Type check (included in build, but can run separately)
+npx tsc --noEmit
+# If fails: Fix TypeScript errors, do NOT commit
+
+# 4. Tests (REQUIRED if tests exist)
+npm test
+# If fails: Fix failing tests, do NOT commit
+```
+
+#### Haystack (Python)
+```bash
+# 1. Syntax check
+python -m py_compile main.py
+# If fails: Fix syntax errors, do NOT commit
+
+# 2. Import check
+python -c "import main; import tools; import personas"
+# If fails: Fix import errors, do NOT commit
+
+# 3. Type hints (optional but recommended)
+mypy main.py
+# If fails: Consider fixing, but can commit with user approval
+```
+
+#### API (NestJS)
+```bash
+# 1. Build check (REQUIRED)
+npm run build
+# If fails: Fix errors, do NOT commit
+
+# 2. Lint check (REQUIRED)
+npm run lint
+# If fails: Fix errors, do NOT commit
+
+# 3. Tests (REQUIRED if tests exist)
+npm run test
+# If fails: Fix failing tests, do NOT commit
+```
+
+**If ANY required check fails**:
+1. **STOP immediately** - do not proceed with commit
+2. **Notify the user** with:
+   - Which check failed (build/lint/test)
+   - Full error output
+   - File(s) with errors
+   - Suggested fixes if obvious
+3. **Wait for user instruction** on how to proceed
+4. **NEVER commit failing code** without explicit user override
+
+**User notification format**:
+```
+❌ Quality check failed: [BUILD/LINT/TEST]
+
+Error details:
+[full error output]
+
+Files with errors:
+- path/to/file.ts:42
+- path/to/file2.tsx:156
+
+Suggested fix:
+[if obvious, provide suggestion]
+
+Waiting for your instruction before proceeding.
 ```
 
 ## Project-Specific Guidelines
