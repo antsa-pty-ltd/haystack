@@ -14,12 +14,24 @@ This rule applies to:
 - ✅ ANY code change, no matter how small
 
 **Workflow (MANDATORY)**:
-1. Create new branch from `develop`
-2. Make changes on that branch
-3. Commit to the branch
-4. Push the branch to origin
-5. Merge to `develop` (only after pushing the branch)
-6. Push `develop` to origin
+1. **Sync `develop` with `master` first** (in case someone pushed directly to master):
+   ```bash
+   git checkout develop
+   git pull origin develop
+   git pull origin master  # Ensure develop has all master's changes
+   ```
+2. Create new branch from `develop`
+3. Make changes on that branch
+4. **Run quality checks BEFORE committing**:
+   - Build: `npm run build` (web) or equivalent
+   - Lint: `npm run lint` or `eslint .`
+   - Tests: `npm test` (if applicable)
+   - **If ANY check fails, notify the user immediately - DO NOT commit**
+5. Commit to the branch (only if all checks pass)
+6. Push the branch to origin
+7. **STOP - Wait for user approval before merging**
+8. Only merge to `develop` if user explicitly approves
+9. Push `develop` to origin (only after user approval)
 
 **WRONG ❌**:
 ```bash
@@ -32,16 +44,37 @@ git push origin develop  # NEVER DO THIS
 
 **CORRECT ✅**:
 ```bash
+# Step 1: Sync develop with master first (in case of direct pushes to master)
 git checkout develop
 git pull origin develop
+git pull origin master  # Ensure develop has all master's changes
+
+# Step 2: Create new branch from develop
 git checkout -b feature/my-change
-# make changes
+
+# Step 3: Make changes
+# ... make changes ...
+
+# Step 4: Run quality checks BEFORE committing
+npm run build        # Must pass
+npm run lint         # Must pass
+npm test             # Must pass (if tests exist)
+# If ANY check fails, notify user and STOP
+
+# Step 5: Commit (only if all checks pass)
 git add .
 git commit -m "changes"
-git push -u origin feature/my-change  # Push branch first
+
+# Step 6: Push branch
+git push -u origin feature/my-change
+
+# Step 7: STOP HERE - Wait for user to say "merge this" or "looks good, merge it"
+# Only continue below if user explicitly approves:
+
+# Step 8-9: Merge and push (only after user approval)
 git checkout develop
 git merge feature/my-change --no-ff
-git push origin develop  # Now push develop
+git push origin develop
 ```
 
 If you find yourself about to push directly to `develop` or `master`, STOP and create a branch first.
@@ -65,11 +98,20 @@ ANTSA is a multi-platform clinical practice management system with:
   - Even for single-line fixes, documentation updates, or "quick changes"
   - The only exception is if the user explicitly tells you to push directly (rare)
 - **Branch naming**: `feature/description`, `bugfix/description`, `hotfix/description`, `docs/description`
-- **Branch-first workflow**: Always create and push the branch BEFORE merging to develop
+- **Branch-first workflow**: Always create and push the branch, then STOP
+- **⚠️ CRITICAL: Do NOT merge to develop without explicit user approval**
+  - After pushing the branch, wait for user to say "merge this" or "looks good"
+  - NEVER assume you should merge just because the branch is pushed
+  - The user needs to review and approve before merging
 - **Commit messages**: Use conventional commits format with "Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
-- **Merge strategy**: Use `--no-ff` for feature merges to preserve history
-- **Build verification**: ALWAYS run `npm run build` (web) or equivalent before committing
-- **Lint compliance**: Fix ALL lint errors - builds will fail in CI/CD otherwise
+- **Merge strategy**: Use `--no-ff` for feature merges to preserve history (after user approval)
+- **🚨 MANDATORY Quality Checks BEFORE Committing**:
+  - **Build**: Run `npm run build` (web) or equivalent - must pass
+  - **Lint**: Run `npm run lint` or `eslint .` - must pass with zero errors
+  - **Tests**: Run `npm test` - must pass (if tests exist)
+  - **If ANY check fails**: Notify the user immediately with the error details and STOP
+  - **DO NOT commit** code that fails any quality check
+  - **DO NOT use `--no-verify`** to skip pre-commit hooks
 
 ### 2. Code Quality Standards
 - **TypeScript**: Strict mode enabled
@@ -94,21 +136,120 @@ ANTSA is a multi-platform clinical practice management system with:
 ### 3. Git Commit Protocol
 ```bash
 # Standard workflow
+# Step 1: Sync develop with master first
 git checkout develop
 git pull origin develop
+git pull origin master  # Ensure develop has all master's changes
+
+# Step 2: Create branch
 git checkout -b feature/my-feature
+
+# Step 3: Make changes
 # ... make changes ...
-npm run build  # VERIFY BUILD PASSES
+
+# Step 4: MANDATORY QUALITY CHECKS (do NOT commit if any fail)
+npm run build     # Must pass
+npm run lint      # Must pass
+npm test          # Must pass (if tests exist)
+# If ANY check fails, notify user and STOP
+
+# Step 5: Only proceed if all checks pass
 git add <files>
 git commit -m "feat: Description
 
 Detailed explanation if needed
 
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+
+# Step 6: Push branch
 git push -u origin feature/my-feature
+
+# Step 7: STOP HERE - Wait for user approval to merge
+# Only continue if user says "merge this"
 git checkout develop
 git merge feature/my-feature --no-ff -m "Merge feature: Description"
 git push origin develop
+```
+
+### 4. Quality Check Procedures
+
+**MANDATORY checks before EVERY commit**:
+
+#### Web Frontend
+```bash
+# 1. Build check (REQUIRED)
+npm run build
+# If fails: Fix errors, do NOT commit
+
+# 2. Lint check (REQUIRED)
+npm run lint
+# If fails: Run `npm run lint:fix` first, then check again
+# If still fails: Fix remaining errors manually, do NOT commit
+
+# 3. Type check (included in build, but can run separately)
+npx tsc --noEmit
+# If fails: Fix TypeScript errors, do NOT commit
+
+# 4. Tests (REQUIRED if tests exist)
+npm test
+# If fails: Fix failing tests, do NOT commit
+```
+
+#### Haystack (Python)
+```bash
+# 1. Syntax check
+python -m py_compile main.py
+# If fails: Fix syntax errors, do NOT commit
+
+# 2. Import check
+python -c "import main; import tools; import personas"
+# If fails: Fix import errors, do NOT commit
+
+# 3. Type hints (optional but recommended)
+mypy main.py
+# If fails: Consider fixing, but can commit with user approval
+```
+
+#### API (NestJS)
+```bash
+# 1. Build check (REQUIRED)
+npm run build
+# If fails: Fix errors, do NOT commit
+
+# 2. Lint check (REQUIRED)
+npm run lint
+# If fails: Fix errors, do NOT commit
+
+# 3. Tests (REQUIRED if tests exist)
+npm run test
+# If fails: Fix failing tests, do NOT commit
+```
+
+**If ANY required check fails**:
+1. **STOP immediately** - do not proceed with commit
+2. **Notify the user** with:
+   - Which check failed (build/lint/test)
+   - Full error output
+   - File(s) with errors
+   - Suggested fixes if obvious
+3. **Wait for user instruction** on how to proceed
+4. **NEVER commit failing code** without explicit user override
+
+**User notification format**:
+```
+❌ Quality check failed: [BUILD/LINT/TEST]
+
+Error details:
+[full error output]
+
+Files with errors:
+- path/to/file.ts:42
+- path/to/file2.tsx:156
+
+Suggested fix:
+[if obvious, provide suggestion]
+
+Waiting for your instruction before proceeding.
 ```
 
 ## Project-Specific Guidelines
@@ -474,12 +615,14 @@ python main.py       # Start server (port 8000)
 # Git Workflow
 git checkout develop
 git pull origin develop
+git pull origin master  # Sync develop with master first
 git checkout -b feature/my-feature
 # ... changes ...
 npm run build  # ALWAYS verify build
 git add .
 git commit -m "feat: Description\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 git push -u origin feature/my-feature
+# STOP - Wait for user approval
 git checkout develop
 git merge feature/my-feature --no-ff
 git push origin develop
