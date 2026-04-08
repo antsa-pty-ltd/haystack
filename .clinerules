@@ -1,5 +1,53 @@
 # Claude Code Instructions for ANTSA Project
 
+## ⚠️ CRITICAL BRANCHING RULE ⚠️
+
+**🚨 NEVER COMMIT OR PUSH DIRECTLY TO `develop` OR `master` BRANCHES 🚨**
+
+**EVERY CHANGE MUST BE ON A NEW BRANCH** unless the user explicitly instructs otherwise.
+
+This rule applies to:
+- ✅ Bug fixes → Create `bugfix/description` branch
+- ✅ New features → Create `feature/description` branch
+- ✅ Hotfixes → Create `hotfix/description` branch
+- ✅ Documentation → Create `docs/description` branch
+- ✅ ANY code change, no matter how small
+
+**Workflow (MANDATORY)**:
+1. Create new branch from `develop`
+2. Make changes on that branch
+3. Commit to the branch
+4. Push the branch to origin
+5. Merge to `develop` (only after pushing the branch)
+6. Push `develop` to origin
+
+**WRONG ❌**:
+```bash
+git checkout develop
+# make changes
+git add .
+git commit -m "changes"
+git push origin develop  # NEVER DO THIS
+```
+
+**CORRECT ✅**:
+```bash
+git checkout develop
+git pull origin develop
+git checkout -b feature/my-change
+# make changes
+git add .
+git commit -m "changes"
+git push -u origin feature/my-change  # Push branch first
+git checkout develop
+git merge feature/my-change --no-ff
+git push origin develop  # Now push develop
+```
+
+If you find yourself about to push directly to `develop` or `master`, STOP and create a branch first.
+
+---
+
 ## Project Overview
 
 ANTSA is a multi-platform clinical practice management system with:
@@ -13,8 +61,11 @@ ANTSA is a multi-platform clinical practice management system with:
 ## Core Principles
 
 ### 1. Development Workflow
-- **ALWAYS use feature/bugfix branches** - never commit directly to develop or master
-- **Branch naming**: `feature/description`, `bugfix/description`, `hotfix/description`
+- **🚨 MANDATORY: Create a new branch for EVERY change** - NEVER push directly to `develop` or `master`
+  - Even for single-line fixes, documentation updates, or "quick changes"
+  - The only exception is if the user explicitly tells you to push directly (rare)
+- **Branch naming**: `feature/description`, `bugfix/description`, `hotfix/description`, `docs/description`
+- **Branch-first workflow**: Always create and push the branch BEFORE merging to develop
 - **Commit messages**: Use conventional commits format with "Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 - **Merge strategy**: Use `--no-ff` for feature merges to preserve history
 - **Build verification**: ALWAYS run `npm run build` (web) or equivalent before committing
