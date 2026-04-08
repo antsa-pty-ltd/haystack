@@ -1,0 +1,439 @@
+# Claude Code Instructions for ANTSA Project
+
+## Project Overview
+
+ANTSA is a multi-platform clinical practice management system with:
+- **Web**: React/TypeScript frontend (main practitioner interface)
+- **API**: Node.js/TypeScript backend (NestJS)
+- **Haystack**: Python FastAPI AI service (jAImee assistant)
+- **Mobile**: React Native app (client-facing)
+- **Admin**: Admin dashboard
+- **Jitsi**: Self-hosted video conferencing
+
+## Core Principles
+
+### 1. Development Workflow
+- **ALWAYS use feature/bugfix branches** - never commit directly to develop or master
+- **Branch naming**: `feature/description`, `bugfix/description`, `hotfix/description`
+- **Commit messages**: Use conventional commits format with "Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+- **Merge strategy**: Use `--no-ff` for feature merges to preserve history
+- **Build verification**: ALWAYS run `npm run build` (web) or equivalent before committing
+- **Lint compliance**: Fix ALL lint errors - builds will fail in CI/CD otherwise
+
+### 2. Code Quality Standards
+- **TypeScript**: Strict mode enabled
+  - NO `any` types - use `unknown` and type guards
+  - Proper interfaces for all data structures
+  - Exhaustive dependency arrays in React hooks
+- **React Best Practices**:
+  - Use functional components with hooks
+  - Wrap expensive functions in `useCallback`
+  - Memoize complex components with `React.memo`
+  - NEVER call hooks conditionally or in loops
+- **Error Handling**:
+  - Handle all async errors
+  - Provide user feedback via toasts
+  - Log errors for debugging
+- **Security**:
+  - NO hardcoded secrets/tokens
+  - Validate all user input
+  - Prevent XSS, SQL injection, command injection
+  - Use parameterized queries
+
+### 3. Git Commit Protocol
+```bash
+# Standard workflow
+git checkout develop
+git pull origin develop
+git checkout -b feature/my-feature
+# ... make changes ...
+npm run build  # VERIFY BUILD PASSES
+git add <files>
+git commit -m "feat: Description
+
+Detailed explanation if needed
+
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+git push -u origin feature/my-feature
+git checkout develop
+git merge feature/my-feature --no-ff -m "Merge feature: Description"
+git push origin develop
+```
+
+## Project-Specific Guidelines
+
+### Web Frontend (`/web`)
+
+**Tech Stack**: React 18, TypeScript, Vite, TailwindCSS, shadcn/ui, Socket.IO
+
+**Key Files**:
+- `src/services/ai-ui-integration.ts` - AI chatbot integration (page context, capabilities)
+- `src/components/ai-assistant/AIAssistantSidebar.tsx` - Main AI assistant UI
+- `src/services/haystack-service.ts` - Haystack AI service client
+- `src/pages/live-transcribe/` - Live transcription with document generation
+
+**Important Patterns**:
+1. **UI State Management**: Use `ai-ui-integration.ts` singleton for AI context
+2. **Real-time Updates**: Socket.IO for streaming (transcription, AI responses)
+3. **File References**: Always use markdown link syntax `[file.ts](path/to/file.ts)` for clickable links
+4. **Responsive Design**: Mobile-first, check `isMobile` state for conditional rendering
+5. **Accessibility**: ARIA labels, keyboard navigation, screen reader support
+
+**Build Commands**:
+```bash
+npm run build          # Production build (runs tsc, vite build, service worker build)
+npm run lint           # ESLint check
+npm run lint:fix       # Auto-fix lint errors
+npm test               # Run Vitest tests
+```
+
+**Common Lint Errors**:
+- `@typescript-eslint/no-explicit-any` → Use `unknown` instead
+- `react-hooks/exhaustive-deps` → Add all dependencies to useEffect/useCallback
+- Unused variables → Remove or prefix with `_`
+
+### Backend API (`/api`)
+
+**Tech Stack**: NestJS, TypeScript, PostgreSQL, Redis, Socket.IO, Azure Storage
+
+**Key Files**:
+- `src/modules/transcription/` - Audio transcription service (AssemblyAI)
+- `src/modules/haystack/` - Haystack AI integration
+- `src/modules/auth/` - JWT authentication
+- `env.au.example` - Environment variables template (Australia)
+
+**Environment Management**:
+- `env.au.example` - Australia configuration
+- `env.us.example` - US configuration
+- NEVER commit actual `.env` files
+- Use Azure Key Vault for production secrets
+
+**Important Services**:
+- Transcription: AssemblyAI integration with real-time streaming
+- AI Integration: Haystack service for jAImee assistant
+- File Storage: Azure Blob Storage (migrating from S3)
+- Video: Jitsi JWT token generation
+
+### Haystack AI Service (`/haystack`)
+
+**Tech Stack**: Python 3.11, FastAPI, LangChain, OpenAI, Redis, Socket.IO
+
+**Key Files**:
+- `main.py` - FastAPI app, WebSocket handlers, system prompt building
+- `tools.py` - AI tool definitions and implementations
+- `personas.py` - AI persona configurations
+- `ui_state_manager.py` - Redis-backed UI state storage
+- `haystack_pipeline.py` - LangChain pipeline configuration
+
+**Deployment**:
+- **Staging**: `develop` branch → `antsa-haystack-au-staging.azurewebsites.net`
+- **Production**: `master` branch → `antsa-haystack-au-production.azurewebsites.net`
+- **GitHub Actions**: `.github/workflows/deploy-haystack-au.yml`
+- **Startup**: `startup.sh` (installed deps + runs `main.py`)
+
+**Key Concepts**:
+1. **UI State Injection**: Frontend sends page context via WebSocket → stored in Redis → injected into AI system prompt
+2. **Tool Calling**: AI can call backend tools (search_clients, get_client_summary, etc.)
+3. **Persona System**: Different AI personalities (web_assistant, jaimee_therapist)
+4. **Streaming Responses**: Real-time token-by-token AI responses via WebSocket
+
+**Debug Logging**:
+Always add comprehensive logging for AI features:
+```python
+logger.info(f"🔍 Retrieved UI state for {session_id}: page_type={ui_state.get('page_type')}")
+logger.warning(f"⚠️ No UI state provided")
+```
+
+## Common Tasks
+
+### Adding a New AI Tool (Haystack)
+
+1. **Define tool in `tools.py`**:
+```python
+"my_tool": {
+    "definition": {
+        "type": "function",
+        "function": {
+            "name": "my_tool",
+            "description": "What this tool does",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "param1": {"type": "string", "description": "Param description"}
+                },
+                "required": ["param1"]
+            }
+        }
+    },
+    "implementation": self._my_tool_impl
+}
+```
+
+2. **Add to persona tool list** (e.g., `web_assistant`):
+```python
+if persona_type == "web_assistant":
+    return [
+        # ... existing tools
+        self.tools["my_tool"]["definition"],
+    ]
+```
+
+3. **Add implementation** to function registry:
+```python
+if persona_type == "web_assistant":
+    return {
+        # ... existing implementations
+        "my_tool": self.tools["my_tool"]["implementation"],
+    }
+```
+
+### Adding Page Context Detection (Web)
+
+1. **Update `ai-ui-integration.ts`**:
+   - Add page type to `getPageType()` method
+   - Add capabilities to `getAvailableCapabilities()`
+   - Add content extraction to `getFullPageContent()`
+
+2. **Update `main.py`** (Haystack):
+   - Add page name mapping to `_get_human_readable_page_name()`
+   - Update `_build_page_context_from_ui_state()` if needed
+
+### Fixing TypeScript Build Errors
+
+1. **Run build first**: `npm run build` in `/web`
+2. **Common fixes**:
+   - `any` types → `unknown`
+   - Missing hook deps → Add to dependency array
+   - Unused vars → Remove or prefix with `_`
+   - Variable used before declaration → Move declaration before usage
+3. **Verify**: Run `npm run build` again until clean
+4. **Commit**: Only commit when build passes
+
+### Cherry-Picking Commits
+
+When features were committed to wrong branch:
+```bash
+# On target branch
+git checkout develop
+git cherry-pick <commit-hash>
+# If conflicts, resolve and:
+git cherry-pick --continue
+```
+
+## Testing Requirements
+
+### Web Frontend
+- **Unit Tests**: Vitest for components
+- **Test Files**: `*.test.tsx` next to components
+- **Run Tests**: `npm test`
+- **Coverage**: Aim for >80% on critical paths
+
+### Backend API
+- **Unit Tests**: Jest for services
+- **E2E Tests**: Supertest for API endpoints
+- **Run Tests**: `npm run test`
+
+### Haystack
+- **Currently**: Manual testing in staging
+- **Future**: Add pytest suite
+
+## AI Chatbot (jAImee) Architecture
+
+### Frontend → Backend Flow
+
+1. **User sends message** → `AIAssistantSidebar.tsx`
+2. **Page context collected** → `ai-ui-integration.ts` (page_type, page_summary, capabilities)
+3. **Sent via WebSocket** → `haystack-service.ts`
+4. **Received by Haystack** → `main.py` WebSocket handler
+5. **UI state stored** → `ui_state_manager.py` (Redis)
+6. **System prompt built** → `get_enhanced_system_prompt()` (injects UI context)
+7. **AI processes** → LangChain pipeline with tools
+8. **Response streamed back** → WebSocket → Frontend updates in real-time
+
+### Page Content Extraction
+
+**Lightweight (always sent)**:
+- Page summary: stats count, table count, element counts (~50-150 tokens)
+- Sent with every message
+
+**Full extraction (on-demand)**:
+- Dashboard: Extract stat values
+- Client details: Extract client name, active tab, tab content
+- Clients list: Extract visible client names
+- Generic: Extract main content text (~500-1500 tokens)
+- Only sent when user asks "What do you see?"
+
+### Trigger Detection
+
+Smart detection of when user is asking about page content:
+```typescript
+// In AIAssistantSidebar.tsx
+const triggerPhrases = [
+  /what (do you see|can you see|is (on|visible))/i,
+  /describe (this|the) page/i,
+  /what (am i looking at|page is this)/i,
+  // ... more patterns
+];
+```
+
+## Deployment
+
+### Web Frontend
+- **Staging**: Azure Static Web Apps (develop branch)
+- **Production**: Azure Static Web Apps (master branch)
+- **Build**: GitHub Actions (`.github/workflows/`)
+- **Preview**: PR previews auto-generated
+
+### API Backend
+- **Staging**: Azure Web App (develop branch)
+- **Production**: Azure Web App (master branch)
+- **Environment**: Load from Azure Key Vault
+- **Database**: PostgreSQL on Azure
+
+### Haystack AI Service
+- **Staging**: `antsa-haystack-au-staging.azurewebsites.net` (develop)
+- **Production**: `antsa-haystack-au-production.azurewebsites.net` (master)
+- **Deployment**: GitHub Actions auto-deploy on push
+- **Logs**: Azure Portal → Web App → Log stream
+
+## Troubleshooting
+
+### Build Fails with TypeScript Errors
+1. Read error carefully - TS errors are usually clear
+2. Check if variable is used before declaration → Move it
+3. Check for `any` types → Replace with `unknown` or proper type
+4. Check hook dependencies → Add missing deps
+5. Run `npm run lint:fix` to auto-fix simple issues
+
+### AI Chatbot Says "I Don't Have Enough Context"
+1. Check browser console for `[AI UI] Sending UI state:` logs
+2. Check Haystack logs for `🔍 Retrieved UI state` logs
+3. Verify UI state has `page_type`, `page_summary`, or `page_content`
+4. Check `get_enhanced_system_prompt()` is receiving and using UI state
+5. Add debug logging if needed
+
+### WebSocket Connection Issues
+1. Check Socket.IO client is connecting: Browser console → Network → WS tab
+2. Check Haystack service is running: Visit health endpoint
+3. Verify CORS settings allow WebSocket connections
+4. Check Redis is accessible (UI state storage)
+
+### Tests Failing
+1. Read error message carefully
+2. Check mocks are set up correctly
+3. Verify test data matches expected format
+4. Run single test: `npm test -- -t "test name"`
+5. Check for async issues (missing `await`)
+
+## File Organization
+
+### Web Frontend
+```
+src/
+├── components/          # Reusable components
+│   ├── ai-assistant/   # AI chatbot components
+│   ├── ui/             # shadcn/ui components
+│   └── ...
+├── pages/              # Route pages
+│   ├── chat/          # Standalone chat page
+│   ├── live-transcribe/ # Live transcription
+│   └── ...
+├── services/           # API clients and services
+│   ├── ai-ui-integration.ts    # AI context management
+│   ├── haystack-service.ts     # Haystack client
+│   └── gpt-service.ts          # OpenAI direct client
+├── hooks/              # Custom React hooks
+├── stores/             # Redux stores (legacy, migrating to hooks)
+└── configs/            # Configuration files
+```
+
+### Haystack Service
+```
+haystack/
+├── main.py                 # FastAPI app, WebSocket handlers
+├── tools.py               # AI tool definitions
+├── personas.py            # AI persona configurations
+├── ui_state_manager.py    # Redis UI state storage
+├── haystack_pipeline.py   # LangChain pipeline
+├── session_manager.py     # Session management
+├── requirements.txt       # Python dependencies
+└── startup.sh            # Azure startup script
+```
+
+## Important Notes
+
+### Security
+- NEVER commit secrets or API keys
+- Use environment variables for all config
+- Validate all user input on backend
+- Use parameterized queries for database
+- Implement rate limiting for AI endpoints
+- Sanitize all AI responses before displaying
+
+### Performance
+- Lazy load heavy components
+- Use React.memo for expensive renders
+- Debounce user input (especially for AI)
+- Use WebSocket for real-time features (not polling)
+- Cache AI responses where appropriate
+- Minimize page content extraction token usage
+
+### User Experience
+- Always provide loading states
+- Show error messages that help users
+- Make all interactive elements keyboard accessible
+- Test on mobile devices
+- Provide visual feedback for all actions
+- Stream AI responses for better perceived performance
+
+## Key Contacts & Resources
+
+- **GitHub Org**: antsa-pty-ltd
+- **Azure Portal**: ANTSA subscription
+- **OpenAI API**: Used by Haystack for jAImee
+- **AssemblyAI**: Used by API for transcription
+- **Documentation**: `/local-docs` folder
+
+## Quick Reference Commands
+
+```bash
+# Web Development
+cd web
+npm install
+npm run dev          # Start dev server
+npm run build        # Production build
+npm run lint         # Check lint
+npm run lint:fix     # Fix lint errors
+npm test             # Run tests
+
+# API Development
+cd api
+npm install
+npm run start:dev    # Start dev server
+npm run build        # Production build
+npm run test         # Run tests
+
+# Haystack Development
+cd haystack
+python -m venv venv
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
+pip install -r requirements.txt
+python main.py       # Start server (port 8000)
+
+# Git Workflow
+git checkout develop
+git pull origin develop
+git checkout -b feature/my-feature
+# ... changes ...
+npm run build  # ALWAYS verify build
+git add .
+git commit -m "feat: Description\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+git push -u origin feature/my-feature
+git checkout develop
+git merge feature/my-feature --no-ff
+git push origin develop
+```
+
+---
+
+**Remember**: When in doubt, ask the user for clarification. It's better to ask than to make incorrect assumptions about requirements or architecture.
