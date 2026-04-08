@@ -14,18 +14,24 @@ This rule applies to:
 - ✅ ANY code change, no matter how small
 
 **Workflow (MANDATORY)**:
-1. Create new branch from `develop`
-2. Make changes on that branch
-3. **Run quality checks BEFORE committing**:
+1. **Sync `develop` with `master` first** (in case someone pushed directly to master):
+   ```bash
+   git checkout develop
+   git pull origin develop
+   git pull origin master  # Ensure develop has all master's changes
+   ```
+2. Create new branch from `develop`
+3. Make changes on that branch
+4. **Run quality checks BEFORE committing**:
    - Build: `npm run build` (web) or equivalent
    - Lint: `npm run lint` or `eslint .`
    - Tests: `npm test` (if applicable)
    - **If ANY check fails, notify the user immediately - DO NOT commit**
-4. Commit to the branch (only if all checks pass)
-5. Push the branch to origin
-6. **STOP - Wait for user approval before merging**
-7. Only merge to `develop` if user explicitly approves
-8. Push `develop` to origin (only after user approval)
+5. Commit to the branch (only if all checks pass)
+6. Push the branch to origin
+7. **STOP - Wait for user approval before merging**
+8. Only merge to `develop` if user explicitly approves
+9. Push `develop` to origin (only after user approval)
 
 **WRONG ❌**:
 ```bash
@@ -38,22 +44,34 @@ git push origin develop  # NEVER DO THIS
 
 **CORRECT ✅**:
 ```bash
+# Step 1: Sync develop with master first (in case of direct pushes to master)
 git checkout develop
 git pull origin develop
-git checkout -b feature/my-change
-# make changes
+git pull origin master  # Ensure develop has all master's changes
 
-# Run quality checks BEFORE committing
+# Step 2: Create new branch from develop
+git checkout -b feature/my-change
+
+# Step 3: Make changes
+# ... make changes ...
+
+# Step 4: Run quality checks BEFORE committing
 npm run build        # Must pass
 npm run lint         # Must pass
 npm test             # Must pass (if tests exist)
 # If ANY check fails, notify user and STOP
 
+# Step 5: Commit (only if all checks pass)
 git add .
 git commit -m "changes"
+
+# Step 6: Push branch
 git push -u origin feature/my-change
-# STOP HERE - Wait for user to say "merge this" or "looks good, merge it"
+
+# Step 7: STOP HERE - Wait for user to say "merge this" or "looks good, merge it"
 # Only continue below if user explicitly approves:
+
+# Step 8-9: Merge and push (only after user approval)
 git checkout develop
 git merge feature/my-change --no-ff
 git push origin develop
@@ -118,27 +136,35 @@ ANTSA is a multi-platform clinical practice management system with:
 ### 3. Git Commit Protocol
 ```bash
 # Standard workflow
+# Step 1: Sync develop with master first
 git checkout develop
 git pull origin develop
+git pull origin master  # Ensure develop has all master's changes
+
+# Step 2: Create branch
 git checkout -b feature/my-feature
+
+# Step 3: Make changes
 # ... make changes ...
 
-# MANDATORY QUALITY CHECKS (do NOT commit if any fail)
+# Step 4: MANDATORY QUALITY CHECKS (do NOT commit if any fail)
 npm run build     # Must pass
 npm run lint      # Must pass
 npm test          # Must pass (if tests exist)
 # If ANY check fails, notify user and STOP
 
-# Only proceed if all checks pass
+# Step 5: Only proceed if all checks pass
 git add <files>
 git commit -m "feat: Description
 
 Detailed explanation if needed
 
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+
+# Step 6: Push branch
 git push -u origin feature/my-feature
 
-# STOP HERE - Wait for user approval to merge
+# Step 7: STOP HERE - Wait for user approval to merge
 # Only continue if user says "merge this"
 git checkout develop
 git merge feature/my-feature --no-ff -m "Merge feature: Description"
@@ -589,12 +615,14 @@ python main.py       # Start server (port 8000)
 # Git Workflow
 git checkout develop
 git pull origin develop
+git pull origin master  # Sync develop with master first
 git checkout -b feature/my-feature
 # ... changes ...
 npm run build  # ALWAYS verify build
 git add .
 git commit -m "feat: Description\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 git push -u origin feature/my-feature
+# STOP - Wait for user approval
 git checkout develop
 git merge feature/my-feature --no-ff
 git push origin develop
