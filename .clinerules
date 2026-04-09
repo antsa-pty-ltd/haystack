@@ -613,6 +613,16 @@ export class AddUserPreferences1234567890 implements MigrationInterface {
 - Update monitoring/alerts
 - Update .clinerules if process failed
 
+### 16. Tool Usage and User Experience
+
+**Minimise confirmation popups**:
+- For **read-only operations** (searching code, reading files, checking git status/log), use dedicated tools (Grep, Read, Glob) instead of Bash commands or Agent subagents
+- Only use Bash when actually needed for commands that require shell execution (git operations, builds, deployments, etc.)
+- Only use Agent/Explore subagents when the search is genuinely complex and multi-step — prefer direct Grep/Read/Glob for simple lookups
+- Never spawn an agent just to run a single git command or read a single file
+
+**Rationale**: Bash commands and Agent calls may trigger user confirmation popups. Read-only dedicated tools do not, providing a smoother workflow.
+
 ## Project-Specific Guidelines
 
 ### Web Frontend (`/web`)
