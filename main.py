@@ -1050,12 +1050,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await send_streaming_response(websocket, session_id, 
                     "I encountered an error processing your request. Please try again.")
             
-            await websocket.send_text(json.dumps({
-                "type": "typing",
-                "typing": False,
-                "session_id": session_id
-            }))
-            
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "typing",
+                    "typing": False,
+                    "session_id": session_id
+                }))
+            except Exception:
+                pass  # Socket already closed
+
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")
         if session_id in websocket_connections:
@@ -1263,8 +1266,10 @@ if __name__ == "__main__":
     logger.info(f"Tools available: {bool(tool_manager)}")
     
     uvicorn.run(
-        app, 
-        host=host, 
+        app,
+        host=host,
         port=port,
-        log_level="info"
+        log_level="info",
+        ws_ping_interval=20,
+        ws_ping_timeout=60,
     )
