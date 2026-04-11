@@ -25,6 +25,7 @@ from session_manager import session_manager
 from agents.document_agent import initialize_agent, get_document_agent
 from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
+from config import settings
 
 # Load environment variables
 load_dotenv()
@@ -41,8 +42,6 @@ if not openai_api_key:
 # Create OpenAI client
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
 
-# API configuration for logging violations
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
 
 # Simple tool loading (graceful fallback)
 def load_templates_safely():
@@ -203,6 +202,7 @@ class DictatedNote(BaseModel):
 class GenerateDocumentRequest(BaseModel):
     template: Dict[str, Any]
     sessionIds: List[str]
+    sessionData: Optional[List[Dict[str, Any]]] = None  # Full session transcript data (segments, raw text, etc.)
     dictatedNotes: Optional[List[DictatedNote]] = None  # Practitioner notes to include in generation
     clientInfo: Dict[str, Any]
     practitionerInfo: Dict[str, Any]
@@ -236,10 +236,22 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         persona_enum = PersonaType(persona_type)
     except ValueError:
         persona_enum = PersonaType.WEB_ASSISTANT
-    
+
     # Get base system prompt from personas.py
     base_prompt = persona_manager.get_system_prompt(persona_enum)
-    
+
+    # Debug: Log if UI state is missing
+    if not ui_state:
+        logger.warning(f"⚠️ No UI state provided to get_enhanced_system_prompt for persona {persona_type}")
+        return base_prompt
+
+    # Debug: Log UI state details
+    page_type = ui_state.get('page_type', 'unknown')
+    page_url = ui_state.get('page_url', '')
+    has_page_summary = 'page_summary' in ui_state
+    has_page_content = 'page_content' in ui_state
+    logger.info(f"🔍 Building system prompt with UI state: page_type={page_type}, page_url={page_url}, has_page_summary={has_page_summary}, has_page_content={has_page_content}")
+
     # Add UI-specific context enhancements
     if ui_state:
         derived_context = _build_page_context_from_ui_state(ui_state)
@@ -279,7 +291,20 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         if active_document and active_document.get('document'):
             doc = active_document['document']
             base_prompt += f"\n\n📄 ACTIVE DOCUMENT: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId')})"
-    
+
+        # Add page content extraction data
+        page_content = ui_state.get('page_content')
+        page_summary = ui_state.get('page_summary')
+        content_type = ui_state.get('content_type', 'summary')
+
+        # Debug: Log page content data
+        logger.info(f"📄 Page content data: page_content={'present' if page_content else 'None'}, content_type={content_type}, page_summary={'present' if page_summary else 'None'}")
+
+        if page_content and content_type == 'full':
+            base_prompt += f"\n\n👁️ PAGE CONTENT (Full Extraction):\n{json.dumps(page_content, indent=2)}"
+        elif page_summary:
+            base_prompt += f"\n\n👁️ PAGE SUMMARY:\n{json.dumps(page_summary, indent=2)}"
+
     return base_prompt
 
 
@@ -618,7 +643,7 @@ async def log_violation_to_api(
             }
             
             response = await client.post(
-                f"{API_BASE_URL}/admin/policy-violations",
+                f"{settings.nestjs_api_url}/api/v1/admin/policy-violations",
                 json=payload,
                 headers={"Content-Type": "application/json"}
             )
@@ -1087,13 +1112,16 @@ async def handle_template_request(message: str, session_id: str) -> str:
 
 async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str, message_data: Dict[str, Any]):
     """Handle regular OpenAI chat with streaming"""
-    
+
     try:
         # Get session info
         sess = await session_manager.get_session(session_id)
         persona_type = (sess.persona_type if sess else "web_assistant")
         ui_state = await ui_state_manager.get_state(session_id)
-        
+
+        # Debug: Log retrieved UI state
+        logger.info(f"🔍 Retrieved UI state for {session_id}: page_type={ui_state.get('page_type') if ui_state else None}, keys={list(ui_state.keys()) if ui_state else 'None'}")
+
         system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
         
         # Add context from message_data

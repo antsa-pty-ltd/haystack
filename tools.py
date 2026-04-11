@@ -1258,8 +1258,9 @@ class ToolManager:
         if persona_type == "web_assistant":
             return [
                 self.tools["get_client_summary"]["definition"],
-                self.tools["search_clients"]["definition"], 
+                self.tools["search_clients"]["definition"],
                 self.tools["search_specific_clients"]["definition"],
+                self.tools["get_client_base"]["definition"],
                 self.tools["get_client_homework_status"]["definition"],
                 self.tools["get_homework_result_detail"]["definition"],
                 self.tools["get_homework_results_by_assignment"]["definition"],
@@ -1317,6 +1318,7 @@ class ToolManager:
                 "get_client_summary": self.tools["get_client_summary"]["implementation"],
                 "search_clients": self.tools["search_clients"]["implementation"],
                 "search_specific_clients": self.tools["search_specific_clients"]["implementation"],
+                "get_client_base": self.tools["get_client_base"]["implementation"],
                 "get_client_homework_status": self.tools["get_client_homework_status"]["implementation"],
                 "get_clinic_profile": self.tools["get_clinic_profile"]["implementation"],
                 "list_practitioners": self.tools["list_practitioners"]["implementation"],
