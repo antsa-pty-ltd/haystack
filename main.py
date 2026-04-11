@@ -25,6 +25,7 @@ from session_manager import session_manager
 from agents.document_agent import initialize_agent, get_document_agent
 from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
+from config import settings
 
 # Load environment variables
 load_dotenv()
@@ -41,8 +42,6 @@ if not openai_api_key:
 # Create OpenAI client
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
 
-# API configuration for logging violations
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
 
 # Simple tool loading (graceful fallback)
 def load_templates_safely():
@@ -644,7 +643,7 @@ async def log_violation_to_api(
             }
             
             response = await client.post(
-                f"{API_BASE_URL}/admin/policy-violations",
+                f"{settings.nestjs_api_url}/api/v1/admin/policy-violations",
                 json=payload,
                 headers={"Content-Type": "application/json"}
             )
