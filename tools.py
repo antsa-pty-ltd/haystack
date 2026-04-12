@@ -325,7 +325,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_conversations",
-                        "description": "Get all conversation threads (homework assignments) for a client. Use when the user asks to see all chats/threads with Jaimee.",
+                        "description": "Get all conversation threads (homework assignments) for a client. Use when the user asks to see all chats/threads with ANTSAbot.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -347,7 +347,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_conversation_messages",
-                        "description": "Get messages from a specific conversation thread with Jaimee (requires assignment_id). Use after listing conversations if the user wants a particular thread.",
+                        "description": "Get messages from a specific conversation thread with ANTSAbot (requires assignment_id). Use after listing conversations if the user wants a particular thread.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -384,7 +384,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_latest_conversation",
-                        "description": "Get the latest conversation between a client and Jaimee AI assistant (recent chat/messages). Use for queries like 'latest chat', 'recent messages', 'what did they talk about'.",
+                        "description": "Get the latest conversation between a client and ANTSAbot AI assistant (recent chat/messages). Use for queries like 'latest chat', 'recent messages', 'what did they talk about'.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -1242,7 +1242,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_user_profile",
-                        "description": "Get the current authenticated user's profile information (name, age, gender, occupation, etc.) for personalized conversation. This tool is exclusive to jAImee and provides quick access to user details during conversation.",
+                        "description": "Get the current authenticated user's profile information (name, age, gender, occupation, etc.) for personalized conversation. This tool is exclusive to ANTSAbot and provides quick access to user details during conversation.",
                         "parameters": {
                             "type": "object",
                             "properties": {}
@@ -3199,20 +3199,20 @@ Please refine the following document according to these instructions:
         }
 
     async def _get_client_mood_profile(self, **kwargs) -> Dict[str, Any]:
-        """Get comprehensive client mood and profile information for jAImee's personalized support"""
+        """Get comprehensive client mood and profile information for ANTSAbot's personalized support"""
         # Extract parameters with defaults
         include_mood_history = kwargs.get('include_mood_history', True)
         include_profile_details = kwargs.get('include_profile_details', True)
         
         try:
-            logger.info(f"🌟 jAImee accessing current user's mood and profile data (authenticated context)")
+            logger.info(f"🌟 ANTSAbot accessing current user's mood and profile data (authenticated context)")
             
             # Check authentication first
             if not self.auth_token:
-                logger.warning(f"⚠️ jAImee mood profile tool called without authentication token")
+                logger.warning(f"⚠️ ANTSAbot mood profile tool called without authentication token")
                 return {
                     "timestamp": datetime.now().isoformat(),
-                    "data_source": "jAImee Therapeutic Tool",
+                    "data_source": "ANTSAbot Therapeutic Tool",
                     "context_note": "Authentication required but not available",
                     "error": "No authentication token available for API requests",
                     "mood_data": {"error": "Authentication required"},
@@ -3226,7 +3226,7 @@ Please refine the following document according to these instructions:
             
             result = {
                 "timestamp": datetime.now().isoformat(),
-                "data_source": "jAImee Therapeutic Tool",
+                "data_source": "ANTSAbot Therapeutic Tool",
                 "context_note": "Using authenticated user context"
             }
             
@@ -3314,14 +3314,14 @@ Please refine the following document according to these instructions:
                     logger.warning(f"Could not fetch profile data: {e}")
                     result["profile"] = {"error": f"Profile data unavailable: {str(e)}"}
             
-            # Add therapeutic insights for jAImee
+            # Add therapeutic insights for ANTSAbot
             result["therapeutic_insights"] = self._generate_therapeutic_insights(result)
             
-            logger.info(f"✅ Successfully retrieved user mood and profile data for jAImee")
+            logger.info(f"✅ Successfully retrieved user mood and profile data for ANTSAbot")
             return result
             
         except Exception as e:
-            logger.error(f"Error in jAImee's client mood profile tool: {e}")
+            logger.error(f"Error in ANTSAbot's client mood profile tool: {e}")
             return {
                 "error": f"Failed to retrieve client data: {str(e)}",
                 "status": "error",
@@ -3460,7 +3460,7 @@ Please refine the following document according to these instructions:
             return f"Could not analyze mood data: {str(e)}"
     
     def _generate_therapeutic_insights(self, client_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate therapeutic insights for jAImee based on client data"""
+        """Generate therapeutic insights for ANTSAbot based on client data"""
         insights = {
             "personalization_notes": [],
             "therapeutic_focus_areas": [],
@@ -3538,13 +3538,13 @@ Please refine the following document according to these instructions:
         return insights
 
     async def _get_user_profile(self) -> Dict[str, Any]:
-        """Get lightweight user profile information for jAImee's reference during conversation"""
+        """Get lightweight user profile information for ANTSAbot's reference during conversation"""
         try:
-            logger.info(f"🌟 jAImee accessing user profile information")
+            logger.info(f"🌟 ANTSAbot accessing user profile information")
             
             result = {
                 "timestamp": datetime.now().isoformat(),
-                "data_source": "jAImee Profile Tool"
+                "data_source": "ANTSAbot Profile Tool"
             }
             
             # Get user profile information from account/me endpoint
@@ -3593,7 +3593,7 @@ Please refine the following document according to these instructions:
                             "email": account_response.get('email')
                         }
                         
-                        # Create a friendly summary for jAImee
+                        # Create a friendly summary for ANTSAbot
                         name = result["profile"].get("name", "the user")
                         age = result["profile"].get("age")
                         gender = result["profile"].get("gender")
@@ -3622,11 +3622,11 @@ Please refine the following document according to these instructions:
                 result["profile"] = {"error": f"Profile data unavailable: {str(e)}"}
                 result["summary"] = "Profile information temporarily unavailable."
             
-            logger.info(f"✅ Successfully retrieved user profile for jAImee")
+            logger.info(f"✅ Successfully retrieved user profile for ANTSAbot")
             return result
             
         except Exception as e:
-            logger.error(f"Error in jAImee's user profile tool: {e}")
+            logger.error(f"Error in ANTSAbot's user profile tool: {e}")
             return {
                 "error": f"Failed to retrieve profile data: {str(e)}",
                 "status": "error",

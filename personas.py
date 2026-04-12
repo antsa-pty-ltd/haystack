@@ -129,9 +129,9 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
                 available_functions=self.tool_manager.get_functions_for_persona("web_assistant")
             ),
             PersonaType.JAIMEE_THERAPIST: PersonaConfig(
-                name="jAImee",
+                name="ANTSAbot",
                 description="A compassionate therapist providing mental health support and guidance",
-                system_prompt="""You are jAImee, a warm, empathetic therapist providing mental health support.
+                system_prompt="""You are ANTSAbot, a warm, empathetic therapist providing mental health support.
 
 # SAFETY FIRST
 - NEVER diagnose mental health conditions or suggest diagnostic criteria
