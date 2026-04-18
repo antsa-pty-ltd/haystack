@@ -240,25 +240,45 @@ Always personalize the document by using the actual client and practitioner name
 """
         
         # Generate document using OpenAI
-        response = await openai_client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,  # Lower temperature for consistent, deterministic outputs
-            seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
-        )
-        
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,  # Lower temperature for consistent, deterministic outputs
+                seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "content_policy" in error_str or "content_filter" in error_str or "policy" in error_str:
+                logger.warning(f"⚠️ Content policy violation during document generation: {e}")
+                return {
+                    'content': "Unable to generate document: The content was flagged by our safety filters. Please review the session transcript for sensitive content and try again.",
+                    'generated_at': datetime.now(timezone.utc).isoformat(),
+                    'metadata': {
+                        "templateId": template.get("id"),
+                        "templateName": template.get("name"),
+                        "clientId": client_info.get("id"),
+                        "practitionerId": practitioner_info.get("id"),
+                        "wordCount": 0,
+                        "segmentsUsed": len(segments),
+                        "notesUsed": len(dictated_notes) if dictated_notes else 0,
+                        "error": "content_policy_violation"
+                    }
+                }
+            raise
+
         # Validate response
         if not response or not response.choices or len(response.choices) == 0:
             logger.error(f"Invalid OpenAI response: {response}")
             raise Exception("Invalid response from OpenAI API")
-        
+
         if not response.choices[0].message:
             logger.error(f"No message in OpenAI response: {response.choices[0]}")
             raise Exception("No message content in OpenAI response")
-            
+
         generated_content = response.choices[0].message.content
         
         # Validate content
