@@ -1020,12 +1020,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "session_id": session_id
                     }))
 
-                # Persist assistant reply
-                try:
-                    from session_manager import session_manager as _sm
-                    await _sm.add_message(session_id, "assistant", full_content)
-                except Exception:
-                    pass
+                # NOTE: Assistant reply is persisted by haystack_pipeline.py
+                # after generation completes — do NOT save again here to
+                # avoid duplicate messages in session history.
 
                 # Deliver any collected UI actions to the frontend
                 try:
