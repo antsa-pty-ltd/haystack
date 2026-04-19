@@ -336,6 +336,20 @@ class HaystackPipelineManager:
                 )
                 session = await session_manager.get_session(session_id)
             
+            # If the session is fresh (no messages yet) but the frontend sent
+            # conversation_history in the context, seed the backend session so the
+            # AI retains context from prior turns (e.g., after a reconnection).
+            existing_messages = await session_manager.get_messages(session_id, limit=1)
+            if not existing_messages and context and context.get("conversation_history"):
+                history = context["conversation_history"]
+                if isinstance(history, list):
+                    for hist_msg in history:
+                        role = hist_msg.get("role", "user")
+                        content = hist_msg.get("content", "")
+                        if role in ("user", "assistant") and content.strip():
+                            await session_manager.add_message(session_id, role, content)
+                    logger.info(f"Seeded session {session_id} with {len(history)} messages from frontend history")
+
             # Add user message
             await session_manager.add_message(session_id, "user", user_message)
             messages = await session_manager.get_messages(session_id, limit=40)
