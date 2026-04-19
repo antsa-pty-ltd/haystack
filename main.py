@@ -171,9 +171,14 @@ async def on_startup():
         logger.warning(f"Pipeline manager init warning: {e}")
 
 # CORS configuration
+cors_origins = os.getenv("CORS_ORIGINS", "").split(",")
+cors_origins = [o.strip() for o in cors_origins if o.strip()]
+if not cors_origins:
+    cors_origins = ["*"]  # fallback for local dev only
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
