@@ -1,0 +1,17 @@
+name: e2e
+
+# Thin caller — defers to the reusable workflow in antsa-pty-ltd/infra.
+# Runs the full Playwright suite against an ephemeral docker-compose
+# stack. Required check on PRs into develop (set in branch protection).
+
+on:
+  pull_request:
+    branches: [develop]
+
+jobs:
+  e2e:
+    uses: antsa-pty-ltd/infra/.github/workflows/e2e.yml@develop
+    with:
+      triggering_repo: ${{ github.event.repository.name }}
+      triggering_ref: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
