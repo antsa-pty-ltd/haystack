@@ -91,15 +91,31 @@ Environment variables in `.env`:
 
 ## Development
 
+The fastest path is the dockerised stack in the sibling [`infra`](https://github.com/antsa-pty-ltd/infra) repo:
+
 ```bash
-# Install dependencies
+git clone git@github.com:antsa-pty-ltd/infra.git
+./infra/dev/dev.sh up
+```
+
+Haystack runs on `:8001`. See [`infra/dev/README.md`](https://github.com/antsa-pty-ltd/infra/blob/develop/dev/README.md) for the full reference.
+
+To run haystack standalone:
+
+```bash
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Run with auto-reload
 uvicorn main:app --reload --port 8001
+```
 
-# Run tests (TODO)
-pytest
-```# Deployment trigger Wed Aug 20 08:46:15 AEST 2025
-# Trigger workflow with fresh publishing profile
+Tests are scaffolded — `pytest` runs `test_integration.py`. A proper unit-test suite plus CI gate land in Sprint 3 (see `infra/docs/testing-journal.md`).
+
+## Australian English
+
+We use Australian spelling everywhere — colour, behaviour, organise, recognise, prioritise, analyse.
+
+## Cross-repo development process
+
+How we ship code across the four service repos, what's gated in CI, where to look when something breaks: see [**`infra/docs/development.md`**](https://github.com/antsa-pty-ltd/infra/blob/develop/docs/development.md).
 # Trigger new deployment with updated secrets
