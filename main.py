@@ -277,12 +277,12 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         context_parts = []
         context_parts.append(f"Page: {page_url}")
         
-        # IMPORTANT: Only show client info if both name AND id are present (indicates active selection)
-        # Do NOT inject client_id alone as it may be stale from previous sessions
+        # IMPORTANT: Use tokenized client reference — do NOT send real names to AI
+        # The client_name from UI state may contain real PII; use a token instead
         if client_name and client_id:
-            context_parts.append(f"Client: {client_name} ({client_id})")
+            context_parts.append(f"Client: [CLIENT_NAME] ({client_id})")
         elif client_name:
-            context_parts.append(f"Client: {client_name} (use search_clients to get ID)")
+            context_parts.append(f"Client: [CLIENT_NAME] (use search_clients to get ID)")
         else:
             context_parts.append(f"Client: None (use search_clients if needed)")
         
@@ -957,7 +957,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if not message.strip():
                 continue
                 
-            logger.info(f"Processing message for session {session_id}: {message[:50]}...")
+            logger.info(f"Processing message for session {session_id}: {len(message)} chars")
             
             await websocket.send_text(json.dumps({
                 "type": "typing",
