@@ -81,8 +81,56 @@ jobs:
         package: './deploy'
 
     - name: 'Notify Teams on develop failure'
+      # Inlined (rather than `uses:` infra/.github/actions/teams-notify)
+      # because haystack is a public repo and can't pull composite actions
+      # from the private `infra` repo. Keep this in sync with
+      # infra/.github/actions/teams-notify/action.yml if that one changes.
       if: failure() && github.ref == 'refs/heads/develop'
-      uses: antsa-pty-ltd/infra/.github/actions/teams-notify@develop
-      with:
-        webhook-url: ${{ secrets.TEAMS_WEBHOOK }}
-        title: 'Haystack deploy failed'
+      shell: bash
+      env:
+        WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
+        TITLE: 'Haystack deploy failed'
+        REPO: ${{ github.repository }}
+        BRANCH: ${{ github.ref_name }}
+        COMMIT: ${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if [ -z "$WEBHOOK" ]; then
+          echo "TEAMS_WEBHOOK not set — skipping notification."
+          exit 0
+        fi
+        SHORT_SHA=$(echo "$COMMIT" | cut -c1-7)
+        cat > /tmp/teams-payload.json <<EOF
+        {
+          "type": "message",
+          "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+              "type": "AdaptiveCard",
+              "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                { "type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "❌ ${TITLE}", "color": "Attention" },
+                { "type": "FactSet", "facts": [
+                  { "title": "Repo:",   "value": "${REPO}" },
+                  { "title": "Branch:", "value": "${BRANCH}" },
+                  { "title": "Commit:", "value": "${SHORT_SHA}" }
+                ]}
+              ],
+              "actions": [
+                { "type": "Action.OpenUrl", "title": "View workflow run", "url": "${RUN_URL}" }
+              ]
+            }
+          }]
+        }
+        EOF
+        STATUS=$(curl -sS -o /tmp/teams-resp.txt -w "%{http_code}" \
+          -X POST -H "Content-Type: application/json" \
+          --data @/tmp/teams-payload.json "$WEBHOOK")
+        if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+          echo "Teams notification sent (HTTP $STATUS)."
+        else
+          echo "Teams notification failed (HTTP $STATUS):"
+          cat /tmp/teams-resp.txt
+          exit 0
+        fi
