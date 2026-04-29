@@ -33,11 +33,14 @@ jobs:
         run: |
           python -c "import main; import haystack_pipeline; import tools; import personas; print('imports OK')"
 
-      - name: Run pytest if any tests exist
+      - name: Run pytest if any unit tests exist
         run: |
-          if find . -name 'test_*.py' -not -path './venv/*' -not -path './.venv/*' | head -1 | grep -q .; then
+          # Look for pytest unit tests under tests/ only. The repo's
+          # top-level test_integration.py is a manual smoke script that
+          # needs a running server + auth token — not a pre-merge gate.
+          if [ -d tests ] && find tests -name 'test_*.py' | head -1 | grep -q .; then
             pip install pytest
-            pytest -x -q
+            pytest tests -x -q
           else
-            echo "No test_*.py files found — skipping pytest. Smoke coverage runs post-deploy."
+            echo "No tests/ directory with test_*.py files — skipping pytest. Smoke coverage runs post-deploy."
           fi
