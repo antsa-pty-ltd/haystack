@@ -54,7 +54,7 @@ async def generate_document_from_context(
         
         # Log detailed segment information for debugging
         unique_transcript_ids = set(seg.get('transcript_id', seg.get('transcriptId', 'unknown')) for seg in segments)
-        logger.info(f"🎨 Generating document: {len(segments)} segments from {len(unique_transcript_ids)} sessions, Client: '{client_name}', Practitioner: '{practitioner_name}'")
+        logger.info(f"🎨 Generating document: {len(segments)} segments from {len(unique_transcript_ids)} sessions, Client ID: '{client_info.get('id', 'unknown')}'")
         
         # Sort segments deterministically for consistent ordering
         # Sort by: transcript_id, start_time to ensure consistent document generation
@@ -159,20 +159,17 @@ THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
 - If the practitioner mentioned specific techniques or strategies, include those exact terms
 - Document any homework or between-session tasks exactly as assigned
 
-PERSONALIZATION REQUIREMENTS - ABSOLUTELY CRITICAL:
-- This is the MOST IMPORTANT requirement: You MUST use the specific names provided
-- NEVER EVER use generic terms like "Client", "the client", "client", "the patient", "patient", "the individual", "the counselor", "the therapist", or "the practitioner"
-- The CLIENT INFORMATION section contains the client's actual name - use it every single time
-- The PRACTITIONER INFORMATION section contains the practitioner's actual name - use it every single time
-- Every reference to the client or practitioner MUST use their specific names
-- This requirement overrides all other instructions - names are mandatory
-- Double-check every sentence to ensure you used the correct names
+PERSONALIZATION REQUIREMENTS:
+- Use the client and practitioner identifiers EXACTLY as provided (e.g., [CLIENT_NAME], [PRACTITIONER_NAME])
+- These are privacy-safe placeholder tokens that will be replaced with real names in post-processing
+- Use them consistently wherever you would reference the client or practitioner
+- Do NOT replace these tokens with generic terms like "the client" or "the therapist"
+- Do NOT invent or guess real names — always use the exact identifiers provided
 
 You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
 Use the provided template to structure the document, but fill it with information from the transcript.
 Be professional, accurate, and only include information that was actually discussed in the session.
 Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
-Always personalize the document by using the actual client and practitioner names provided.
 """
         
         # Add generation instructions if provided
@@ -232,7 +229,7 @@ Always personalize the document by using the actual client and practitioner name
 {source_content}
 
 **Key Requirements:**
-- Use {client_name} and {practitioner_name} throughout (never "the client" or "the therapist")
+- Use {client_name} and {practitioner_name} identifiers exactly as provided throughout the document
 - Replace template placeholders (like {{{{date}}}}, {{{{practitionerName}}}}) with actual values
 - Be thorough and detailed - aim for 800-1500+ words with full paragraphs
 - Document everything discussed with specific examples and quotes
