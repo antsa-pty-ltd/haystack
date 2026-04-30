@@ -80,9 +80,11 @@ jobs:
         publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
         package: './deploy'
 
+    # continue-on-error: cron-fired smoke is the canonical trigger; this is best-effort fast feedback.
     - name: 'Mint infra dispatch token (GitHub App)'
       if: success() && env.DEPLOY_ENV == 'staging'
       id: app-token
+      continue-on-error: true
       uses: actions/create-github-app-token@v1
       with:
         app-id: ${{ secrets.ANTSA_CI_APP_ID }}
@@ -92,6 +94,7 @@ jobs:
 
     - name: 'Trigger staging smoke (after staging deploy)'
       if: success() && env.DEPLOY_ENV == 'staging'
+      continue-on-error: true
       run: |
         curl -fsS -X POST \
           -H "Accept: application/vnd.github+json" \
