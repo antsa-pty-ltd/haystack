@@ -80,37 +80,6 @@ jobs:
         publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
         package: './deploy'
 
-    # continue-on-error: cron-fired smoke is the canonical trigger; this is best-effort fast feedback.
-    - name: 'Mint infra dispatch token (GitHub App)'
-      if: success() && env.DEPLOY_ENV == 'staging'
-      id: app-token
-      continue-on-error: true
-      uses: actions/create-github-app-token@v1
-      with:
-        app-id: ${{ secrets.ANTSA_CI_APP_ID }}
-        private-key: ${{ secrets.ANTSA_CI_APP_PRIVATE_KEY }}
-        owner: antsa-pty-ltd
-        repositories: infra
-
-    - name: 'Trigger staging smoke (after staging deploy)'
-      if: success() && env.DEPLOY_ENV == 'staging'
-      continue-on-error: true
-      run: |
-        curl -fsS -X POST \
-          -H "Accept: application/vnd.github+json" \
-          -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          https://api.github.com/repos/antsa-pty-ltd/infra/dispatches \
-          -d '{
-            "event_type": "staging-deployed",
-            "client_payload": {
-              "service": "haystack",
-              "country": "au",
-              "sha": "${{ github.sha }}",
-              "ref": "${{ github.ref }}"
-            }
-          }'
-
     - name: 'Notify Teams on develop failure'
       # Inlined (rather than `uses:` infra/.github/actions/teams-notify)
       # because haystack is a public repo and can't pull composite actions
