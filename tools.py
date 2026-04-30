@@ -1294,7 +1294,7 @@ class ToolManager:
                 self.tools["get_generated_documents"]["definition"],
                 self.tools["refine_document"]["definition"]
             ]
-        elif persona_type == "jaimee_therapist":
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
             return [
                 self.tools["mood_check_in"]["definition"],
                 self.tools["coping_strategies"]["definition"],
@@ -1350,7 +1350,7 @@ class ToolManager:
                 "get_generated_documents": self.tools["get_generated_documents"]["implementation"],
                 "refine_document": self.tools["refine_document"]["implementation"]
             }
-        elif persona_type == "jaimee_therapist":
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
             return {
                 "mood_check_in": self.tools["mood_check_in"]["implementation"],
                 "coping_strategies": self.tools["coping_strategies"]["implementation"], 
@@ -1375,7 +1375,7 @@ class ToolManager:
         that can be used directly in Haystack Pipelines with ToolInvoker.
         
         Args:
-            persona_type: The persona type ("web_assistant", "jaimee_therapist", etc.)
+            persona_type: The persona type ("web_assistant", "antsabot_therapist", etc.)
             
         Returns:
             List of Haystack Tool objects ready for use in Pipeline

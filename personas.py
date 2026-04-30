@@ -4,8 +4,15 @@ from pydantic import BaseModel
 
 class PersonaType(str, Enum):
     WEB_ASSISTANT = "web_assistant"
-    JAIMEE_THERAPIST = "jaimee_therapist"
+    JAIMEE_THERAPIST = "jaimee_therapist"  # Deprecated: use ANTSABOT_THERAPIST
+    ANTSABOT_THERAPIST = "antsabot_therapist"
     TRANSCRIBER_AGENT = "transcriber_agent"
+
+# Maps the deprecated jaimee_therapist value to antsabot_therapist
+def normalize_persona_type(persona_type: str) -> str:
+    if persona_type == "jaimee_therapist":
+        return "antsabot_therapist"
+    return persona_type
 
 class PersonaConfig(BaseModel):
     name: str
@@ -24,7 +31,9 @@ class PersonaManager:
         from tools import tool_manager
         self.tool_manager = tool_manager
         self.personas = self._initialize_personas()
-    
+        # Backward compatibility: jaimee_therapist maps to the same config as antsabot_therapist
+        self.personas[PersonaType.JAIMEE_THERAPIST] = self.personas[PersonaType.ANTSABOT_THERAPIST]
+
     def _initialize_personas(self) -> Dict[PersonaType, PersonaConfig]:
         return {
             PersonaType.WEB_ASSISTANT: PersonaConfig(
@@ -128,7 +137,7 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
                 tools=self.tool_manager.get_tools_for_persona("web_assistant"),
                 available_functions=self.tool_manager.get_functions_for_persona("web_assistant")
             ),
-            PersonaType.JAIMEE_THERAPIST: PersonaConfig(
+            PersonaType.ANTSABOT_THERAPIST: PersonaConfig(
                 name="ANTSAbot",
                 description="A compassionate therapist providing mental health support and guidance",
                 system_prompt="""You are ANTSAbot, a warm, empathetic therapist providing mental health support.
@@ -164,8 +173,8 @@ Documents: get_templates, set_selected_template, select_template_by_name, check_
                 temperature=0.8,
                 max_completion_tokens=32768,
                 has_db_access=False,
-                tools=self.tool_manager.get_tools_for_persona("jaimee_therapist"),
-                available_functions=self.tool_manager.get_functions_for_persona("jaimee_therapist")
+                tools=self.tool_manager.get_tools_for_persona("antsabot_therapist"),
+                available_functions=self.tool_manager.get_functions_for_persona("antsabot_therapist")
             ),
             PersonaType.TRANSCRIBER_AGENT: PersonaConfig(
                 name="Transcriber Agent",
