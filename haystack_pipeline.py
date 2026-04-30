@@ -78,7 +78,7 @@ class HaystackPipelineManager:
         try:
             # Create persona-specific pipelines
             self._create_web_assistant_pipeline()
-            self._create_jaimee_therapist_pipeline()
+            self._create_antsabot_therapist_pipeline()
             self._create_transcriber_agent_pipeline()
             
             self._initialized = True
@@ -146,17 +146,17 @@ class HaystackPipelineManager:
         self.pipelines[PersonaType.WEB_ASSISTANT] = pipeline
         logger.info("✅ Created WEB_ASSISTANT declarative pipeline with auto-loop")
     
-    def _create_jaimee_therapist_pipeline(self):
+    def _create_antsabot_therapist_pipeline(self):
         """
-        Create JAIMEE_THERAPIST pipeline with therapeutic tools.
-        
+        Create ANTSABOT_THERAPIST pipeline with therapeutic tools.
+
         Similar to web_assistant but:
         - Fewer tools (mood check-in, coping strategies, breathing exercises)
         - No UI actions needed
         - More empathetic tone (higher temperature)
         """
-        persona_config = persona_manager.get_persona(PersonaType.JAIMEE_THERAPIST)
-        tools = tool_manager.get_haystack_component_tools("jaimee_therapist")
+        persona_config = persona_manager.get_persona(PersonaType.ANTSABOT_THERAPIST)
+        tools = tool_manager.get_haystack_component_tools("antsabot_therapist")
         
         routes = [
             {
@@ -194,8 +194,10 @@ class HaystackPipelineManager:
         pipeline.connect("tool_invoker.tool_messages", "message_collector")
         pipeline.connect("message_collector", "generator.messages")
         
+        self.pipelines[PersonaType.ANTSABOT_THERAPIST] = pipeline
+        # Backward compatibility: jaimee_therapist resolves to the same pipeline
         self.pipelines[PersonaType.JAIMEE_THERAPIST] = pipeline
-        logger.info("✅ Created JAIMEE_THERAPIST declarative pipeline")
+        logger.info("✅ Created ANTSABOT_THERAPIST declarative pipeline")
     
     def _create_transcriber_agent_pipeline(self):
         """
@@ -336,6 +338,20 @@ class HaystackPipelineManager:
                 )
                 session = await session_manager.get_session(session_id)
             
+            # If the session is fresh (no messages yet) but the frontend sent
+            # conversation_history in the context, seed the backend session so the
+            # AI retains context from prior turns (e.g., after a reconnection).
+            existing_messages = await session_manager.get_messages(session_id, limit=1)
+            if not existing_messages and context and context.get("conversation_history"):
+                history = context["conversation_history"]
+                if isinstance(history, list):
+                    for hist_msg in history:
+                        role = hist_msg.get("role", "user")
+                        content = hist_msg.get("content", "")
+                        if role in ("user", "assistant") and content.strip():
+                            await session_manager.add_message(session_id, role, content)
+                    logger.info(f"Seeded session {session_id} with {len(history)} messages from frontend history")
+
             # Add user message
             await session_manager.add_message(session_id, "user", user_message)
             messages = await session_manager.get_messages(session_id, limit=40)

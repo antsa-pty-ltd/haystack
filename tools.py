@@ -1294,7 +1294,7 @@ class ToolManager:
                 self.tools["get_generated_documents"]["definition"],
                 self.tools["refine_document"]["definition"]
             ]
-        elif persona_type == "jaimee_therapist":
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
             return [
                 self.tools["mood_check_in"]["definition"],
                 self.tools["coping_strategies"]["definition"],
@@ -1350,7 +1350,7 @@ class ToolManager:
                 "get_generated_documents": self.tools["get_generated_documents"]["implementation"],
                 "refine_document": self.tools["refine_document"]["implementation"]
             }
-        elif persona_type == "jaimee_therapist":
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
             return {
                 "mood_check_in": self.tools["mood_check_in"]["implementation"],
                 "coping_strategies": self.tools["coping_strategies"]["implementation"], 
@@ -1375,7 +1375,7 @@ class ToolManager:
         that can be used directly in Haystack Pipelines with ToolInvoker.
         
         Args:
-            persona_type: The persona type ("web_assistant", "jaimee_therapist", etc.)
+            persona_type: The persona type ("web_assistant", "antsabot_therapist", etc.)
             
         Returns:
             List of Haystack Tool objects ready for use in Pipeline
@@ -2156,25 +2156,22 @@ class ToolManager:
 - Always defer diagnosis to qualified medical professionals
 
 PERSONALIZATION INSTRUCTIONS:
-- When referring to the person in this session, use their actual name from the session content instead of generic terms
-- Replace "the client", "client", "the patient", "patient", or "the individual" with their actual name
-- Use their full name for formal references and first name for casual mentions
-- Make the document feel personalized and human-centered by using their actual name throughout
+- Use the client and practitioner identifiers exactly as provided (e.g., [CLIENT_NAME], [PRACTITIONER_NAME])
+- These are privacy-safe placeholder tokens that will be replaced with real names in post-processing
+- Use them consistently wherever you would reference the client or practitioner
+- Do NOT replace these tokens with generic terms or invent real names
 
 """
             
             if generation_instructions and isinstance(generation_instructions, str) and generation_instructions.strip():
-                logger.info(f"🎨 [DEBUG] _generate_document_from_loaded received generation_instructions: '{generation_instructions.strip()}'")
                 user_guidance_header = (
                     "ADDITIONAL INSTRUCTIONS: Apply the following user-provided guidance throughout the document generation. Use the existing template structure; keep mandatory clinical sections. If style guidance conflicts with clinical clarity, prefer clarity while reflecting style.\n\n"
                     "User Guidance (verbatim):\n" + generation_instructions.strip() + "\n\n"
                 )
                 footer = "\n\n---\nApplied Style Notes: Briefly summarize how the above guidance was applied."
                 effective_template_content = anti_diagnosis_header + user_guidance_header + template_content + footer
-                logger.info(f"🎨 [DEBUG] Template content modified with instructions (length: {len(effective_template_content)} chars)")
             else:
                 effective_template_content = anti_diagnosis_header + template_content
-                logger.info(f"🎨 [DEBUG] _generate_document_from_loaded NO generation_instructions provided: {generation_instructions}")
 
             action_payload = {
                 "templateContent": effective_template_content,
@@ -3638,7 +3635,7 @@ Please refine the following document according to these instructions:
                              date_to: str = None, keywords: str = None, limit: int = 10) -> Dict[str, Any]:
         """Search for transcription sessions"""
         try:
-            logger.info(f"🔍 search_sessions called with: client_name={client_name}, client_id={client_id}, keywords={keywords}")
+            logger.info(f"🔍 search_sessions called with: client_id={client_id}, keywords={keywords}")
             
             params = {'limit': str(limit)}
             
@@ -3796,7 +3793,7 @@ Please refine the following document according to these instructions:
     async def _set_client_selection(self, client_name: str, client_id: str, page_context: dict = None) -> Dict[str, Any]:
         """Set the client selection in the UI (like selecting from AutoComplete)"""
         try:
-            logger.info(f"👤 set_client_selection called with: client_name={client_name}, client_id={client_id}")
+            logger.info(f"👤 set_client_selection called with: client_id={client_id}")
             
             if not client_name or not client_id:
                 return {
@@ -3856,7 +3853,7 @@ Please refine the following document according to these instructions:
     async def _load_session_direct(self, session_id: str, client_id: str, client_name: str, recording_date: str, duration: float, total_segments: int, average_confidence: float, page_context: dict = None) -> Dict[str, Any]:
         """Load a session directly using existing UI logic (like clicking Load Session button)"""
         try:
-            logger.info(f"📂 load_session_direct called with: session_id={session_id}, client_name={client_name}")
+            logger.info(f"📂 load_session_direct called with: session_id={session_id}")
             
             if not session_id or not client_id or not client_name:
                 return {

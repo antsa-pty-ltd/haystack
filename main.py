@@ -171,9 +171,14 @@ async def on_startup():
         logger.warning(f"Pipeline manager init warning: {e}")
 
 # CORS configuration
+cors_origins = os.getenv("CORS_ORIGINS", "").split(",")
+cors_origins = [o.strip() for o in cors_origins if o.strip()]
+if not cors_origins:
+    cors_origins = ["*"]  # fallback for local dev only
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
@@ -272,12 +277,12 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         context_parts = []
         context_parts.append(f"Page: {page_url}")
         
-        # IMPORTANT: Only show client info if both name AND id are present (indicates active selection)
-        # Do NOT inject client_id alone as it may be stale from previous sessions
+        # IMPORTANT: Use tokenized client reference — do NOT send real names to AI
+        # The client_name from UI state may contain real PII; use a token instead
         if client_name and client_id:
-            context_parts.append(f"Client: {client_name} ({client_id})")
+            context_parts.append(f"Client: [CLIENT_NAME] ({client_id})")
         elif client_name:
-            context_parts.append(f"Client: {client_name} (use search_clients to get ID)")
+            context_parts.append(f"Client: [CLIENT_NAME] (use search_clients to get ID)")
         else:
             context_parts.append(f"Client: None (use search_clients if needed)")
         
@@ -952,7 +957,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if not message.strip():
                 continue
                 
-            logger.info(f"Processing message for session {session_id}: {message[:50]}...")
+            logger.info(f"Processing message for session {session_id}: {len(message)} chars")
             
             await websocket.send_text(json.dumps({
                 "type": "typing",
@@ -971,6 +976,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Extract profile_id for session recovery
                 profile_id = message_data.get("profile_id") or message_data.get("profileId")
                 
+                incoming_context = message_data.get("context", {})
                 context_for_pipeline: Dict[str, Any] = {
                     "page_url": ui_state.get("page_url"),
                     "ui_capabilities": derived.get("capabilities", []),
@@ -979,6 +985,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "page_context": derived.get("page_type"),
                     "profile_id": profile_id,  # Include profile_id for session recovery
                 }
+                if incoming_context.get("conversation_history"):
+                    context_for_pipeline["conversation_history"] = incoming_context["conversation_history"]
 
                 # Resolve persona and auth token
                 sess = await session_manager.get_session(session_id)
@@ -1017,12 +1025,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "session_id": session_id
                     }))
 
-                # Persist assistant reply
-                try:
-                    from session_manager import session_manager as _sm
-                    await _sm.add_message(session_id, "assistant", full_content)
-                except Exception:
-                    pass
+                # NOTE: Assistant reply is persisted by haystack_pipeline.py
+                # after generation completes — do NOT save again here to
+                # avoid duplicate messages in session history.
 
                 # Deliver any collected UI actions to the frontend
                 try:
