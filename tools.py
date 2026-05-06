@@ -7,7 +7,7 @@ import aiohttp
 import os
 import jwt
 from typing import Dict, Any, List, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -210,6 +210,33 @@ class ToolManager:
                     }
                 },
                 "implementation": self._get_clinic_stats
+            },
+
+            "get_practitioner_today": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_practitioner_today",
+                        "description": (
+                            "Returns a structured overview of the logged-in practitioner's TODAY: "
+                            "today's video sessions (with client name, time, status), the next upcoming "
+                            "session (across any future date), and recent unread chat rooms. "
+                            "Use this whenever the practitioner asks about their day, schedule, or what's next "
+                            "(e.g. 'summarise my day', 'who's my next client?', 'what's on today?'). "
+                            "Always call this BEFORE answering those questions."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "timezone": {
+                                    "type": "string",
+                                    "description": "IANA timezone (e.g. 'Australia/Sydney'). Defaults to UTC if absent.",
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_practitioner_today
             },
 
             "search_specific_clients": {
@@ -1267,6 +1294,7 @@ class ToolManager:
                 self.tools["get_clinic_profile"]["definition"],
                 self.tools["list_practitioners"]["definition"],
                 self.tools["get_clinic_stats"]["definition"],
+                self.tools["get_practitioner_today"]["definition"],
                 self.tools["generate_report"]["definition"],
                 self.tools["get_conversations"]["definition"],
                 self.tools["get_conversation_messages"]["definition"],
@@ -1323,6 +1351,7 @@ class ToolManager:
                 "get_clinic_profile": self.tools["get_clinic_profile"]["implementation"],
                 "list_practitioners": self.tools["list_practitioners"]["implementation"],
                 "get_clinic_stats": self.tools["get_clinic_stats"]["implementation"],
+                "get_practitioner_today": self.tools["get_practitioner_today"]["implementation"],
                 "generate_report": self.tools["generate_report"]["implementation"],
                 "get_conversations": self.tools["get_conversations"]["implementation"],
                 "get_conversation_messages": self.tools["get_conversation_messages"]["implementation"],
@@ -1745,6 +1774,122 @@ class ToolManager:
         except Exception as e:
             logger.error(f"Error getting clinic stats: {e}")
             return {"error": f"Failed to fetch clinic stats: {str(e)}"}
+
+    async def _get_practitioner_today(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Returns the logged-in practitioner's TODAY view: today's video sessions,
+        next upcoming session, and recent unread chat rooms.
+
+        Implementation:
+        - GET /api/v1/video-sessions/practitioner?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+          (today + +7 days so we can pick the next-upcoming after today)
+        - GET /api/v1/messages/rooms (unread + recent activity, capped to 10)
+        Both calls are authenticated via the practitioner's token + profileid header.
+        """
+        try:
+            # Resolve timezone with sensible default
+            tz_name = timezone
+            if not tz_name and isinstance(self.current_page_context, dict):
+                tz_name = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
+            tz_name = tz_name or os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                from datetime import timezone as _utc_tz
+                tz = _utc_tz.utc
+                tz_name = 'UTC'
+
+            now_local = datetime.now(tz)
+            today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_end = today_start + timedelta(days=7)
+
+            # Today's + next-7-days video sessions for the current practitioner
+            sessions: List[Dict[str, Any]] = []
+            try:
+                sessions_resp = await self._make_api_request(
+                    'GET',
+                    'video-sessions/practitioner',
+                    params={
+                        'startDate': today_start.strftime('%Y-%m-%d'),
+                        'endDate': week_end.strftime('%Y-%m-%d'),
+                    },
+                )
+                if isinstance(sessions_resp, list):
+                    sessions = sessions_resp
+                elif isinstance(sessions_resp, dict) and isinstance(sessions_resp.get('data'), list):
+                    sessions = sessions_resp['data']
+            except Exception as e:
+                logger.warning(f"video-sessions fetch failed in get_practitioner_today: {e}")
+
+            def normalise_session(s: Dict[str, Any]) -> Dict[str, Any]:
+                client = s.get('client') or {}
+                client_name = ' '.join(filter(None, [client.get('firstName'), client.get('lastName')])).strip() or None
+                return {
+                    'id': s.get('id'),
+                    'startsAt': s.get('startTime') or s.get('scheduledStartTime') or s.get('startsAt'),
+                    'endsAt': s.get('endTime') or s.get('scheduledEndTime') or s.get('endsAt'),
+                    'status': s.get('status'),
+                    'sessionType': s.get('sessionType') or s.get('type'),
+                    'clientId': client.get('id') or s.get('clientId'),
+                    'clientName': client_name,
+                    'title': s.get('title') or s.get('subject'),
+                }
+
+            normalised: List[Dict[str, Any]] = []
+            for s in sessions:
+                if isinstance(s, dict):
+                    normalised.append(normalise_session(s))
+
+            today_str = today_start.strftime('%Y-%m-%d')
+            today_sessions = [s for s in normalised if s.get('startsAt') and s['startsAt'][:10] == today_str]
+            today_sessions.sort(key=lambda x: x.get('startsAt') or '')
+
+            future_sessions = [s for s in normalised if s.get('startsAt') and s['startsAt'] > now_local.isoformat()]
+            future_sessions.sort(key=lambda x: x.get('startsAt') or '')
+            next_session = future_sessions[0] if future_sessions else None
+
+            # Recent rooms / unread activity — best-effort; the endpoint shape varies
+            recent_rooms: List[Dict[str, Any]] = []
+            unread_count = 0
+            try:
+                rooms_resp = await self._make_api_request('GET', 'messages/rooms', params={'page': 1, 'size': 10})
+                rooms_data: List[Any] = []
+                if isinstance(rooms_resp, dict):
+                    rooms_data = rooms_resp.get('data') or rooms_resp.get('rooms') or []
+                elif isinstance(rooms_resp, list):
+                    rooms_data = rooms_resp
+                for r in rooms_data[:10]:
+                    if not isinstance(r, dict):
+                        continue
+                    other = r.get('otherProfile') or r.get('client') or {}
+                    name = ' '.join(filter(None, [other.get('firstName'), other.get('lastName')])).strip() or r.get('name')
+                    unread_for_room = r.get('unreadCount') or r.get('unread') or 0
+                    if isinstance(unread_for_room, int) and unread_for_room > 0:
+                        unread_count += unread_for_room
+                    recent_rooms.append({
+                        'roomId': r.get('id') or r.get('roomId'),
+                        'name': name,
+                        'unread': unread_for_room,
+                        'lastMessageAt': r.get('lastMessageAt') or r.get('updatedAt'),
+                    })
+            except Exception as e:
+                logger.warning(f"messages/rooms fetch failed in get_practitioner_today: {e}")
+
+            return {
+                'status': 'success',
+                'timezone': tz_name,
+                'today': today_str,
+                'currentTime': now_local.isoformat(),
+                'sessionsToday': today_sessions,
+                'todayCount': len(today_sessions),
+                'nextSession': next_session,
+                'unreadMessages': unread_count,
+                'recentRooms': recent_rooms[:5],
+            }
+        except Exception as e:
+            logger.error(f"Error in get_practitioner_today: {e}")
+            return {"status": "error", "error": f"Failed to fetch today's overview: {str(e)}"}
 
     async def _search_specific_clients(self, query: str, limit: int = 10, include_demographics: bool = True, include_assignments: bool = True) -> Dict[str, Any]:
         """Search for specific clients with detailed information"""
