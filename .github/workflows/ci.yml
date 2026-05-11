@@ -1,0 +1,184 @@
+name: Haystack - CI
+
+# Consolidated workflow: test gate (lint + imports + pytest) runs on every PR
+# and push to develop/master; AU deploy runs after the test job passes on
+# develop or master pushes.
+#
+# Required-check name registered in branch-protection rulesets:
+#   "Lint + Imports + Pytest"
+# If you rename that job, update the GitHub branch-protection rulesets too.
+
+on:
+  pull_request:
+    branches: [develop, master, main]
+  push:
+    branches: [develop, master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint + Imports + Pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate imports
+        run: |
+          python -c "import main; import haystack_pipeline; import tools; import personas; print('imports OK')"
+
+      - name: Run pytest if any unit tests exist
+        run: |
+          # Look for pytest unit tests under tests/ only. The repo's
+          # top-level test_integration.py is a manual smoke script that
+          # needs a running server + auth token — not a pre-merge gate.
+          if [ -d tests ] && find tests -name 'test_*.py' | head -1 | grep -q .; then
+            pip install pytest
+            pytest tests -x -q
+          else
+            echo "No tests/ directory with test_*.py files — skipping pytest. Smoke coverage runs post-deploy."
+          fi
+
+  deploy-au:
+    name: Deploy to Azure (AU)
+    needs: test
+    # Only deploy on pushes to develop or master; skip on PRs and manual triggers
+    # that did not target those branches.
+    if: >
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Set environment variables
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            ENV="production"
+            APP_NAME="antsa-haystack-au-production"
+          else
+            ENV="staging"
+            APP_NAME="antsa-haystack-au-staging"
+          fi
+          echo "DEPLOY_ENV=${ENV}" >> $GITHUB_ENV
+          echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
+
+      - name: Validate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -c "import fastapi; import openai; import haystack; print('All imports OK')"
+
+      - name: Create deployment package
+        run: |
+          mkdir deploy
+
+          # Copy application source only (no venv - built on Azure at runtime)
+          cp main.py config.py personas.py session_manager.py haystack_pipeline.py \
+             ui_state_manager.py tools.py requirements.txt startup.sh deploy/
+          cp -r components agents document_generation utils deploy/
+
+          # Verify main.py is present
+          test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
+
+          # Create Python entrypoint
+          printf '#!/usr/bin/env python3\nimport subprocess, sys\nsys.exit(subprocess.call(["bash", "startup.sh"]))\n' > deploy/startup.py
+
+          echo "Package contents:"
+          ls -la deploy/
+          echo "Package size: $(du -sh deploy/ | cut -f1)"
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ env.DEPLOY_ENV == 'production' && secrets.AZURE_CREDENTIALS_AU || secrets.AZURE_CREDENTIALS_STAGING }}
+
+      - name: Deploy to Azure Web App (Production)
+        if: env.DEPLOY_ENV == 'production'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          package: './deploy'
+          slot-name: 'production'
+          startup-command: 'python startup.py'
+
+      - name: Deploy to Azure Web App (Staging)
+        if: env.DEPLOY_ENV == 'staging'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
+          package: './deploy'
+
+      - name: Notify Teams on develop failure
+        # Inlined (rather than `uses:` infra/.github/actions/teams-notify)
+        # because haystack is a public repo and can't pull composite actions
+        # from the private `infra` repo. Keep this in sync with
+        # infra/.github/actions/teams-notify/action.yml if that one changes.
+        if: failure() && github.ref == 'refs/heads/develop'
+        shell: bash
+        env:
+          WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
+          TITLE: 'Haystack deploy failed'
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "TEAMS_WEBHOOK not set — skipping notification."
+            exit 0
+          fi
+          SHORT_SHA=$(echo "$COMMIT" | cut -c1-7)
+          cat > /tmp/teams-payload.json <<EOF
+          {
+            "type": "message",
+            "attachments": [{
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "type": "AdaptiveCard",
+                "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "version": "1.4",
+                "body": [
+                  { "type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "❌ ${TITLE}", "color": "Attention" },
+                  { "type": "FactSet", "facts": [
+                    { "title": "Repo:",   "value": "${REPO}" },
+                    { "title": "Branch:", "value": "${BRANCH}" },
+                    { "title": "Commit:", "value": "${SHORT_SHA}" }
+                  ]}
+                ],
+                "actions": [
+                  { "type": "Action.OpenUrl", "title": "View workflow run", "url": "${RUN_URL}" }
+                ]
+              }
+            }]
+          }
+          EOF
+          STATUS=$(curl -sS -o /tmp/teams-resp.txt -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" \
+            --data @/tmp/teams-payload.json "$WEBHOOK")
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+            echo "Teams notification sent (HTTP $STATUS)."
+          else
+            echo "Teams notification failed (HTTP $STATUS):"
+            cat /tmp/teams-resp.txt
+            exit 0
+          fi
