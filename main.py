@@ -292,10 +292,50 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         
         base_prompt += f"\n\n🔍 UI STATE:\n" + "\n".join(f"- {part}" for part in context_parts)
         
-        # Add active document info
+        # Add active document info — INCLUDING CONTENT so the model can
+        # actually answer questions about the loaded report (bug 263).
+        # Without the content, the bot reports "I can't access the document"
+        # because the system prompt only carries the name/ID.
+        active_doc_resolved = None
         if active_document and active_document.get('document'):
-            doc = active_document['document']
-            base_prompt += f"\n\n📄 ACTIVE DOCUMENT: {doc.get('documentName', 'Unnamed')} (ID: {doc.get('documentId')})"
+            active_doc_resolved = active_document['document']
+        elif generated_documents:
+            # Fallback: if the frontend hasn't sent an active-tab update yet
+            # but documents exist, surface the most recently generated one.
+            # The practitioner's most recent generation is overwhelmingly
+            # what they want to refine.
+            try:
+                active_doc_resolved = max(
+                    (d for d in generated_documents if d.get('isGenerated')),
+                    key=lambda d: d.get('generatedAt', ''),
+                    default=None,
+                )
+            except Exception:
+                active_doc_resolved = None
+
+        if active_doc_resolved:
+            doc_name = active_doc_resolved.get('documentName', 'Unnamed')
+            doc_id = active_doc_resolved.get('documentId', 'unknown')
+            doc_content = active_doc_resolved.get('documentContent', '') or ''
+            # Cap content to keep token cost bounded. Most clinical reports
+            # fit comfortably; truncate the tail if huge.
+            MAX_DOC_CHARS = 12000
+            truncated = len(doc_content) > MAX_DOC_CHARS
+            content_for_prompt = doc_content[:MAX_DOC_CHARS] + (
+                "\n\n…[truncated — call refine_document or ask the user for "
+                "the part you need]…" if truncated else ""
+            )
+            base_prompt += (
+                f"\n\n📄 ACTIVE DOCUMENT: {doc_name} (ID: {doc_id})"
+            )
+            if content_for_prompt.strip():
+                base_prompt += (
+                    "\n\nThis document is currently loaded on the user's "
+                    "screen. You CAN read it directly from the content below "
+                    "— do not tell the user you cannot access it."
+                    f"\n\n--- DOCUMENT CONTENT START ---\n{content_for_prompt}"
+                    "\n--- DOCUMENT CONTENT END ---"
+                )
 
         # Add page content extraction data
         page_content = ui_state.get('page_content')
