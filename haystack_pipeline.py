@@ -278,7 +278,69 @@ class HaystackPipelineManager:
             # Skip system messages to avoid conflicts
         
         return haystack_messages
-    
+
+    def _augment_system_prompt_with_active_document(
+        self, base_prompt: str, ui_state: Optional[Dict[str, Any]]
+    ) -> str:
+        """
+        Bug 263: append the currently-loaded "active document" (the
+        template-generated report that a practitioner has just produced) to
+        the WEB_ASSISTANT system prompt, so ANTSAbot can answer questions
+        about it instead of replying "I can't access the document".
+
+        Mirrors the logic in main.get_enhanced_system_prompt but lives on the
+        streaming pipeline path actually used by the WebSocket. Caps content
+        at 12k characters to keep token cost bounded.
+        """
+        if not ui_state:
+            return base_prompt
+
+        active_document = ui_state.get('active_document')
+        generated_documents = ui_state.get('generatedDocuments') or []
+
+        active_doc_resolved = None
+        if isinstance(active_document, dict) and active_document.get('document'):
+            active_doc_resolved = active_document['document']
+        elif generated_documents:
+            # Fallback when no tab_changed has arrived yet — the practitioner
+            # almost always wants the report they just generated.
+            try:
+                active_doc_resolved = max(
+                    (d for d in generated_documents if d.get('isGenerated')),
+                    key=lambda d: d.get('generatedAt', ''),
+                    default=None,
+                )
+            except Exception:
+                active_doc_resolved = None
+
+        if not active_doc_resolved:
+            return base_prompt
+
+        doc_name = active_doc_resolved.get('documentName', 'Unnamed')
+        doc_id = active_doc_resolved.get('documentId', 'unknown')
+        doc_content = active_doc_resolved.get('documentContent', '') or ''
+
+        MAX_DOC_CHARS = 12000
+        truncated = len(doc_content) > MAX_DOC_CHARS
+        content_for_prompt = doc_content[:MAX_DOC_CHARS] + (
+            "\n\n…[truncated — call refine_document or ask the user for the "
+            "part you need]…" if truncated else ""
+        )
+
+        augmented = base_prompt + (
+            f"\n\n📄 ACTIVE DOCUMENT: {doc_name} (ID: {doc_id})"
+        )
+        if content_for_prompt.strip():
+            augmented += (
+                "\n\nThis document is currently loaded on the user's screen. "
+                "You CAN read it directly from the content below — do not "
+                "tell the user you cannot access it. Quote from it verbatim "
+                "when asked."
+                f"\n\n--- DOCUMENT CONTENT START ---\n{content_for_prompt}"
+                "\n--- DOCUMENT CONTENT END ---"
+            )
+        return augmented
+
     def _extract_text_from_message(self, message: ChatMessage) -> Optional[str]:
         """Extract text content from Haystack ChatMessage"""
         try:
@@ -359,7 +421,26 @@ class HaystackPipelineManager:
             # Get persona config and system prompt
             persona_config = persona_manager.get_persona(persona_type)
             system_prompt = persona_manager.get_system_prompt(persona_type, context or session.context)
-            
+
+            # Bug 263: embed the currently-loaded ("active") document content
+            # in the system prompt so the model can answer questions about a
+            # template-generated report visible on the practitioner's screen.
+            # The /ws streaming pipeline does NOT route through
+            # get_enhanced_system_prompt in main.py, so we re-derive the
+            # active document from the per-session ui_state stored in Redis.
+            try:
+                from ui_state_manager import ui_state_manager as _ui_state_manager
+                _ui_state = await _ui_state_manager.get_state(session_id)
+                system_prompt = self._augment_system_prompt_with_active_document(
+                    system_prompt, _ui_state
+                )
+            except Exception as _doc_err:  # noqa: BLE001 — never block chat
+                logger.warning(
+                    f"bug-263 augment: failed to inject active document content "
+                    f"for session {session_id}: {_doc_err}"
+                )
+
+
             # Set auth token for tool manager
             if auth_token:
                 tool_manager.set_auth_token(auth_token, session.profile_id)
