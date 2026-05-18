@@ -2066,11 +2066,11 @@ class ToolManager:
                 ui_state = ui_state_manager.get_state_sync(session_id)
                 page_capabilities = ui_state_manager.get_page_capabilities_sync(session_id)
                 
-                # UI tools require page capability
+                # UI mutation tools require page capability (read-only tools like
+                # get_loaded_sessions are always allowed since they just query state)
                 ui_tools = [
                     'set_client_selection', 'load_session_direct', 'load_multiple_sessions',
                     'set_selected_template', 'select_template_by_name', 'generate_document_from_loaded',
-                    'get_loaded_sessions', 'get_session_content', 'analyze_loaded_session'
                 ]
                 
                 if tool_name in ui_tools and tool_name not in page_capabilities:
@@ -4329,16 +4329,24 @@ Please refine the following document according to these instructions:
             # Format sessions for user-friendly display
             session_summaries = []
             for i, session in enumerate(loaded_sessions, 1):
+                # Format recording date for human readability
+                raw_date = (session.get("metadata") or {}).get("recordingDate", "")
+                recording_date = raw_date
+                if raw_date:
+                    try:
+                        from dateutil import parser as dateutil_parser
+                        dt = dateutil_parser.parse(raw_date)
+                        day = dt.day
+                        hour = dt.hour % 12 or 12
+                        recording_date = f"{day} {dt.strftime('%B %Y')}, {hour}:{dt.strftime('%M %p')}"
+                    except Exception:
+                        pass
                 session_summaries.append({
                     "index": i,
                     "session_id": session.get("sessionId", "unknown"),
                     "client_name": session.get("clientName", "Unknown Client"),
-                    "client_id": session.get("clientId", "unknown"),
-                    "has_content": bool(session.get("content", "")),
-                    "content_preview": (session.get("content", "")[:100] + "..." 
-                                      if len(session.get("content", "")) > 100 
-                                      else session.get("content", "")),
-                    "metadata": session.get("metadata", {})
+                    "recording_date": recording_date,
+                    "content": session.get("content", ""),
                 })
             
             return {
