@@ -1011,12 +1011,25 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 # Build context for pipeline
                 ui_state = await ui_state_manager.get_state(session_id)
+
+                # Fallback: if ui_state has no page_type yet, seed it from the
+                # message-level context so tools can resolve page capabilities on
+                # the very first message (before a full UI state update arrives).
+                incoming_context = message_data.get("context", {})
+                if not ui_state.get("page_type") and incoming_context.get("page_context"):
+                    seed_state = {
+                        "page_type": incoming_context["page_context"],
+                        "page_url": incoming_context.get("page_url", ""),
+                        "client_id": incoming_context.get("client_id"),
+                        "client_name": incoming_context.get("client_name"),
+                    }
+                    await ui_state_manager.update_state(session_id, seed_state)
+                    ui_state = await ui_state_manager.get_state(session_id)
+
                 derived = _build_page_context_from_ui_state(ui_state)
-                
+
                 # Extract profile_id for session recovery
                 profile_id = message_data.get("profile_id") or message_data.get("profileId")
-                
-                incoming_context = message_data.get("context", {})
                 context_for_pipeline: Dict[str, Any] = {
                     "page_url": ui_state.get("page_url"),
                     "ui_capabilities": derived.get("capabilities", []),
