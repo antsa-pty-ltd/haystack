@@ -128,6 +128,34 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
+      - name: Trigger staging-smoke after prod deploy
+        # Fires the infra repo's staging-smoke workflow via repository_dispatch
+        # so the Playwright suite runs against staging immediately after each
+        # production deploy. Catches regressions like the 2026-05 Haystack
+        # exit-127 incident that the manual-only smoke didn't surface.
+        #
+        # Requires `INFRA_DISPATCH_PAT` repo secret: a PAT with `repo` scope
+        # on antsa-pty-ltd/infra. GITHUB_TOKEN cannot dispatch to another
+        # repo. If unset, this step is a no-op (the prod deploy is still
+        # considered successful).
+        if: env.DEPLOY_ENV == 'production' && success()
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_DISPATCH_PAT }}
+          DISPATCH_SHA: ${{ github.sha }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "INFRA_DISPATCH_PAT not set — skipping staging-smoke trigger."
+            echo "Add a PAT with repo scope on antsa-pty-ltd/infra to enable."
+            exit 0
+          fi
+          gh api -X POST /repos/antsa-pty-ltd/infra/dispatches \
+            -f event_type=post-prod-deploy-smoke \
+            -f client_payload[service]=haystack \
+            -f client_payload[sha]="${DISPATCH_SHA}" \
+            -f client_payload[ref]="${DISPATCH_REF}"
+          echo "Dispatched post-prod-deploy-smoke to infra repo."
+
       - name: Notify Teams on develop failure
         # Inlined (rather than `uses:` infra/.github/actions/teams-notify)
         # because haystack is a public repo and can't pull composite actions
