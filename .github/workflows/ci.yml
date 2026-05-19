@@ -128,6 +128,45 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
+      - name: Verify /health post-deploy
+        # Azure considers the deploy "successful" the moment the package is
+        # accepted, but the container can still crash-loop on startup (e.g.
+        # the 2026-05 incident where the hardcoded /opt/python/3.11.14 path
+        # in startup.sh disappeared after Azure rolled the base image,
+        # producing exit code 127 + ContainerTimeout for hours while CI
+        # showed green). Probe /health for up to 9 minutes so we fail the
+        # workflow when the container doesn't actually come up.
+        shell: bash
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          DEPLOY_ENV: ${{ env.DEPLOY_ENV }}
+        run: |
+          set -u
+          URL="https://${APP_NAME}.azurewebsites.net/health"
+          if [ "${DEPLOY_ENV}" = "production" ]; then
+            RG="PRODUCTION"
+          else
+            RG="rg-antsa-staging"
+          fi
+          echo "Probing ${URL} for up to 540s (cold start budget)..."
+          end=$(( $(date +%s) + 540 ))
+          attempt=0
+          while [ "$(date +%s)" -lt "${end}" ]; do
+            attempt=$((attempt + 1))
+            body=$(curl -sS -m 20 -w $'\n%{http_code}' "${URL}" || true)
+            code=$(printf '%s' "${body}" | tail -n1)
+            payload=$(printf '%s' "${body}" | sed '$d')
+            if [ "${code}" = "200" ] && printf '%s' "${payload}" | grep -q '"status":"healthy"'; then
+              echo "✓ ${APP_NAME} healthy after ${attempt} attempt(s): ${payload}"
+              exit 0
+            fi
+            echo "$(date -u +%H:%M:%S) attempt=${attempt} code=${code}; retrying in 10s"
+            sleep 10
+          done
+          echo "✗ ${APP_NAME} failed /health check after 540s — dumping recent logs:"
+          az webapp log tail --name "${APP_NAME}" --resource-group "${RG}" 2>&1 | head -n 100 || true
+          exit 1
+
       - name: Notify Teams on develop failure
         # Inlined (rather than `uses:` infra/.github/actions/teams-notify)
         # because haystack is a public repo and can't pull composite actions
