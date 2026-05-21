@@ -46,7 +46,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_summary",
-                        "description": "Get a detailed non-conversation summary of client information including recent sessions, notes, and treatment progress. Requires a client_id. If you only have a client name, use search_clients first to get the client_id. Do NOT use this for conversations or chat transcripts — for those use get_latest_conversation, get_conversations, or get_conversation_messages.",
+                        "description": "Detailed client summary (recent sessions, notes, treatment progress). Requires a client_id obtained from a prior client search. Not for chat/conversation transcripts — use the conversation tools for those.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -73,7 +73,7 @@ class ToolManager:
                     "type": "function", 
                     "function": {
                         "name": "search_clients",
-                        "description": "Search for clients by name or ID to obtain a client_id for subsequent calls (e.g., get_client_summary or conversation tools).",
+                        "description": "Search clients by name or ID. Returns client_id values used by other client/conversation tools.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -281,7 +281,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_homework_status",
-                        "description": "Get homework/assignment status for a specific client including latest assignments, completion status, and conversation details. IMPORTANT: You MUST first use search_clients or search_specific_clients to find the client and get their client_id, then use that exact client_id in this function. Never guess or fabricate a client_id.",
+                        "description": "Homework/assignment status for a client (latest assignments, completion, conversation details). Requires a real client_id obtained from a prior client search — never fabricate one.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -352,7 +352,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_conversations",
-                        "description": "Get all conversation threads (homework assignments) for a client. Use when the user asks to see all chats/threads with ANTSAbot.",
+                        "description": "List all conversation threads (homework assignments) for a client.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -374,7 +374,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_conversation_messages",
-                        "description": "Get messages from a specific conversation thread with ANTSAbot (requires assignment_id). Use after listing conversations if the user wants a particular thread.",
+                        "description": "Fetch messages from a specific conversation thread. Requires an assignment_id from a prior conversation-list call.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -411,7 +411,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_latest_conversation",
-                        "description": "Get the latest conversation between a client and ANTSAbot AI assistant (recent chat/messages). Use for queries like 'latest chat', 'recent messages', 'what did they talk about'.",
+                        "description": "Latest conversation/chat messages between a client and the AI assistant.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -438,7 +438,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_homework_result_detail",
-                        "description": "Get detailed results of a specific homework result/submission, including the client's responses, scores, feedback, and the actual questions answered. Use this to see WHAT the client answered on homework tasks like K10, AUDIT, questionnaires, etc. Requires homework_result_id which you can get from get_homework_results_by_assignment.",
+                        "description": "Detailed homework submission results (client responses, scores, feedback, questions answered) for instruments like K10, AUDIT, etc. Requires a homework_result_id from the assignment-results list.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -465,7 +465,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_homework_results_by_assignment",
-                        "description": "Get a list of all homework result submissions for a specific homework assignment. Returns homework_result_ids that can be used with get_homework_result_detail to see the actual answers. Use this when you want to see completed homework for an assignment.",
+                        "description": "List all homework submissions for a given assignment. Returns result identifiers used to fetch individual submission detail.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -498,7 +498,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "search_sessions",
-                        "description": "Search for transcription sessions by client name, date range, or keywords. Use for queries like 'John's latest session', 'sessions from last week', 'find sessions about anxiety'.",
+                        "description": "Search transcription sessions by client name, date range, or keywords.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -571,7 +571,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "validate_sessions",
-                        "description": "Validate that sessions have available transcript content before loading. Use this before load_session_direct or load_multiple_sessions to avoid 404 errors.",
+                        "description": "Validate that sessions have transcript content available. Run before loading sessions to avoid 404 errors.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -829,7 +829,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "load_multiple_sessions",
-                        "description": "Load multiple sessions as separate tabs in the UI. CRITICAL: When user asks to load sessions, you MUST call BOTH set_client_selection AND load_multiple_sessions in sequence. This tool loads the actual session content into the UI. Use validate_sessions first to check sessions are valid.",
+                        "description": "Load multiple sessions as separate tabs in the UI. CRITICAL: when the user asks to load sessions you must set client selection first, then load — and validate the sessions beforehand to confirm they exist.",
                         "parameters": {
                             "type": "object",
                             "properties": {
