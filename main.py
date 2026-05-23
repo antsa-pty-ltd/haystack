@@ -107,17 +107,16 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
     """
     Emit progress update to API via HTTP POST, which will broadcast via WebSocket.
 
-    Pentest 2026-05-20 finding #17, final close-out (2026-05-23). The API's
-    /ai/websocket/document-progress endpoint is now authenticated as a
-    Haystack->API webhook, using a shared secret in `HAYSTACK_WEBHOOK_SECRET`
-    presented as `X-Haystack-Secret`. The previous JWT-forwarding scheme was
-    fragile across multi-profile users; see api/src/commons/guards/
-    haystack-webhook.guard.ts for the matching guard.
+    Authenticated as a Haystack -> API webhook with a shared secret in
+    `HAYSTACK_WEBHOOK_SECRET`, presented as the `X-Haystack-Secret` header.
+    See `api/src/commons/guards/haystack-webhook.guard.ts` for the matching
+    guard, and pentest 2026-05-20 finding #17 for the rationale.
 
-    `authorization` is still forwarded during the API rollout window —
-    the new API code ignores it, but the previous JWT-gated API code
-    needs it. A follow-up cleanup removes the forwarding once both
-    repos are stable on the new model in prod.
+    `authorization` is accepted on the signature for backwards source-call
+    compatibility (internal callers still pass it positionally) but is no
+    longer used — the API route is `@Public() + HaystackWebhookGuard` and
+    ignores the Authorization header entirely. Remove the parameter (and
+    update callers) in a future cleanup once nothing else cares.
     """
     if not generation_id:
         # No generationId means no progress tracking (legacy mode)
@@ -128,7 +127,7 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
         webhook_secret = os.getenv("HAYSTACK_WEBHOOK_SECRET")
 
         if not webhook_secret:
-            # Hard-fail at log level; the API will 401/500 the call anyway.
+            # Hard-fail at log level; the API will 401 the call anyway.
             # Better to log the misconfig explicitly so ops sees it before
             # they're chasing "why didn't the doc finish on the client?".
             logger.error(
@@ -145,16 +144,6 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
         headers: dict[str, str] = {}
         if webhook_secret:
             headers["X-Haystack-Secret"] = webhook_secret
-        # Keep forwarding the user Authorization header during the API
-        # rollout — the new API code ignores it (the route is @Public()
-        # behind HaystackWebhookGuard) but a deploy-order race between
-        # this repo and the API repo could briefly land Haystack on the
-        # new code while the API is still on the old JWT-gated code.
-        # Forwarding both headers keeps both API versions happy. A
-        # follow-up cleanup PR removes this once both repos are stable
-        # on the new model in prod.
-        if authorization:
-            headers["Authorization"] = authorization
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
