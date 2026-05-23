@@ -941,7 +941,26 @@ Tools that trigger UI changes return:
 OPENAI_API_KEY=sk-...
 NESTJS_API_URL=http://localhost:8080  # API service URL (default port 8080)
 REDIS_URL=redis://localhost:6379
+HAYSTACK_WEBHOOK_SECRET=...           # Shared secret with the API for the
+                                      # doc-gen progress callback (see below)
 ```
+
+### Doc-gen progress callback auth (2026-05-23)
+
+`emit_progress` in `main.py` POSTs to `/api/v1/ai/websocket/document-progress`
+on the API. That endpoint is authenticated as a Haystack→API webhook using a
+shared secret in `HAYSTACK_WEBHOOK_SECRET`, presented as the `X-Haystack-Secret`
+header. **The matching env on the API app service must hold the same value**
+or every progress callback 401s and the scribe will spin forever in the SPA.
+
+Set on all four AU app services (api+haystack × staging+production); rotate
+together. Do NOT roll out a value change to only one side. Matching API guard:
+`api/src/commons/guards/haystack-webhook.guard.ts`. Same pattern as the
+existing `JibriWebhookGuard`.
+
+User-identity auth (forwarding the practitioner's JWT) was removed from this
+route — it was wrong for a service-to-service callback. See the
+**2026-05-23 scribe outage retro** in the root `CLAUDE.md` for the full story.
 
 ### Key Defaults
 - API runs on port **8080** (not 3000)
