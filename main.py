@@ -105,32 +105,64 @@ SEMANTIC_SEARCH_CONFIG = {
 # ===== PROGRESS EMISSION HELPER =====
 async def emit_progress(generation_id: str, data: dict, authorization: Optional[str] = None):
     """
-    Emit progress update to API via HTTP POST, which will broadcast via WebSocket
+    Emit progress update to API via HTTP POST, which will broadcast via WebSocket.
+
+    Pentest 2026-05-20 finding #17, final close-out (2026-05-23). The API's
+    /ai/websocket/document-progress endpoint is now authenticated as a
+    Haystack->API webhook, using a shared secret in `HAYSTACK_WEBHOOK_SECRET`
+    presented as `X-Haystack-Secret`. The previous JWT-forwarding scheme was
+    fragile across multi-profile users; see api/src/commons/guards/
+    haystack-webhook.guard.ts for the matching guard.
+
+    `authorization` is still forwarded during the API rollout window —
+    the new API code ignores it, but the previous JWT-gated API code
+    needs it. A follow-up cleanup removes the forwarding once both
+    repos are stable on the new model in prod.
     """
     if not generation_id:
         # No generationId means no progress tracking (legacy mode)
         return
-    
+
     try:
         api_url = os.getenv("NESTJS_API_URL", "http://localhost:8080")
-        
+        webhook_secret = os.getenv("HAYSTACK_WEBHOOK_SECRET")
+
+        if not webhook_secret:
+            # Hard-fail at log level; the API will 401/500 the call anyway.
+            # Better to log the misconfig explicitly so ops sees it before
+            # they're chasing "why didn't the doc finish on the client?".
+            logger.error(
+                "HAYSTACK_WEBHOOK_SECRET is not set on this Haystack instance. "
+                "Doc-gen progress callbacks to the API will fail. Set the env "
+                "(must match the value on the matching API app service) and restart."
+            )
+
         payload = {
             "generationId": generation_id,
             **data
         }
-        
-        # Use Authorization header if provided
-        headers = {}
+
+        headers: dict[str, str] = {}
+        if webhook_secret:
+            headers["X-Haystack-Secret"] = webhook_secret
+        # Keep forwarding the user Authorization header during the API
+        # rollout — the new API code ignores it (the route is @Public()
+        # behind HaystackWebhookGuard) but a deploy-order race between
+        # this repo and the API repo could briefly land Haystack on the
+        # new code while the API is still on the old JWT-gated code.
+        # Forwarding both headers keeps both API versions happy. A
+        # follow-up cleanup PR removes this once both repos are stable
+        # on the new model in prod.
         if authorization:
             headers["Authorization"] = authorization
-        
+
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{api_url}/api/v1/ai/websocket/document-progress",
                 json=payload,
                 headers=headers
             )
-            
+
             if response.status_code != 200:
                 logger.warning(f"Failed to emit progress (HTTP {response.status_code}): {response.text}")
     except Exception as e:
