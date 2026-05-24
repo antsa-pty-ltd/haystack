@@ -22,6 +22,13 @@ class ExplorationContext:
         self.token_budget: int = 150000  # Increased to handle 10+ sessions comfortably
         self.sessions_explored: List[str] = []
         self.authorization: Optional[str] = None
+        # The caller's `profileid` HTTP header. Required when calling back to
+        # the API: `ExtractProfileMiddleware` only populates `req.profile`
+        # when this header is present, and several agent-tool endpoints
+        # (segments-by-sessions, semantic-search) use `req.profile.id` as
+        # the tenancy key. Without this forwarded header the API's filter
+        # short-circuits to `[]` and the agent collects zero segments.
+        self.profileid: Optional[str] = None
         self.generation_id: Optional[str] = None
         self._segment_ids: set = set()  # Track segment IDs for deduplication
         
@@ -76,12 +83,30 @@ def get_exploration_context() -> ExplorationContext:
     return _exploration_context
 
 
-def reset_exploration_context(authorization: str = None, generation_id: str = None):
+def reset_exploration_context(authorization: str = None, generation_id: str = None, profileid: str = None):
     """Reset exploration context for a new document generation"""
     global _exploration_context
     _exploration_context = ExplorationContext()
     _exploration_context.authorization = authorization
+    _exploration_context.profileid = profileid
     _exploration_context.generation_id = generation_id
+
+
+def _api_headers(context: "ExplorationContext") -> Dict[str, str]:
+    """Build the header dict forwarded on every API tool callback.
+
+    Both `Authorization` and `profileid` are required:
+      - `Authorization` (JWT) passes the API's `IsUserGuard`.
+      - `profileid` is consumed by `ExtractProfileMiddleware`, which sets
+        `req.profile`. Without it, `req.profile.id` is undefined on the
+        API side and the tenancy filter returns `[]`.
+    """
+    headers: Dict[str, str] = {}
+    if context.authorization:
+        headers["Authorization"] = context.authorization
+    if context.profileid:
+        headers["profileid"] = context.profileid
+    return headers
 
 
 async def peek_session(
@@ -114,7 +139,7 @@ async def peek_session(
                     "session_ids": [session_id],
                     "limit_per_session": num_segments
                 },
-                headers={"Authorization": context.authorization} if context.authorization else {}
+                headers=_api_headers(context)
             )
             response.raise_for_status()
             response_data = response.json()
@@ -189,7 +214,7 @@ async def search_session(
                     "limit": max_results,
                     "similarity_threshold": 0.3  # Lower threshold for better results
                 },
-                headers={"Authorization": context.authorization} if context.authorization else {}
+                headers=_api_headers(context)
             )
             response.raise_for_status()
             response_data = response.json()
@@ -256,7 +281,7 @@ async def pull_full_session(
                     "session_ids": [session_id],
                     "limit_per_session": 1000  # High limit to get all segments
                 },
-                headers={"Authorization": context.authorization} if context.authorization else {}
+                headers=_api_headers(context)
             )
             response.raise_for_status()
             response_data = response.json()
