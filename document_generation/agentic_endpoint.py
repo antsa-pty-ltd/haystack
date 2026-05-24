@@ -327,14 +327,18 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
         if not agent:
             raise HTTPException(status_code=500, detail="Document agent not initialized")
         
-        # Let agent autonomously explore and decide (with real-time reasoning updates)
+        # Let agent autonomously explore and decide (with real-time reasoning updates).
+        # `profileid` is forwarded to API tool callbacks alongside `authorization`
+        # so the API can resolve `req.profile` — required for the tenancy filter
+        # on segments-by-sessions / semantic-search to return non-empty results.
         exploration_result = await agent.explore_and_decide(
             session_ids=session_ids,
             template_name=template.get('name', 'Unknown'),
             template_content=template_content,
             authorization=authorization,
             generation_id=generation_id,
-            emit_progress_func=emit_progress_func
+            emit_progress_func=emit_progress_func,
+            profileid=profileid,
         )
         
         if not exploration_result['success']:

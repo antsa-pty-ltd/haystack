@@ -236,11 +236,12 @@ class DocumentExplorationAgent:
         template_content: str,
         authorization: Optional[str] = None,
         generation_id: Optional[str] = None,
-        emit_progress_func = None
+        emit_progress_func = None,
+        profileid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Let the agent autonomously explore sessions and decide when to generate.
-        
+
         Args:
             session_ids: List of session IDs to explore
             template_name: Name of the document template
@@ -248,12 +249,15 @@ class DocumentExplorationAgent:
             authorization: Authorization header for API calls
             generation_id: Generation ID for progress tracking
             emit_progress_func: Function to emit progress updates (optional)
-            
+            profileid: Profile ID header — forwarded to API tool callbacks so
+                       `ExtractProfileMiddleware` can resolve `req.profile`.
+                       Without it, the API tenancy filter returns `[]`.
+
         Returns:
             Dict with accumulated segments and agent's decision trail
         """
         # Reset exploration context for this generation
-        reset_exploration_context(authorization, generation_id)
+        reset_exploration_context(authorization, generation_id, profileid)
         
         # Build initial message for the agent
         session_list = ", ".join(session_ids)
