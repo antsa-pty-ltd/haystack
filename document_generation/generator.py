@@ -176,17 +176,59 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         if generation_instructions:
             system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nIMPORTANT: This additional context should be integrated into your understanding of the transcript and used to correct any assumptions or add missing background information. Regenerate the document incorporating this new information.\n"
         
-        # Check if this is a modification/regeneration request
-        is_regeneration = template_content.startswith("CRITICAL INSTRUCTIONS FOR AI ASSISTANT:")
-        
+        # Check if this is a modification/regeneration request.
+        #
+        # Two refinement framings exist in the wild, both must route here:
+        #   1. Haystack's own `_refine_document` tool (tools.py) wraps its
+        #      refinement prompt with a "CRITICAL INSTRUCTIONS FOR AI ASSISTANT:"
+        #      header — the legacy marker.
+        #   2. The web Refine tab (web commit fc8c394a4 / PR #277) sends a
+        #      prompt framed with "ORIGINAL DOCUMENT:" + "REQUESTED MODIFICATIONS:"
+        #      markers and a closing "REFINED DOCUMENT:" cue.
+        #
+        # Before this fix, only (1) was detected. (2) fell through to the
+        # "normal generation" branch, which wrapped the user's refine prompt
+        # as if it were a fresh template and re-rendered it against the
+        # transcripts — silently ignoring the user's edit (e.g. "change
+        # Hermione to Sally-Anne" returned a doc still saying Hermione).
+        # See 2026-05-25 scribe refine outage.
+        is_legacy_regeneration = template_content.startswith(
+            "CRITICAL INSTRUCTIONS FOR AI ASSISTANT:"
+        )
+        is_web_refinement = (
+            "ORIGINAL DOCUMENT:" in template_content
+            and "REQUESTED MODIFICATIONS:" in template_content
+        )
+        is_regeneration = is_legacy_regeneration or is_web_refinement
+
         # Build source content section (transcript and/or notes)
         source_content = ""
         if transcript_text:
             source_content += f"**Session Transcript:**\n{transcript_text}\n"
         if notes_text:
             source_content += f"\n{notes_text}\n"
-        
-        if is_regeneration:
+
+        if is_web_refinement:
+            # Web Refine tab: the template_content is itself a complete,
+            # edit-framed prompt (original document + requested modifications
+            # already embedded). Pass it through with minimal wrapping and an
+            # explicit instruction NOT to regenerate from transcripts. The
+            # transcript is deliberately omitted from the user prompt — its
+            # presence has historically tempted the model to regenerate from
+            # scratch and lose the user's edit.
+            logger.info(
+                "🪄 Web refinement detected (ORIGINAL DOCUMENT / REQUESTED MODIFICATIONS markers); "
+                "routing to refinement prompt builder"
+            )
+            user_prompt = f"""You are editing an existing clinical document. Apply ONLY the requested modifications. Do NOT regenerate the document from session transcripts. Preserve all unchanged content verbatim — section headings, clinical tone, and structure must remain identical.
+
+**Client:** {client_name}
+**Practitioner:** {practitioner_name}
+**Today's Date:** {today}
+
+{template_content}
+"""
+        elif is_legacy_regeneration:
             user_prompt = f"""Modify the existing document based on the modification request.
 
 **Client:** {client_name}
