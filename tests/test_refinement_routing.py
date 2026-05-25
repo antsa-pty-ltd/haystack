@@ -61,8 +61,7 @@ change Hermione to Sally-Anne
 REFINED DOCUMENT:"""
 
 
-@pytest.mark.asyncio
-async def test_web_refinement_routes_to_edit_prompt():
+def test_web_refinement_routes_to_edit_prompt():
     """
     Web Refine tab framing must route to the refinement prompt builder, NOT
     the normal generation branch. The user prompt sent to OpenAI MUST:
@@ -90,7 +89,7 @@ async def test_web_refinement_routes_to_edit_prompt():
         },
     ]
 
-    await generate_document_from_context(
+    asyncio.run(generate_document_from_context(
         segments=transcript_segments,
         template={
             "id": "tmpl-1",
@@ -101,7 +100,7 @@ async def test_web_refinement_routes_to_edit_prompt():
         practitioner_info={"id": "p-1", "name": "Dr Smith"},
         generation_instructions=None,
         openai_client=openai_client,
-    )
+    ))
 
     assert len(captured) == 1, "OpenAI should be called exactly once"
     messages = captured[0]["messages"]
@@ -127,8 +126,7 @@ async def test_web_refinement_routes_to_edit_prompt():
     assert "How have you been since our last session?" not in user_prompt
 
 
-@pytest.mark.asyncio
-async def test_legacy_regeneration_marker_still_routes_to_edit_prompt():
+def test_legacy_regeneration_marker_still_routes_to_edit_prompt():
     """
     Haystack's own `_refine_document` tool emits a refinement prompt starting
     with "CRITICAL INSTRUCTIONS FOR AI ASSISTANT:". This existing path must
@@ -148,14 +146,14 @@ Please refine the following document according to these instructions:
 Dr Smith met with Sally-Anne Jones today.
 """
 
-    await generate_document_from_context(
+    asyncio.run(generate_document_from_context(
         segments=[],
         template={"id": "t", "name": "Refine", "content": legacy_template},
         client_info={"id": "c-1", "name": "Sally-Anne"},
         practitioner_info={"id": "p-1", "name": "Dr Smith"},
         generation_instructions=None,
         openai_client=openai_client,
-    )
+    ))
 
     assert len(captured) == 1
     user_prompt = next(
@@ -166,8 +164,7 @@ Dr Smith met with Sally-Anne Jones today.
     assert "use first names only" in user_prompt
 
 
-@pytest.mark.asyncio
-async def test_normal_template_still_routes_to_generation():
+def test_normal_template_still_routes_to_generation():
     """
     A plain template (no refinement markers) must still flow through the
     normal generation path, embedding the transcript as Source Content.
@@ -175,7 +172,7 @@ async def test_normal_template_still_routes_to_generation():
     captured: List[Dict[str, Any]] = []
     openai_client = _make_openai_client(captured)
 
-    await generate_document_from_context(
+    asyncio.run(generate_document_from_context(
         segments=[
             {
                 "speaker": "Therapist",
@@ -193,7 +190,7 @@ async def test_normal_template_still_routes_to_generation():
         practitioner_info={"id": "p-1", "name": "Dr Smith"},
         generation_instructions=None,
         openai_client=openai_client,
-    )
+    ))
 
     user_prompt = next(
         m["content"] for m in captured[0]["messages"] if m["role"] == "user"
