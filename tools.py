@@ -1322,7 +1322,7 @@ class ToolManager:
                 self.tools["get_generated_documents"]["definition"],
                 self.tools["refine_document"]["definition"]
             ]
-        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist", "antsabot_companion"):
             return [
                 self.tools["mood_check_in"]["definition"],
                 self.tools["coping_strategies"]["definition"],
@@ -1379,10 +1379,10 @@ class ToolManager:
                 "get_generated_documents": self.tools["get_generated_documents"]["implementation"],
                 "refine_document": self.tools["refine_document"]["implementation"]
             }
-        elif persona_type in ("jaimee_therapist", "antsabot_therapist"):
+        elif persona_type in ("jaimee_therapist", "antsabot_therapist", "antsabot_companion"):
             return {
                 "mood_check_in": self.tools["mood_check_in"]["implementation"],
-                "coping_strategies": self.tools["coping_strategies"]["implementation"], 
+                "coping_strategies": self.tools["coping_strategies"]["implementation"],
                 "breathing_exercise": self.tools["breathing_exercise"]["implementation"],
                 "get_client_mood_profile": self.tools["get_client_mood_profile"]["implementation"],
                 "get_user_profile": self.tools["get_user_profile"]["implementation"]

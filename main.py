@@ -1059,6 +1059,19 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "page_context": derived.get("page_type"),
                     "profile_id": profile_id,  # Include profile_id for session recovery
                 }
+                # Country code (root CLAUDE.md: x-country-code on every request)
+                # threads through so the B2C companion can surface the correct
+                # country-specific crisis lines. Falls back to the platform
+                # default downstream when absent.
+                country_code = (
+                    message_data.get("country_code")
+                    or message_data.get("countryCode")
+                    or incoming_context.get("country_code")
+                    or incoming_context.get("countryCode")
+                    or incoming_context.get("country")
+                )
+                if country_code:
+                    context_for_pipeline["country_code"] = country_code
                 if incoming_context.get("conversation_history"):
                     context_for_pipeline["conversation_history"] = incoming_context["conversation_history"]
 
