@@ -27,8 +27,10 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # OpenAIChatGenerator construction needs a non-empty key (no network call is
-# made at construction time). Set a dummy one before importing the manager.
-os.environ.setdefault("OPENAI_API_KEY", "sk-test-dummy-key")
+# made at construction time). CI exports OPENAI_API_KEY as an empty string, so
+# setdefault() is not enough — force a dummy whenever it's missing OR blank.
+if not os.environ.get("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
 
 from personas import PersonaType  # noqa: E402
 from haystack_pipeline import HaystackPipelineManager  # noqa: E402
