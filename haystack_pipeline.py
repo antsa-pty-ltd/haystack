@@ -17,6 +17,7 @@ from haystack.dataclasses import ChatMessage, ChatRole, StreamingChunk
 from haystack.utils import Secret
 
 from config import settings
+from crisis_resources import build_crisis_resources_block
 from personas import PersonaType, persona_manager
 from session_manager import session_manager
 from tools import tool_manager
@@ -79,6 +80,7 @@ class HaystackPipelineManager:
             # Create persona-specific pipelines
             self._create_web_assistant_pipeline()
             self._create_antsabot_therapist_pipeline()
+            self._create_antsabot_companion_pipeline()
             self._create_transcriber_agent_pipeline()
             
             self._initialized = True
@@ -198,6 +200,56 @@ class HaystackPipelineManager:
         # Backward compatibility: jaimee_therapist resolves to the same pipeline
         self.pipelines[PersonaType.JAIMEE_THERAPIST] = pipeline
         logger.info("✅ Created ANTSABOT_THERAPIST declarative pipeline")
+
+    def _create_antsabot_companion_pipeline(self):
+        """
+        Create ANTSABOT_COMPANION pipeline — the B2C wellbeing companion.
+
+        Identical shape to the therapist pipeline (same client-scoped tool set,
+        no UI actions). Differs only in persona config (system prompt framing);
+        the therapist pipeline is left untouched.
+        """
+        persona_config = persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION)
+        tools = tool_manager.get_haystack_component_tools("antsabot_companion")
+
+        routes = [
+            {
+                "condition": "{{replies and replies[0].tool_calls | length > 0}}",
+                "output": "{{replies}}",
+                "output_name": "has_tool_calls",
+                "output_type": List[ChatMessage],
+            },
+            {
+                "condition": "{{not replies or replies[0].tool_calls | length == 0}}",
+                "output": "{{replies}}",
+                "output_name": "final_response",
+                "output_type": List[ChatMessage],
+            },
+        ]
+
+        pipeline = Pipeline(max_runs_per_component=15)  # Fewer iterations needed
+
+        pipeline.add_component("message_collector", MessageCollector())
+        pipeline.add_component("generator", OpenAIChatGenerator(
+            model=persona_config.model,
+            api_key=Secret.from_token(settings.openai_api_key),
+            tools=tools,  # Pass tools to the generator so it knows what's available
+            generation_kwargs={
+                "temperature": persona_config.temperature,
+                "max_completion_tokens": persona_config.max_completion_tokens
+            }
+        ))
+        pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
+        pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
+
+        # Connections - simpler than web_assistant (no UI collector)
+        pipeline.connect("generator.replies", "router")
+        pipeline.connect("router.has_tool_calls", "tool_invoker")
+        pipeline.connect("tool_invoker.tool_messages", "message_collector")
+        pipeline.connect("message_collector", "generator.messages")
+
+        self.pipelines[PersonaType.ANTSABOT_COMPANION] = pipeline
+        logger.info("✅ Created ANTSABOT_COMPANION declarative pipeline")
     
     def _create_transcriber_agent_pipeline(self):
         """
@@ -421,6 +473,24 @@ class HaystackPipelineManager:
             # Get persona config and system prompt
             persona_config = persona_manager.get_persona(persona_type)
             system_prompt = persona_manager.get_system_prompt(persona_type, context or session.context)
+
+            # B2C companion: inject concrete country-specific crisis resources.
+            # The companion's crisis protocol tells the model to surface
+            # country-specific crisis lines, but nothing upstream reliably
+            # delivers them and get_system_prompt() drops context for a
+            # has_db_access=False persona. There is NO practitioner to escalate
+            # to, so the receiving end for the "crisis lines injected upstream"
+            # contract lives here: resolve a country code from the request
+            # context (defaulting to the platform default) and append concrete
+            # contacts so the model never has to hallucinate a number.
+            if persona_type == PersonaType.ANTSABOT_COMPANION:
+                _ctx = context or session.context or {}
+                country_code = (
+                    _ctx.get("country_code")
+                    or _ctx.get("countryCode")
+                    or _ctx.get("country")
+                )
+                system_prompt += build_crisis_resources_block(country_code)
 
             # Bug 263: embed the currently-loaded ("active") document content
             # in the system prompt so the model can answer questions about a
