@@ -91,13 +91,18 @@ jobs:
         run: |
           mkdir deploy
 
-          # Copy application source only (no venv - built on Azure at runtime)
-          cp main.py config.py personas.py session_manager.py haystack_pipeline.py \
-             ui_state_manager.py tools.py requirements.txt startup.sh deploy/
+          # Copy application source only (no venv - built on Azure at runtime).
+          # Copy ALL root-level .py modules rather than a hardcoded list: the
+          # explicit list silently dropped crisis_resources.py when it was added
+          # (haystack_pipeline.py imports it), crashing the container on startup
+          # with ModuleNotFoundError. A glob can't drift out of sync. Test-only
+          # files (conftest.py, test_integration.py) are inert in wwwroot.
+          cp *.py requirements.txt startup.sh deploy/
           cp -r components agents document_generation utils deploy/
 
-          # Verify main.py is present
+          # Verify main.py + every root module it transitively imports made it in.
           test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
+          test -f deploy/crisis_resources.py || { echo "ERROR: crisis_resources.py not found!"; exit 1; }
 
           # Create Python entrypoint
           printf '#!/usr/bin/env python3\nimport subprocess, sys\nsys.exit(subprocess.call(["bash", "startup.sh"]))\n' > deploy/startup.py
