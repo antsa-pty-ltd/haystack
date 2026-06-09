@@ -118,16 +118,20 @@ def test_companion_prompt_has_hardened_crisis_protocol():
     assert "emergency services" in lower
     # Self-harm / suicide handling is named.
     assert "self-harm" in lower or "suicide" in lower
-    # Never claims a human is monitoring / will be alerted.
-    assert "no practitioner" in lower or "no practitioner or care team" in lower
+    # Defers to PRACTITIONER CONTEXT for whether a practitioner exists;
+    # base prompt must not hardcode "no practitioner" but should reference
+    # the injected section.
+    assert "practitioner context" in lower or "no practitioner" in lower
 
 
 def test_companion_prompt_has_care_steering():
     """Gentle steering toward a professional + the in-app connect option."""
     prompt = persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION).system_prompt
 
-    assert "Connect with your practitioner" in prompt
     lower = prompt.lower()
+    # Care-steering references the PRACTITIONER CONTEXT section for how to
+    # recommend professional support.
+    assert "practitioner context" in lower or "connect with a practitioner" in lower
     assert "mental health professional" in lower or "professional" in lower
     # Steering must be framed as gentle / non-pushy.
     assert "gentle" in lower or "non-pushy" in lower

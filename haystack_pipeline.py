@@ -18,6 +18,7 @@ from haystack.utils import Secret
 
 from config import settings
 from crisis_resources import build_crisis_resources_block
+from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
 from personas import PersonaType, persona_manager
 from session_manager import session_manager
 from tools import tool_manager
@@ -491,6 +492,26 @@ class HaystackPipelineManager:
                     or _ctx.get("country")
                 )
                 system_prompt += build_crisis_resources_block(country_code)
+
+            # Practitioner context: inject named-practitioner guidance so the
+            # model can give specific recommendations (e.g. "talk to Sally,
+            # your psychologist") rather than generic "seek professional help".
+            if persona_type in (PersonaType.ANTSABOT_COMPANION, PersonaType.ANTSABOT_THERAPIST):
+                try:
+                    _pract_token = auth_token or (session.auth_token if session else None)
+                    if _pract_token:
+                        _pract_info = await fetch_practitioner_context(_pract_token)
+                        system_prompt += build_practitioner_context_block(_pract_info)
+                    else:
+                        system_prompt += build_practitioner_context_block(None)
+                except Exception as _pract_err:  # noqa: BLE001 — never block chat
+                    logger.warning(
+                        f"practitioner-context: failed to fetch for session "
+                        f"{session_id}: {_pract_err}"
+                    )
+                    # Fall through — the persona prompt's fallback instructions
+                    # tell the model to assume no practitioner if the section
+                    # is absent.
 
             # Bug 263: embed the currently-loaded ("active") document content
             # in the system prompt so the model can answer questions about a
