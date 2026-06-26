@@ -9,7 +9,11 @@ on:
 
 jobs:
   develop-only:
-    name: develop-only
+    # Job display name MUST equal the required status-check context in the
+    # master-protection ruleset ("Source branch / develop-only"), matching the
+    # web/api repos. A mismatch leaves the required check stuck "Expected" and
+    # blocks develop→master promotion PRs.
+    name: Source branch / develop-only
     runs-on: ubuntu-latest
     steps:
       - name: Verify source branch is develop
