@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
+from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,13 +50,34 @@ async def generate_document_from_context(
     """
     try:
         template_content = template.get('content', '')
-        client_name = client_info.get('name', 'Client')
-        practitioner_name = practitioner_info.get('name', 'Practitioner')
+        # PRIVACY: the NestJS api sends tokenized identifiers (e.g. [CLIENT_NAME],
+        # [PRACTITIONER_NAME]); real names are substituted back only AFTER this
+        # LLM call. Default to the tokens so a real name is never the fallback.
+        client_name = client_info.get('name', '[CLIENT_NAME]')
+        practitioner_name = practitioner_info.get('name', '[PRACTITIONER_NAME]')
+
+        # Defensive guard: if a real (untokenized) name slipped through, do NOT
+        # send it to OpenAI. Log a sanitized warning and degrade safely to the
+        # placeholder token. Never crash document generation.
+        if not is_tokenized(client_name):
+            logger.warning(
+                "⚠️ Untokenized client name reached document generator; "
+                "replacing with [CLIENT_NAME]. client_info=%s",
+                sanitize_dict_for_logging(client_info),
+            )
+            client_name = "[CLIENT_NAME]"
+        if not is_tokenized(practitioner_name):
+            logger.warning(
+                "⚠️ Untokenized practitioner name reached document generator; "
+                "replacing with [PRACTITIONER_NAME]. practitioner_info=%s",
+                sanitize_dict_for_logging(practitioner_info),
+            )
+            practitioner_name = "[PRACTITIONER_NAME]"
         today = datetime.now().strftime("%B %d, %Y")
         
         # Log detailed segment information for debugging
         unique_transcript_ids = set(seg.get('transcript_id', seg.get('transcriptId', 'unknown')) for seg in segments)
-        logger.info(f"🎨 Generating document: {len(segments)} segments from {len(unique_transcript_ids)} sessions, Client ID: '{client_info.get('id', 'unknown')}'")
+        logger.info(sanitize_for_logging(f"🎨 Generating document: {len(segments)} segments from {len(unique_transcript_ids)} sessions, Client ID: '{client_info.get('id', 'unknown')}'"))
         
         # Sort segments deterministically for consistent ordering
         # Sort by: transcript_id, start_time to ensure consistent document generation
