@@ -8,6 +8,8 @@ from datetime import datetime
 from openai import OpenAI
 import os
 
+from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
+
 logger = logging.getLogger(__name__)
 
 class EndOfTreatmentGenerator:
@@ -79,8 +81,8 @@ Format the letter as a formal medical document."""
             return {
                 "letter": letter_content,
                 "metadata": {
-                    "client_name": f"{client_info.get('firstName')} {client_info.get('lastName')}",
-                    "practitioner_name": f"{practitioner_info.get('firstName')} {practitioner_info.get('lastName')}",
+                    "client_name": client_info.get('name', '[CLIENT_NAME]'),
+                    "practitioner_name": practitioner_info.get('name', '[PRACTITIONER_NAME]'),
                     "session_count": len(sessions),
                     "treatment_period": self._get_treatment_period(sessions),
                     "generated_at": datetime.now().isoformat()
@@ -100,14 +102,36 @@ Format the letter as a formal medical document."""
     ) -> str:
         """Build the prompt for GPT-4 letter generation"""
         
-        # Extract client details
-        client_name = f"{client_info.get('firstName')} {client_info.get('lastName')}"
+        # Extract client identifier.
+        # PRIVACY: The NestJS api sends a tokenized identifier (e.g. [CLIENT_NAME])
+        # in client_info['name']; the real name is substituted back only AFTER the
+        # LLM call. Use that token — do NOT concatenate firstName/lastName, which
+        # would leak real PII into the OpenAI prompt.
+        client_name = client_info.get('name', '[CLIENT_NAME]')
         client_age = client_info.get('age', 'N/A')
         client_gender = client_info.get('gender', 'N/A')
-        
-        # Extract practitioner details
-        practitioner_name = f"{practitioner_info.get('firstName')} {practitioner_info.get('lastName')}"
+
+        # Extract practitioner identifier (tokenized — see note above).
+        practitioner_name = practitioner_info.get('name', '[PRACTITIONER_NAME]')
         practitioner_title = practitioner_info.get('title', 'Clinical Psychologist')
+
+        # Defensive guard: if a real (untokenized) name slipped through from the
+        # caller, do NOT send it to OpenAI. Log a sanitized warning and degrade
+        # safely to the placeholder token. Never crash document generation.
+        if not is_tokenized(client_name):
+            logger.warning(
+                "⚠️ Untokenized client name reached end-of-treatment prompt builder; "
+                "replacing with [CLIENT_NAME]. client_info=%s",
+                sanitize_dict_for_logging(client_info),
+            )
+            client_name = "[CLIENT_NAME]"
+        if not is_tokenized(practitioner_name):
+            logger.warning(
+                "⚠️ Untokenized practitioner name reached end-of-treatment prompt builder; "
+                "replacing with [PRACTITIONER_NAME]. practitioner_info=%s",
+                sanitize_dict_for_logging(practitioner_info),
+            )
+            practitioner_name = "[PRACTITIONER_NAME]"
         
         # Get treatment period
         treatment_period = self._get_treatment_period(sessions)
