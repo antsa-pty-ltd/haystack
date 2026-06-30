@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
@@ -204,6 +205,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*", "Authorization", "ProfileID", "Content-Type"],
 )
+
+# gzip JSON responses (e.g. /chat, /sessions). Built into Starlette, no new
+# dependency. Only affects HTTP responses >= minimum_size; WebSocket streaming
+# (/ws/{session_id}) is a separate scope and is passed through untouched.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # WebSocket connections and message buffers for ordering
 websocket_connections: Dict[str, WebSocket] = {}
