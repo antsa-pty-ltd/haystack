@@ -469,11 +469,29 @@ class HaystackPipelineManager:
 
             # Add user message
             await session_manager.add_message(session_id, "user", user_message)
-            messages = await session_manager.get_messages(session_id, limit=40)
+            requested_history_limit = (context or {}).get("history_limit", 40)
+            if not isinstance(requested_history_limit, int):
+                requested_history_limit = 40
+            # API mobile chat historically replayed up to 200 prior messages,
+            # plus the new user message. Keep that parity without allowing an
+            # unbounded context request.
+            effective_history_limit = max(1, min(requested_history_limit, 201))
+            messages = await session_manager.get_messages(
+                session_id, limit=effective_history_limit
+            )
             
             # Get persona config and system prompt
             persona_config = persona_manager.get_persona(persona_type)
-            system_prompt = persona_manager.get_system_prompt(persona_type, context or session.context)
+            trusted_prompt_override = None
+            if (context or {}).get("_trusted_api_proxy"):
+                candidate_override = (context or {}).get("system_prompt_override")
+                if isinstance(candidate_override, str) and candidate_override.strip():
+                    trusted_prompt_override = candidate_override
+
+            system_prompt = (
+                trusted_prompt_override
+                or persona_manager.get_system_prompt(persona_type, context or session.context)
+            )
 
             # B2C companion: inject concrete country-specific crisis resources.
             # The companion's crisis protocol tells the model to surface
@@ -484,7 +502,10 @@ class HaystackPipelineManager:
             # contract lives here: resolve a country code from the request
             # context (defaulting to the platform default) and append concrete
             # contacts so the model never has to hallucinate a number.
-            if persona_type == PersonaType.ANTSABOT_COMPANION:
+            if (
+                persona_type == PersonaType.ANTSABOT_COMPANION
+                and not trusted_prompt_override
+            ):
                 _ctx = context or session.context or {}
                 country_code = (
                     _ctx.get("country_code")
@@ -578,7 +599,11 @@ class HaystackPipelineManager:
             tool_invoker = pipeline.get_component("tool_invoker")
             ui_collector = pipeline.get_component("ui_collector") if "ui_collector" in pipeline.graph.nodes else None
             
-            max_iterations = 25
+            # The trusted mobile bridge has a 15-second HTTP compatibility
+            # window in the released app. Client personas need only short
+            # wellbeing tool chains; bound them tightly so a model cannot loop
+            # through tools until the mobile request times out.
+            max_iterations = 6 if (context or {}).get("_trusted_api_proxy") else 25
             for iteration in range(max_iterations):
                 logger.info(f"🔄 Pipeline iteration {iteration + 1}/{max_iterations}")
                 
@@ -648,13 +673,24 @@ class HaystackPipelineManager:
                 content = self._extract_text_from_message(final_message)
                 
                 if content:
-                    # Stream word by word for better UX
-                    words = content.split(" ")
-                    for i, word in enumerate(words):
-                        chunk = word if i == 0 else f" {word}"
-                        full_response += chunk
-                        yield chunk
-                        await asyncio.sleep(0.01)
+                    if (context or {}).get("_trusted_api_proxy"):
+                        # Haystack's generator is currently non-streaming, so
+                        # sleeping between already-generated words only delays
+                        # the API response and risks the released app's 15 s
+                        # HTTP timeout. Preserve chunk events without adding
+                        # artificial latency.
+                        for start in range(0, len(content), 80):
+                            chunk = content[start : start + 80]
+                            full_response += chunk
+                            yield chunk
+                    else:
+                        # Existing web behaviour: simulated word streaming.
+                        words = content.split(" ")
+                        for i, word in enumerate(words):
+                            chunk = word if i == 0 else f" {word}"
+                            full_response += chunk
+                            yield chunk
+                            await asyncio.sleep(0.01)
                 
                 break
             
@@ -664,6 +700,8 @@ class HaystackPipelineManager:
             
         except Exception as e:
             logger.error(f"Error in pipeline response generation: {e}")
+            if (context or {}).get("_propagate_errors"):
+                raise
             error_msg = "I apologize, but I encountered an error. Please try again."
             await session_manager.add_message(session_id, "assistant", error_msg)
             yield error_msg

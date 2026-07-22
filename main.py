@@ -27,6 +27,7 @@ from agents.document_agent import initialize_agent, get_document_agent
 from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
 from config import settings
+from service_auth import is_valid_service_secret
 
 # Load environment variables
 load_dotenv()
@@ -214,6 +215,17 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # WebSocket connections and message buffers for ordering
 websocket_connections: Dict[str, WebSocket] = {}
 message_buffers: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _is_trusted_api_proxy(websocket: WebSocket) -> bool:
+    """Return true only for the API's server-to-server chat bridge.
+
+    Browser/mobile WebSocket clients cannot opt into privileged prompt
+    overrides or error propagation by putting flags in their message body.
+    Those capabilities require the same shared secret already used for
+    Haystack -> API webhooks.
+    """
+    return is_valid_service_secret(websocket.headers.get("x-haystack-secret"))
 
 class CreateSessionRequest(BaseModel):
     persona_type: str = "web_assistant"
@@ -526,7 +538,11 @@ async def health_check():
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(request: CreateSessionRequest, authorization: str = Header(None), profileid: str = Header(None)):
     try:
-        logger.info(f"🔐 Received headers - Authorization: {authorization[:20] + '...' if authorization else 'None'}, ProfileID: {profileid}")
+        logger.info(
+            "🔐 Received session headers - Authorization present: %s, ProfileID: %s",
+            bool(authorization),
+            profileid,
+        )
         
         # Extract auth token from Authorization header
         auth_token = None
@@ -552,6 +568,20 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
     except Exception as e:
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_api_proxy_session(
+    session_id: str,
+    x_haystack_secret: Optional[str] = Header(None, alias="X-Haystack-Secret"),
+):
+    """Delete an ephemeral session created by the API mobile-chat bridge."""
+    if not is_valid_service_secret(x_haystack_secret):
+        raise HTTPException(status_code=401, detail="Invalid Haystack service credential")
+
+    await session_manager.delete_session(session_id)
+    await ui_state_manager.cleanup_session(session_id)
+    return {"deleted": True}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, authorization: str = Header(None), profileid: str = Header(None)):
@@ -903,9 +933,12 @@ async def summarize_ai_conversations_endpoint(request: dict):
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    trusted_api_proxy = _is_trusted_api_proxy(websocket)
     await websocket.accept()
     websocket_connections[session_id] = websocket
     logger.info(f"WebSocket connected for session {session_id}")
+    if trusted_api_proxy:
+        logger.info(f"[mobile-chat] Trusted API agent bridge connected for session {session_id}")
     
     await websocket.send_text(json.dumps({
         "type": "connection_established",
@@ -1043,6 +1076,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # message-level context so tools can resolve page capabilities on
                 # the very first message (before a full UI state update arrives).
                 incoming_context = message_data.get("context", {})
+                if not isinstance(incoming_context, dict):
+                    incoming_context = {}
                 if not ui_state.get("page_type") and incoming_context.get("page_context"):
                     seed_state = {
                         "page_type": incoming_context["page_context"],
@@ -1080,6 +1115,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     context_for_pipeline["country_code"] = country_code
                 if incoming_context.get("conversation_history"):
                     context_for_pipeline["conversation_history"] = incoming_context["conversation_history"]
+
+                # Privileged fields are accepted only from the authenticated
+                # Nest API bridge. They preserve the existing mobile ANTSAbot
+                # system prompt (client/practitioner context + safety rules)
+                # while still running generation through Haystack's agentic
+                # tool pipeline. Never trust equivalent fields from a browser.
+                if trusted_api_proxy:
+                    system_prompt_override = incoming_context.get("system_prompt_override")
+                    if isinstance(system_prompt_override, str) and system_prompt_override.strip():
+                        context_for_pipeline["system_prompt_override"] = system_prompt_override
+                    history_limit = incoming_context.get("history_limit")
+                    if isinstance(history_limit, int):
+                        context_for_pipeline["history_limit"] = history_limit
+                    context_for_pipeline["_trusted_api_proxy"] = True
+                    context_for_pipeline["_propagate_errors"] = (
+                        incoming_context.get("propagate_errors") is True
+                    )
 
                 # Resolve persona and auth token
                 sess = await session_manager.get_session(session_id)
@@ -1145,8 +1197,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
-                await send_streaming_response(websocket, session_id, 
-                    "I encountered an error processing your request. Please try again.")
+                if trusted_api_proxy:
+                    await websocket.send_text(json.dumps({
+                        "type": "message_error",
+                        "code": "AGENT_GENERATION_FAILED",
+                        "message": "The agent could not complete this response.",
+                        "session_id": session_id,
+                    }))
+                else:
+                    await send_streaming_response(websocket, session_id,
+                        "I encountered an error processing your request. Please try again.")
             
             try:
                 await websocket.send_text(json.dumps({
