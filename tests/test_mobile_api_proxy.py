@@ -64,6 +64,31 @@ class _FakeGenerator:
             raise self.error
         return {"replies": [SimpleNamespace(content="A safe response", tool_calls=[])]}
 
+    async def run_async(self, messages, streaming_callback):
+        self.messages = messages
+        if self.error:
+            raise self.error
+        for content in ("A safe ", "response"):
+            await streaming_callback(SimpleNamespace(content=content))
+        return {"replies": [SimpleNamespace(content="A safe response", tool_calls=[])]}
+
+
+class _GatedStreamingGenerator:
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.completed = False
+
+    async def run_async(self, messages, streaming_callback):
+        await streaming_callback(SimpleNamespace(content="First"))
+        await self.release.wait()
+        await streaming_callback(SimpleNamespace(content=" response"))
+        self.completed = True
+        return {
+            "replies": [
+                SimpleNamespace(content="First response", tool_calls=[])
+            ]
+        }
+
 
 class _FakeRouter:
     def run(self, replies):
@@ -173,3 +198,30 @@ def test_api_proxy_generation_errors_propagate_instead_of_becoming_fake_success(
 
     with pytest.raises(RuntimeError, match="generator failed"):
         asyncio.run(collect())
+
+
+def test_trusted_mobile_proxy_forwards_tokens_before_generation_finishes(monkeypatch):
+    _install_session_doubles(monkeypatch)
+    generator = _GatedStreamingGenerator()
+    manager = HaystackPipelineManager()
+    manager._initialized = True
+    manager.pipelines[PersonaType.ANTSABOT_THERAPIST] = _FakePipeline(generator)
+
+    async def assert_live_streaming():
+        stream = manager.generate_response_with_chaining(
+            session_id="mobile-session",
+            persona_type=PersonaType.ANTSABOT_THERAPIST,
+            user_message="Hello",
+            context={"_trusted_api_proxy": True, "_propagate_errors": True},
+        )
+
+        first_chunk = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
+        assert first_chunk == "First"
+        assert generator.completed is False
+
+        generator.release.set()
+        remaining = [chunk async for chunk in stream]
+        assert "".join(remaining) == " response"
+        assert generator.completed is True
+
+    asyncio.run(assert_live_streaming())

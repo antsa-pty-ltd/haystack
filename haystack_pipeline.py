@@ -608,7 +608,48 @@ class HaystackPipelineManager:
                 logger.info(f"🔄 Pipeline iteration {iteration + 1}/{max_iterations}")
                 
                 # Generate response
-                gen_result = generator.run(messages=current_messages)
+                streamed_content = ""
+                if (context or {}).get("_trusted_api_proxy"):
+                    # OpenAIChatGenerator supports an async runtime streaming
+                    # callback. Bridge that callback into this async generator
+                    # so API/mobile clients receive model tokens while they are
+                    # generated, instead of receiving a completed response split
+                    # into a burst of synthetic chunks.
+                    chunk_queue: asyncio.Queue[str] = asyncio.Queue()
+
+                    async def queue_streaming_chunk(chunk: StreamingChunk) -> None:
+                        content = getattr(chunk, "content", None)
+                        if isinstance(content, str) and content:
+                            await chunk_queue.put(content)
+
+                    generation_task = asyncio.create_task(
+                        generator.run_async(
+                            messages=current_messages,
+                            streaming_callback=queue_streaming_chunk,
+                        )
+                    )
+                    try:
+                        while not generation_task.done() or not chunk_queue.empty():
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    chunk_queue.get(), timeout=0.05
+                                )
+                            except asyncio.TimeoutError:
+                                continue
+
+                            streamed_content += chunk
+                            full_response += chunk
+                            yield chunk
+
+                        gen_result = await generation_task
+                    finally:
+                        if not generation_task.done():
+                            generation_task.cancel()
+                            await asyncio.gather(
+                                generation_task, return_exceptions=True
+                            )
+                else:
+                    gen_result = generator.run(messages=current_messages)
                 replies = gen_result.get("replies", [])
                 
                 if not replies:
@@ -674,15 +715,12 @@ class HaystackPipelineManager:
                 
                 if content:
                     if (context or {}).get("_trusted_api_proxy"):
-                        # Haystack's generator is currently non-streaming, so
-                        # sleeping between already-generated words only delays
-                        # the API response and risks the released app's 15 s
-                        # HTTP timeout. Preserve chunk events without adding
-                        # artificial latency.
-                        for start in range(0, len(content), 80):
-                            chunk = content[start : start + 80]
-                            full_response += chunk
-                            yield chunk
+                        # The runtime callback above is authoritative. Retain a
+                        # fail-safe for a compatible provider that completes
+                        # without invoking its streaming callback.
+                        if not streamed_content:
+                            full_response += content
+                            yield content
                     else:
                         # Existing web behaviour: simulated word streaming.
                         words = content.split(" ")
