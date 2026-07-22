@@ -6,6 +6,7 @@ import logging
 import aiohttp
 import os
 import jwt
+from contextvars import ContextVar, copy_context
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timedelta
 from openai import OpenAI
@@ -33,9 +34,42 @@ class ToolManager:
         from config import settings
         self.tools = self._initialize_tools()
         self.api_base_url = settings.nestjs_api_url
-        self.auth_token = None  # Will be set per request
-        self.profile_id = None  # Will be set per request
-        self.current_page_context = None  # Current page context for tool execution
+        # ToolManager is shared, but these values are request-scoped. Context
+        # variables prevent concurrent WebSocket sessions from ever using a
+        # different client's JWT/profile/page context.
+        self._auth_token_context: ContextVar[Optional[str]] = ContextVar(
+            f"tool_auth_token_{id(self)}", default=None
+        )
+        self._profile_id_context: ContextVar[Optional[str]] = ContextVar(
+            f"tool_profile_id_{id(self)}", default=None
+        )
+        self._page_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+            f"tool_page_context_{id(self)}", default=None
+        )
+
+    @property
+    def auth_token(self) -> Optional[str]:
+        return self._auth_token_context.get()
+
+    @auth_token.setter
+    def auth_token(self, value: Optional[str]) -> None:
+        self._auth_token_context.set(value)
+
+    @property
+    def profile_id(self) -> Optional[str]:
+        return self._profile_id_context.get()
+
+    @profile_id.setter
+    def profile_id(self, value: Optional[str]) -> None:
+        self._profile_id_context.set(value)
+
+    @property
+    def current_page_context(self) -> Optional[Dict[str, Any]]:
+        return self._page_context.get()
+
+    @current_page_context.setter
+    def current_page_context(self, value: Optional[Dict[str, Any]]) -> None:
+        self._page_context.set(value)
     
     def _initialize_tools(self) -> Dict[str, Dict[str, Any]]:
         """Initialize all available tools"""
@@ -1455,8 +1489,9 @@ class ToolManager:
                         
                         # Run in thread pool to avoid blocking
                         from concurrent.futures import ThreadPoolExecutor
+                        request_context = copy_context()
                         with ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(run_async)
+                            future = executor.submit(request_context.run, run_async)
                             result = future.result(timeout=120)
                         
                         # Haystack ToolInvoker expects string return
