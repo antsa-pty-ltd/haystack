@@ -47,6 +47,7 @@ TOOL_DISPLAY_NAMES = {
     "refine_document": "Refining document",
     "suggest_navigation": "Suggesting navigation",
     "navigate_to_page": "Navigating",
+    "search_psychoeducation": "Searching ANTSA wellbeing resources",
 }
 
 
@@ -482,16 +483,18 @@ class HaystackPipelineManager:
             
             # Get persona config and system prompt
             persona_config = persona_manager.get_persona(persona_type)
-            trusted_prompt_override = None
+            trusted_prompt_append = None
             if (context or {}).get("_trusted_api_proxy"):
-                candidate_override = (context or {}).get("system_prompt_override")
-                if isinstance(candidate_override, str) and candidate_override.strip():
-                    trusted_prompt_override = candidate_override
+                candidate_append = (context or {}).get("system_prompt_append")
+                if isinstance(candidate_append, str) and candidate_append.strip():
+                    trusted_prompt_append = candidate_append.strip()
 
-            system_prompt = (
-                trusted_prompt_override
-                or persona_manager.get_system_prompt(persona_type, context or session.context)
-            )
+            # Haystack owns the static persona and safety contract. The trusted
+            # API bridge may append tokenized, request-specific context but can
+            # no longer replace those rules wholesale.
+            system_prompt = persona_manager.get_system_prompt(persona_type, context or session.context)
+            if trusted_prompt_append:
+                system_prompt += f"\n\n# TRUSTED DYNAMIC CLIENT CONTEXT\n{trusted_prompt_append}"
 
             # B2C companion: inject concrete country-specific crisis resources.
             # The companion's crisis protocol tells the model to surface
@@ -502,10 +505,7 @@ class HaystackPipelineManager:
             # contract lives here: resolve a country code from the request
             # context (defaulting to the platform default) and append concrete
             # contacts so the model never has to hallucinate a number.
-            if (
-                persona_type == PersonaType.ANTSABOT_COMPANION
-                and not trusted_prompt_override
-            ):
+            if persona_type == PersonaType.ANTSABOT_COMPANION:
                 _ctx = context or session.context or {}
                 country_code = (
                     _ctx.get("country_code")

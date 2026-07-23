@@ -137,21 +137,17 @@ def _install_session_doubles(monkeypatch):
     return messages, requested_limits
 
 
-def test_trusted_mobile_prompt_override_and_legacy_history_limit_are_used(monkeypatch):
+def test_trusted_mobile_prompt_is_appended_to_persona_and_history_limit_is_used(monkeypatch):
     _messages, requested_limits = _install_session_doubles(monkeypatch)
     generator = _FakeGenerator()
     manager = HaystackPipelineManager()
     manager._initialized = True
     manager.pipelines[PersonaType.ANTSABOT_COMPANION] = _FakePipeline(generator)
 
-    # The trusted API prompt already contains client-specific crisis and
-    # practitioner context. The generic companion block must not be appended.
     monkeypatch.setattr(
         pipeline_module,
         "build_crisis_resources_block",
-        lambda _country: (_ for _ in ()).throw(
-            AssertionError("generic crisis block should not be duplicated")
-        ),
+        lambda _country: "\n\nCRISIS RESOURCES\nUse verified contacts.",
     )
 
     async def collect():
@@ -163,7 +159,7 @@ def test_trusted_mobile_prompt_override_and_legacy_history_limit_are_used(monkey
                 user_message="I need help",
                 context={
                     "_trusted_api_proxy": True,
-                    "system_prompt_override": (
+                    "system_prompt_append": (
                         "Trusted prompt for [CLIENT_NAME], whose practitioner is "
                         "[PRACTITIONER_FIRST_NAME], with existing safety guardrails."
                     ),
@@ -174,7 +170,12 @@ def test_trusted_mobile_prompt_override_and_legacy_history_limit_are_used(monkey
 
     assert "".join(asyncio.run(collect())) == "A safe response"
     assert requested_limits[-1] == 201
-    assert generator.messages[0].text.startswith("Trusted prompt for [CLIENT_NAME]")
+    system_prompt = generator.messages[0].text
+    assert system_prompt.startswith("You are ANTSAbot, a warm, supportive wellbeing companion.")
+    assert "GROUNDED PSYCHOEDUCATION" in system_prompt
+    assert "# TRUSTED DYNAMIC CLIENT CONTEXT" in system_prompt
+    assert "Trusted prompt for [CLIENT_NAME]" in system_prompt
+    assert "CRISIS RESOURCES" in system_prompt
 
 
 def test_api_proxy_generation_errors_propagate_instead_of_becoming_fake_success(monkeypatch):
