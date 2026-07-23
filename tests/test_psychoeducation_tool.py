@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from haystack.components.tools import ToolInvoker  # noqa: E402
+from haystack.dataclasses import ChatMessage, ToolCall  # noqa: E402
 
 from tools import ToolManager  # noqa: E402
 
@@ -67,6 +71,52 @@ def test_psychoeducation_tool_fails_closed_without_fabricating_content(monkeypat
     assert result["retrieval"] == "unavailable"
     assert result["matches"] == []
     assert "temporarily unavailable" in result["message"]
+
+
+def test_psychoeducation_auth_context_survives_haystack_tool_worker(monkeypatch):
+    manager = ToolManager()
+    captured = {}
+
+    async def fake_request(method, endpoint, data=None, params=None):
+        captured.update(
+            {
+                "auth_token": manager.auth_token,
+                "profile_id": manager.profile_id,
+                "method": method,
+                "endpoint": endpoint,
+                "params": params,
+            }
+        )
+        return {"retrieval": "none", "matches": []}
+
+    monkeypatch.setattr(manager, "_make_api_request", fake_request)
+    manager.set_auth_token("client-jwt", "client-test")
+
+    runtime_tools = manager.get_haystack_component_tools("antsabot_therapist")
+    invoker = ToolInvoker(tools=runtime_tools, raise_on_failure=True)
+    result = invoker.run(
+        messages=[
+            ChatMessage.from_assistant(
+                tool_calls=[
+                    ToolCall(
+                        tool_name="search_psychoeducation",
+                        arguments={"query": "sleep"},
+                    )
+                ]
+            )
+        ]
+    )
+
+    tool_payload = json.loads(result["tool_messages"][0].tool_call_result.result)
+    assert tool_payload["success"] is True
+    assert tool_payload["result"]["retrieval"] == "none"
+    assert captured == {
+        "auth_token": "client-jwt",
+        "profile_id": "client-test",
+        "method": "GET",
+        "endpoint": "/psychoeducation/agent-search",
+        "params": {"query": "sleep", "limit": 3},
+    }
 
 
 def test_psychoeducation_tool_rejects_invalid_queries_before_api_access(monkeypatch):
