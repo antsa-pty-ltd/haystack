@@ -79,7 +79,10 @@ class UIStateManager:
             self.redis_client_sync = redis_sync.from_url(redis_url, decode_responses=True)
             self.redis_client_sync.ping()
             self._initialized = True
-            logger.info(f"✅ UIStateManager initialized with Redis at {redis_url} (async + sync clients)")
+            # Never log REDIS_URL: production connection strings contain the
+            # cache password. Presence of working clients is sufficient for
+            # startup diagnostics.
+            logger.info("✅ UIStateManager initialized with Redis (async + sync clients)")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Redis: {e}")
             logger.warning("⚠️  Falling back to in-memory state storage")
@@ -202,28 +205,6 @@ class UIStateManager:
         except Exception as e:
             logger.error(f"❌ Error updating full state for {session_id}: {e}")
             return False
-    
-    def get_state_sync(self, session_id: str) -> UIState:
-        """Get UI state for session (synchronous version for thread-safe execution)"""
-        try:
-            if self._initialized and self.redis_client_sync is not None:
-                # Redis path (sync)
-                key = self._state_key(session_id)
-                state_json = self.redis_client_sync.get(key)
-                if state_json:
-                    return cast(UIState, json.loads(state_json))
-                return {}
-            else:
-                # In-memory fallback
-                key = self._state_key(session_id)
-                state_json = self._in_memory_fallback.get(key)
-                if state_json:
-                    return cast(UIState, json.loads(state_json))
-                return {}
-                
-        except Exception as e:
-            logger.error(f"❌ Error getting state for {session_id}: {e}")
-            return {}
     
     async def get_state(self, session_id: str) -> UIState:
         """Get UI state for session"""
