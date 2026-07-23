@@ -71,6 +71,9 @@ def test_companion_tool_list_exactly_matches_therapist():
         "breathing_exercise",
         "get_client_mood_profile",
         "get_user_profile",
+        "get_my_tasks",
+        "get_task_details",
+        "record_mood_entry",
         "search_psychoeducation",
     ])
 
@@ -144,6 +147,15 @@ def test_companion_prompt_requires_grounded_psychoeducation():
     assert "do not present general model knowledge as if it came from antsa" in prompt
 
 
+def test_client_platform_write_requires_explicit_permission():
+    for persona in (PersonaType.ANTSABOT_COMPANION, PersonaType.ANTSABOT_THERAPIST):
+        prompt = persona_manager.get_persona(persona).system_prompt.lower()
+        assert "mentioning a feeling is not permission" in prompt
+        assert "explicitly ask to save/log/record" in prompt
+        assert "never imply a write succeeded" in prompt
+        assert "never ask for, invent, or substitute a client id" in prompt
+
+
 # --- Therapist persona unchanged (snapshot-style guards) ---------------------
 
 # Captured from ANTSABOT_THERAPIST at the time the companion was added. If the
@@ -170,6 +182,9 @@ def test_therapist_persona_config_retains_client_safety_contract():
         "breathing_exercise",
         "get_client_mood_profile",
         "get_user_profile",
+        "get_my_tasks",
+        "get_task_details",
+        "record_mood_entry",
         "search_psychoeducation",
     ])
 

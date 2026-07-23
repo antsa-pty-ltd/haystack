@@ -3,17 +3,15 @@ Haystack-based Pipeline Manager using Declarative Pipeline Architecture
 Following official Haystack recommendations with automatic agent loops
 """
 import asyncio
-import json
 import logging
 from typing import Dict, List, Optional, Any, AsyncGenerator, Callable, Awaitable
-from datetime import datetime
 
 # Haystack imports
 from haystack import Pipeline
 from haystack.components.routers import ConditionalRouter
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.components.tools import ToolInvoker
-from haystack.dataclasses import ChatMessage, ChatRole, StreamingChunk
+from haystack.dataclasses import ChatMessage, StreamingChunk
 from haystack.utils import Secret
 
 from config import settings
@@ -48,6 +46,9 @@ TOOL_DISPLAY_NAMES = {
     "suggest_navigation": "Suggesting navigation",
     "navigate_to_page": "Navigating",
     "search_psychoeducation": "Searching ANTSA wellbeing resources",
+    "get_my_tasks": "Checking your ANTSA tasks",
+    "get_task_details": "Reading your task",
+    "record_mood_entry": "Saving your mood check-in",
 }
 
 
@@ -482,7 +483,6 @@ class HaystackPipelineManager:
             )
             
             # Get persona config and system prompt
-            persona_config = persona_manager.get_persona(persona_type)
             trusted_prompt_append = None
             if (context or {}).get("_trusted_api_proxy"):
                 candidate_append = (context or {}).get("system_prompt_append")
@@ -593,7 +593,6 @@ class HaystackPipelineManager:
             # Since Pipeline.run() doesn't support streaming well, we manually iterate
             # but let Haystack handle tool invocation logic
             current_messages = haystack_messages.copy()
-            message_collector = pipeline.get_component("message_collector")
             generator = pipeline.get_component("generator")
             router = pipeline.get_component("router")
             tool_invoker = pipeline.get_component("tool_invoker")
