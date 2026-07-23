@@ -6,12 +6,50 @@ import logging
 import aiohttp
 import os
 import jwt
+import uuid
 from contextvars import ContextVar, copy_context
 from typing import Dict, Any, List, Optional, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+CLIENT_MOOD_OPTIONS = {
+    "angry": {"flag": 1, "point": 2, "label": "Angry"},
+    "sad": {"flag": 2, "point": 2, "label": "Sad"},
+    "okay": {"flag": 3, "point": 3, "label": "Okay"},
+    "good": {"flag": 4, "point": 4, "label": "Good"},
+    "happy": {"flag": 5, "point": 5, "label": "Happy"},
+    "anxious": {"flag": 6, "point": 2, "label": "Anxious"},
+    "overwhelmed": {"flag": 7, "point": 2, "label": "Overwhelmed"},
+    "worried": {"flag": 9, "point": 2, "label": "Worried"},
+    "confused": {"flag": 10, "point": 3, "label": "Confused"},
+    "numb": {"flag": 11, "point": 3, "label": "Numb"},
+    "depressed": {"flag": 12, "point": 2, "label": "Depressed"},
+    "nervous": {"flag": 13, "point": 2, "label": "Nervous"},
+    "stressed": {"flag": 14, "point": 2, "label": "Stressed"},
+    "tired": {"flag": 15, "point": 3, "label": "Tired"},
+}
+
+CLIENT_MOOD_ACTIVITIES = (
+    "Exercising",
+    "Working",
+    "Watching TV",
+    "Reading",
+    "Cooking",
+    "Meditating",
+    "Socialising",
+    "Gaming",
+    "Relaxing",
+    "Studying",
+    "Gardening",
+    "Shopping",
+    "Travelling",
+    "Eating",
+    "Sleeping",
+    "Biking",
+    "Walking",
+)
 
 # OpenAI client will be initialized lazily when needed
 openai_client = None
@@ -1350,6 +1388,103 @@ class ToolManager:
                     }
                 },
                 "implementation": self._get_user_profile
+            },
+
+            "get_my_tasks": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_my_tasks",
+                        "description": (
+                            "Get the authenticated client's current ANTSA homework and focus tasks, "
+                            "including due state and progress. Use when the client asks what they need "
+                            "to do today or this week. Never ask for or accept a client identifier."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "timeframe": {
+                                    "type": "string",
+                                    "enum": ["today", "this_week"],
+                                    "default": "today",
+                                    "description": "Whether to retrieve today's tasks or the next seven days."
+                                }
+                            }
+                        }
+                    }
+                },
+                "implementation": self._get_my_tasks
+            },
+
+            "get_task_details": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "get_task_details",
+                        "description": (
+                            "Get safe, client-owned details and instructions for one task returned by "
+                            "get_my_tasks. Use the task_ref from that tool result; do not invent one and "
+                            "do not show internal references to the client."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_ref": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100,
+                                    "description": "Opaque task reference returned by get_my_tasks."
+                                }
+                            },
+                            "required": ["task_ref"]
+                        }
+                    }
+                },
+                "implementation": self._get_task_details
+            },
+
+            "record_mood_entry": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "record_mood_entry",
+                        "description": (
+                            "Save a mood check-in to the authenticated client's ANTSA mood log. This is "
+                            "a write action: call it only when the client explicitly asks to save/log/record "
+                            "their mood, or explicitly confirms a clear offer to do so. Merely mentioning "
+                            "a feeling is not consent."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "feeling": {
+                                    "type": "string",
+                                    "enum": list(CLIENT_MOOD_OPTIONS.keys()),
+                                    "description": "The client's explicitly selected feeling."
+                                },
+                                "note": {
+                                    "type": "string",
+                                    "maxLength": 1000,
+                                    "default": "",
+                                    "description": "Optional client-provided note; do not infer or embellish it."
+                                },
+                                "activity": {
+                                    "type": "string",
+                                    "enum": list(CLIENT_MOOD_ACTIVITIES),
+                                    "description": "Optional client-stated activity at the time."
+                                },
+                                "confirmed": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "Must be true only after explicit client permission to write this mood entry."
+                                    )
+                                }
+                            },
+                            "required": ["feeling", "confirmed"]
+                        }
+                    }
+                },
+                "implementation": self._record_mood_entry
             }
         }
     
@@ -1402,6 +1537,9 @@ class ToolManager:
                 self.tools["breathing_exercise"]["definition"],
                 self.tools["get_client_mood_profile"]["definition"],
                 self.tools["get_user_profile"]["definition"],
+                self.tools["get_my_tasks"]["definition"],
+                self.tools["get_task_details"]["definition"],
+                self.tools["record_mood_entry"]["definition"],
                 self.tools["search_psychoeducation"]["definition"]
             ]
         elif persona_type == "transcriber_agent":
@@ -1460,6 +1598,9 @@ class ToolManager:
                 "breathing_exercise": self.tools["breathing_exercise"]["implementation"],
                 "get_client_mood_profile": self.tools["get_client_mood_profile"]["implementation"],
                 "get_user_profile": self.tools["get_user_profile"]["implementation"],
+                "get_my_tasks": self.tools["get_my_tasks"]["implementation"],
+                "get_task_details": self.tools["get_task_details"]["implementation"],
+                "record_mood_entry": self.tools["record_mood_entry"]["implementation"],
                 "search_psychoeducation": self.tools["search_psychoeducation"]["implementation"]
             }
         elif persona_type == "transcriber_agent":
@@ -1489,7 +1630,6 @@ class ToolManager:
         """
         from haystack.tools import Tool
         import asyncio
-        import json
         
         haystack_tools = []
         creation_context = copy_context()
@@ -1629,34 +1769,51 @@ class ToolManager:
             else:
                 logger.info(f"🔍 API call skipping profileid header for client context: {self.profile_id}")
         else:
-            logger.info(f"🔍 API call with no profileid header (client auth context)")
+            logger.info("🔍 API call with no profileid header (client auth context)")
         
-        # Add api/v1 prefix to match NestJS global prefix
+        # Add the default API version only for unversioned endpoints. Some
+        # client-owned platform routes (notably Focus tasks) live under v2.
         endpoint_clean = endpoint.lstrip('/')
-        if not endpoint_clean.startswith('api/v1/'):
+        endpoint_parts = endpoint_clean.split('/', 2)
+        is_versioned = (
+            len(endpoint_parts) >= 2
+            and endpoint_parts[0] == 'api'
+            and endpoint_parts[1].startswith('v')
+            and endpoint_parts[1][1:].isdigit()
+        )
+        if not is_versioned:
             endpoint_clean = f"api/v1/{endpoint_clean}"
         url = f"{self.api_base_url}/{endpoint_clean}"
         
         logger.info(f"🔍 Making API request: {method} {url} with headers: {list(headers.keys())}")
         
         try:
+            method_upper = method.upper()
+            if method_upper not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+
+            request_kwargs: Dict[str, Any] = {
+                "headers": headers,
+                "params": params,
+            }
+            if data is not None and method_upper in {'POST', 'PUT', 'PATCH'}:
+                request_kwargs["json"] = data
+
             async with aiohttp.ClientSession() as session:
-                if method.upper() == 'GET':
-                    async with session.get(url, headers=headers, params=params) as response:
-                        if response.status == 200:
-                            return await response.json()
-                        else:
-                            error_text = await response.text()
-                            raise Exception(f"API request failed: {response.status} - {error_text}")
-                elif method.upper() == 'POST':
-                    async with session.post(url, headers=headers, json=data) as response:
-                        if response.status == 200:
-                            return await response.json()
-                        else:
-                            error_text = await response.text()
-                            raise Exception(f"API request failed: {response.status} - {error_text}")
-                else:
-                    raise ValueError(f"Unsupported HTTP method: {method}")
+                async with session.request(method_upper, url, **request_kwargs) as response:
+                    response_text = await response.text()
+                    if 200 <= response.status < 300:
+                        if not response_text:
+                            return {}
+                        try:
+                            return json.loads(response_text)
+                        except json.JSONDecodeError:
+                            return {"message": response_text}
+
+                    # Bound backend text so a verbose framework error can never
+                    # flood application logs or a fail-closed tool response.
+                    error_text = response_text[:1000]
+                    raise Exception(f"API request failed: {response.status} - {error_text}")
         except aiohttp.ClientError as e:
             logger.error(f"Network error making API request to {url}: {e}")
             raise Exception(f"Network error: {e}")
@@ -2138,7 +2295,7 @@ class ToolManager:
                     "success": False,
                     "error": f"Unknown tool: {tool_name}",
                     "tool": tool_name,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             
             # Check tool availability on current page (if session_id provided)
@@ -2162,9 +2319,9 @@ class ToolManager:
                     return {
                         "success": False,
                         "error": f"Tool '{tool_name}' not available on '{page_type}' page",
-                        "suggestion": f"Navigate to transcribe page to use this tool",
+                        "suggestion": "Navigate to transcribe page to use this tool",
                         "tool": tool_name,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     }
                 
                 logger.info(f"🔧 Executing tool {tool_name} with page_type={ui_state.get('page_type', 'unknown')}")
@@ -2186,7 +2343,7 @@ class ToolManager:
                 "success": True,
                 "result": result,
                 "tool": tool_name,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -2195,7 +2352,7 @@ class ToolManager:
                 "success": False,
                 "error": str(e),
                 "tool": tool_name,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
     
     # Tool implementations
@@ -2456,8 +2613,6 @@ PERSONALIZATION INSTRUCTIONS:
             # Get the FULL template content (not truncated preview)
             template_content = selected_template.get("templateContent", "")
             template_name = selected_template.get("templateName", "Template")
-            template_id = selected_template.get("templateId", "")
-            
             # Check what sessions are currently loaded
             loaded_sessions_result = await self._get_loaded_sessions()
             if loaded_sessions_result.get("status") != "success" or loaded_sessions_result.get("session_count", 0) == 0:
@@ -2646,7 +2801,7 @@ PERSONALIZATION INSTRUCTIONS:
                 logger.info(f"📋 Current session {current_session_id}: {len(all_documents)} document entries")
 
             # If current session has no documents, aggregate from ALL sessions
-            has_current_docs = any(d.get("isGenerated") == True for d in all_documents)
+            has_current_docs = any(d.get("isGenerated") for d in all_documents)
             if not has_current_docs:
                 all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
                 logger.info(f"🔍 Checking all {len(all_sessions_summary)} sessions for documents")
@@ -2677,10 +2832,10 @@ PERSONALIZATION INSTRUCTIONS:
             
             # Filter to only include ACTUAL generated documents (isGenerated=True)
             # Loaded sessions have isGenerated=False and should NOT be listed here
-            generated_documents = [doc for doc in all_documents if doc.get("isGenerated") == True]
+            generated_documents = [doc for doc in all_documents if doc.get("isGenerated")]
             
             # Count loaded sessions separately for context
-            loaded_sessions_count = len([doc for doc in all_documents if doc.get("isGenerated") == False])
+            loaded_sessions_count = len([doc for doc in all_documents if not doc.get("isGenerated")])
             
             if not generated_documents:
                 if loaded_sessions_count > 0:
@@ -3073,7 +3228,7 @@ Please refine the following document according to these instructions:
             return {
                 "report_type": response.get("report_type", report_type),
                 "client_id": response.get("client_id", client_id),
-                "generated_at": response.get("generated_at", datetime.utcnow().isoformat()),
+                "generated_at": response.get("generated_at", datetime.now(timezone.utc).isoformat()),
                 "summary": response.get("summary", f"{report_type} report generated successfully"),
                 "data": response.get("data", {}),
                 "date_range": response.get("date_range", date_range)
@@ -3085,7 +3240,7 @@ Please refine the following document according to these instructions:
             return {
                 "report_type": report_type,
                 "client_id": client_id,
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "summary": f"Error generating {report_type} report for client {client_id}",
                 "error": f"Failed to generate report: {str(e)}",
                 "data": {"error": "Report generation failed"}
@@ -3489,11 +3644,11 @@ Please refine the following document according to these instructions:
         include_profile_details = kwargs.get('include_profile_details', True)
         
         try:
-            logger.info(f"🌟 ANTSAbot accessing current user's mood and profile data (authenticated context)")
+            logger.info("🌟 ANTSAbot accessing current user's mood and profile data (authenticated context)")
             
             # Check authentication first
             if not self.auth_token:
-                logger.warning(f"⚠️ ANTSAbot mood profile tool called without authentication token")
+                logger.warning("⚠️ ANTSAbot mood profile tool called without authentication token")
                 return {
                     "timestamp": datetime.now().isoformat(),
                     "data_source": "ANTSAbot Therapeutic Tool",
@@ -3589,7 +3744,7 @@ Please refine the following document according to these instructions:
             # Add therapeutic insights for ANTSAbot
             result["therapeutic_insights"] = self._generate_therapeutic_insights(result)
             
-            logger.info(f"✅ Successfully retrieved user mood and profile data for ANTSAbot")
+            logger.info("✅ Successfully retrieved user mood and profile data for ANTSAbot")
             return result
             
         except Exception as e:
@@ -3617,7 +3772,7 @@ Please refine the following document according to these instructions:
                 age -= 1
             
             return age if age >= 0 else None
-        except:
+        except (TypeError, ValueError, OverflowError):
             return None
 
     def _get_mood_translation(self, mood_flag: int) -> Dict[str, Any]:
@@ -3636,7 +3791,8 @@ Please refine the following document according to these instructions:
             11: {"label": "Numb", "category": "neutral", "intensity": "low"},
             12: {"label": "Depressed", "category": "negative", "intensity": "high"},
             13: {"label": "Nervous", "category": "negative", "intensity": "medium"},
-            14: {"label": "Stressed", "category": "negative", "intensity": "high"}
+            14: {"label": "Stressed", "category": "negative", "intensity": "high"},
+            15: {"label": "Tired", "category": "neutral", "intensity": "medium"},
         }
         
         return mood_translations.get(mood_flag, {
@@ -3646,20 +3802,32 @@ Please refine the following document according to these instructions:
         })
 
     def _translate_mood_entries(self, mood_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Add human-readable translations to mood entries"""
+        """Return privacy-minimised mood entries with human-readable labels."""
         translated_entries = []
         
         for entry in mood_entries:
             if isinstance(entry, dict):
-                translated_entry = entry.copy()
                 mood_flag = entry.get('flag')
-                
-                if mood_flag is not None:
-                    mood_info = self._get_mood_translation(int(mood_flag))
-                    translated_entry['mood_translation'] = mood_info
-                    translated_entry['mood_label'] = mood_info['label']
-                    translated_entry['mood_category'] = mood_info['category']
-                
+                if mood_flag is None:
+                    continue
+
+                mood_info = self._get_mood_translation(int(mood_flag))
+                activity = entry.get('activity')
+                activity_label = None
+                if isinstance(activity, int) and 0 <= activity < len(CLIENT_MOOD_ACTIVITIES):
+                    activity_label = CLIENT_MOOD_ACTIVITIES[activity]
+
+                # Internal record/client identifiers are intentionally omitted.
+                translated_entry = {
+                    "flag": int(mood_flag),
+                    "point": entry.get("point"),
+                    "comment": entry.get("comment"),
+                    "activity": activity_label,
+                    "created_at": entry.get("createdAt") or entry.get("created_at"),
+                    "mood_translation": mood_info,
+                    "mood_label": mood_info["label"],
+                    "mood_category": mood_info["category"],
+                }
                 translated_entries.append(translated_entry)
         
         return translated_entries
@@ -3809,10 +3977,242 @@ Please refine the following document according to these instructions:
         
         return insights
 
+    async def _get_my_tasks(self, timeframe: str = "today") -> Dict[str, Any]:
+        """Return current tasks owned by the authenticated client."""
+        normalized_timeframe = timeframe if timeframe in {"today", "this_week"} else "today"
+        params: Dict[str, Any] = {
+            "filter": "this-week" if normalized_timeframe == "this_week" else "today"
+        }
+        page_context = self.current_page_context or {}
+        timezone = page_context.get("timezone") or page_context.get("user_timezone")
+        if isinstance(timezone, str) and timezone.strip():
+            params["timezone"] = timezone.strip()[:100]
+
+        try:
+            response = await self._make_api_request(
+                "GET",
+                "/api/v2/tasks/today",
+                params=params,
+            )
+            raw_tasks = response.get("tasks", []) if isinstance(response, dict) else []
+            raw_progress = response.get("progress", {}) if isinstance(response, dict) else {}
+
+            tasks = []
+            for item in raw_tasks[:20]:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                tasks.append({
+                    "task_ref": str(item["id"]),
+                    "title": item.get("title"),
+                    "description": item.get("description"),
+                    "task_type": item.get("tool"),
+                    "duration": item.get("durationLabel"),
+                    "due": item.get("dueLabel"),
+                    "overdue": bool(item.get("overdue")),
+                    "snoozed_until": item.get("snoozedUntil"),
+                })
+
+            return {
+                "data_source": "ANTSA client focus tasks",
+                "timeframe": normalized_timeframe,
+                "progress": {
+                    "completed": raw_progress.get("completed", 0),
+                    "total": raw_progress.get("total", len(tasks)),
+                    "percent": raw_progress.get("percent", 0),
+                    "date_label": raw_progress.get("dateLabel"),
+                },
+                "tasks": tasks,
+                "task_count": len(tasks),
+                "grounding_rules": (
+                    "Describe only these returned tasks. Never reveal task_ref values; "
+                    "use them only to call get_task_details."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving client tasks: {e}")
+            return {
+                "data_source": "ANTSA client focus tasks",
+                "status": "unavailable",
+                "tasks": [],
+                "message": "Your ANTSA tasks are temporarily unavailable.",
+            }
+
+    async def _get_task_details(self, task_ref: str) -> Dict[str, Any]:
+        """Return safe details for one client-owned task."""
+        try:
+            canonical_ref = str(uuid.UUID(str(task_ref).strip()))
+        except (AttributeError, TypeError, ValueError):
+            return {
+                "status": "invalid_reference",
+                "message": "Choose a task returned by get_my_tasks.",
+            }
+
+        page_context = self.current_page_context or {}
+        timezone = page_context.get("timezone") or page_context.get("user_timezone")
+        params = None
+        if isinstance(timezone, str) and timezone.strip():
+            params = {"timezone": timezone.strip()[:100]}
+
+        try:
+            response = await self._make_api_request(
+                "GET",
+                f"/api/v2/tasks/{canonical_ref}",
+                params=params,
+            )
+            if not isinstance(response, dict):
+                raise ValueError("Unexpected task detail response")
+
+            return {
+                "data_source": "ANTSA client focus tasks",
+                "task": {
+                    "title": response.get("title"),
+                    "description": response.get("description"),
+                    "task_type": response.get("tool"),
+                    "duration": response.get("durationLabel"),
+                    "due": response.get("dueLabel"),
+                    "completed_at": response.get("completedAt"),
+                    "assigned_by": (response.get("assignedBy") or {}).get("name"),
+                    "instructions": self._sanitize_task_payload(
+                        response.get("tool"),
+                        response.get("toolPayload"),
+                    ),
+                },
+                "grounding_rules": (
+                    "Explain only the returned task instructions. Do not claim the task is "
+                    "complete and do not reveal internal task or assignment identifiers."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving client task detail: {e}")
+            return {
+                "data_source": "ANTSA client focus tasks",
+                "status": "unavailable",
+                "message": "That ANTSA task is temporarily unavailable.",
+            }
+
+    @staticmethod
+    def _sanitize_task_payload(task_type: Any, payload: Any) -> Dict[str, Any]:
+        """Remove internal identifiers while retaining client-facing instructions."""
+        if not isinstance(payload, dict):
+            return {}
+
+        normalized_type = str(task_type or "").upper()
+        if normalized_type == "TIMER":
+            return {"target_seconds": payload.get("targetSeconds")}
+        if normalized_type == "REFLECTION":
+            steps = []
+            for step in payload.get("steps", [])[:20]:
+                if isinstance(step, dict):
+                    steps.append({
+                        "prompt": step.get("prompt"),
+                        "accepts_rating": bool(step.get("acceptsEmojiRating")),
+                    })
+            return {"steps": steps, "total_steps": len(steps)}
+        if normalized_type == "READING":
+            return {"content": payload.get("content")}
+        if normalized_type == "VIDEO":
+            return {"video_url": payload.get("videoUrl")}
+        if normalized_type == "JOURNALLING":
+            return {"prompt": payload.get("prompt")}
+        if normalized_type in {"MOOD_CHECK_IN", "QUESTIONNAIRE"}:
+            items = []
+            for item in payload.get("items", [])[:50]:
+                if not isinstance(item, dict):
+                    continue
+                items.append({
+                    "type": item.get("type"),
+                    "title": item.get("title"),
+                    "description": item.get("description"),
+                    "question": item.get("question"),
+                    "question_type": item.get("questionType"),
+                    "range_from": item.get("rangeFrom"),
+                    "range_to": item.get("rangeTo"),
+                    "options": item.get("options"),
+                    "required": item.get("required"),
+                })
+            return {"items": items}
+        return {}
+
+    async def _record_mood_entry(
+        self,
+        feeling: str,
+        confirmed: bool,
+        note: str = "",
+        activity: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist an explicitly authorised mood entry for the current client."""
+        normalized_feeling = feeling.strip().lower() if isinstance(feeling, str) else ""
+        mood = CLIENT_MOOD_OPTIONS.get(normalized_feeling)
+        if not mood:
+            return {
+                "saved": False,
+                "status": "invalid_feeling",
+                "message": "Please choose one of the supported ANTSA mood labels.",
+            }
+        if confirmed is not True:
+            return {
+                "saved": False,
+                "status": "confirmation_required",
+                "requires_confirmation": True,
+                "message": "Ask the client whether they want this mood saved before recording it.",
+            }
+
+        normalized_activity = None
+        activity_index = None
+        if activity is not None:
+            normalized_activity = next(
+                (
+                    option
+                    for option in CLIENT_MOOD_ACTIVITIES
+                    if option.lower() == str(activity).strip().lower()
+                ),
+                None,
+            )
+            if not normalized_activity:
+                return {
+                    "saved": False,
+                    "status": "invalid_activity",
+                    "message": "Please choose one of the supported ANTSA activity labels.",
+                }
+            activity_index = CLIENT_MOOD_ACTIVITIES.index(normalized_activity)
+
+        normalized_note = note.strip()[:1000] if isinstance(note, str) else ""
+        payload = {
+            "flag": mood["flag"],
+            "point": mood["point"],
+            "comment": normalized_note,
+        }
+        if activity_index is not None:
+            payload["activity"] = activity_index
+
+        try:
+            response = await self._make_api_request(
+                "POST",
+                "/client-mood/update",
+                data=payload,
+            )
+            return {
+                "saved": True,
+                "data_source": "ANTSA client mood log",
+                "feeling": mood["label"],
+                "valence": mood["point"],
+                "activity": normalized_activity,
+                "note": normalized_note or None,
+                "recorded_at": response.get("createdAt") if isinstance(response, dict) else None,
+                "message": "Mood entry saved to ANTSA.",
+            }
+        except Exception as e:
+            logger.error(f"Error recording client mood entry: {e}")
+            return {
+                "saved": False,
+                "status": "unavailable",
+                "message": "Your mood entry could not be saved right now.",
+            }
+
     async def _get_user_profile(self) -> Dict[str, Any]:
         """Get lightweight user profile information for ANTSAbot's reference during conversation"""
         try:
-            logger.info(f"🌟 ANTSAbot accessing user profile information")
+            logger.info("🌟 ANTSAbot accessing user profile information")
             
             result = {
                 "timestamp": datetime.now().isoformat(),
@@ -3882,7 +4282,7 @@ Please refine the following document according to these instructions:
                 result["profile"] = {"error": f"Profile data unavailable: {str(e)}"}
                 result["summary"] = "Profile information temporarily unavailable."
             
-            logger.info(f"✅ Successfully retrieved user profile for ANTSAbot")
+            logger.info("✅ Successfully retrieved user profile for ANTSAbot")
             return result
             
         except Exception as e:
@@ -4640,7 +5040,7 @@ Please refine the following document according to these instructions:
                         "available_sessions": actual_loaded_sessions
                     }
                 else:
-                    logger.warning(f"⚠️ No loaded sessions found")
+                    logger.warning("⚠️ No loaded sessions found")
             
             # First, get the session content using the corrected session ID
             content_result = await self._get_session_content(target_session_id)
