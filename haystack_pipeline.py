@@ -683,8 +683,16 @@ class HaystackPipelineManager:
                     
                     logger.info(f"🔧 Executing {len(tool_calls)} tool(s): {[t['name'] for t in tool_info]}")
                     
-                    # Execute tools
-                    tool_result = tool_invoker.run(messages=replies)
+                    # ToolInvoker runs functions in worker threads. Build
+                    # request-bound wrappers immediately before invocation so
+                    # auth/profile/page ContextVars survive that boundary.
+                    runtime_tools = tool_manager.get_haystack_component_tools(
+                        persona_type.value
+                    )
+                    tool_result = tool_invoker.run(
+                        messages=replies,
+                        tools=runtime_tools,
+                    )
                     tool_messages = tool_result.get("tool_messages", [])
                     
                     # Collect UI actions if component exists

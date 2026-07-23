@@ -1474,9 +1474,12 @@ class ToolManager:
     def get_haystack_component_tools(self, persona_type: str) -> List:
         """
         Get Haystack Tool objects for a specific persona.
-        
+
         This method converts the tool manager's async tools into proper Haystack Tool format
-        that can be used directly in Haystack Pipelines with ToolInvoker.
+        that can be used directly in Haystack Pipelines with ToolInvoker. The
+        request context is captured when these wrappers are created because
+        ToolInvoker executes tool functions in its own worker threads, which do
+        not inherit ContextVar values from the calling request.
         
         Args:
             persona_type: The persona type ("web_assistant", "antsabot_therapist", etc.)
@@ -1489,6 +1492,7 @@ class ToolManager:
         import json
         
         haystack_tools = []
+        creation_context = copy_context()
         
         # Get the list of allowed tools for this persona
         tool_definitions = self.get_tools_for_persona(persona_type)
@@ -1530,7 +1534,11 @@ class ToolManager:
                         
                         # Run in thread pool to avoid blocking
                         from concurrent.futures import ThreadPoolExecutor
-                        request_context = copy_context()
+                        # ToolInvoker has already moved this wrapper into a
+                        # worker thread, so copy_context() here would otherwise
+                        # capture an empty context. Clone the context bound when
+                        # this request's wrappers were created instead.
+                        request_context = creation_context.copy()
                         with ThreadPoolExecutor(max_workers=1) as executor:
                             future = executor.submit(request_context.run, run_async)
                             result = future.result(timeout=120)
