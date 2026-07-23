@@ -9,8 +9,8 @@ practitioner behind them. It is derived from ANTSABOT_THERAPIST but with:
     escalate to (country crisis lines are injected upstream by the API),
   - gentle care-steering toward a professional + the in-app
     "Connect with your practitioner" option,
-  - the SAME model/temperature/token settings and EXACTLY the same client-scoped
-    tool set as the therapist persona.
+  - the SAME model/temperature/token settings and client-scoped tool set as the
+    therapist persona, including grounded psychoeducation retrieval.
 
 These tests pin the contract and guard the therapist persona against drift.
 No pytest-asyncio dependency — follow the repo's asyncio.run pattern.
@@ -60,9 +60,7 @@ def test_companion_resolvable_by_string_name():
 
 def test_companion_tool_list_exactly_matches_therapist():
     """
-    Same client-scoped tool set as the therapist — no more, no fewer, no new
-    tools. The spec is explicit: mood_check_in, coping_strategies,
-    breathing_exercise, get_client_mood_profile, get_user_profile.
+    Same client-scoped tool set as the therapist — no more and no fewer.
     """
     companion = persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION)
     therapist = persona_manager.get_persona(PersonaType.ANTSABOT_THERAPIST)
@@ -73,6 +71,7 @@ def test_companion_tool_list_exactly_matches_therapist():
         "breathing_exercise",
         "get_client_mood_profile",
         "get_user_profile",
+        "search_psychoeducation",
     ])
 
     assert _tool_names(companion) == expected
@@ -137,6 +136,14 @@ def test_companion_prompt_has_care_steering():
     assert "gentle" in lower or "non-pushy" in lower
 
 
+def test_companion_prompt_requires_grounded_psychoeducation():
+    prompt = persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION).system_prompt.lower()
+
+    assert "grounded psychoeducation" in prompt
+    assert "curated psychoeducation library" in prompt
+    assert "do not present general model knowledge as if it came from antsa" in prompt
+
+
 # --- Therapist persona unchanged (snapshot-style guards) ---------------------
 
 # Captured from ANTSABOT_THERAPIST at the time the companion was added. If the
@@ -148,8 +155,8 @@ _THERAPIST_PROMPT_OPENING = (
 _THERAPIST_PROMPT_CLOSING = "Respect cultural and individual differences"
 
 
-def test_therapist_persona_config_unchanged():
-    """The therapist persona's settings must be untouched by this change."""
+def test_therapist_persona_config_retains_client_safety_contract():
+    """The therapist keeps its model/settings while gaining only grounded retrieval."""
     therapist = persona_manager.get_persona(PersonaType.ANTSABOT_THERAPIST)
 
     assert therapist.name == "ANTSAbot"
@@ -163,6 +170,7 @@ def test_therapist_persona_config_unchanged():
         "breathing_exercise",
         "get_client_mood_profile",
         "get_user_profile",
+        "search_psychoeducation",
     ])
 
 

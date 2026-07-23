@@ -1199,7 +1199,46 @@ class ToolManager:
 
 
             
-            # Therapeutic Tools (for JAIMEE_THERAPIST)
+            # Client wellbeing tools
+            "search_psychoeducation": {
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "search_psychoeducation",
+                        "description": (
+                            "Search ANTSA's clinician-curated psychoeducation library for grounded "
+                            "information relevant to a user's question. Use for educational questions "
+                            "about emotions, wellbeing, coping concepts, mental health topics, or when "
+                            "the user asks what ANTSA says or has available. Do not use it as a diagnostic tool."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": (
+                                        "A concise, de-identified natural-language search query describing "
+                                        "the psychoeducation topic or question."
+                                    ),
+                                    "minLength": 2,
+                                    "maxLength": 500
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 5,
+                                    "default": 3,
+                                    "description": "Maximum number of curated sources to return."
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                },
+                "implementation": self._search_psychoeducation
+            },
+
+            # Therapeutic Tools (for client personas)
             "mood_check_in": {
                 "definition": {
                     "type": "function",
@@ -1303,7 +1342,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_user_profile",
-                        "description": "Get the current authenticated user's profile information (name, age, gender, occupation, etc.) for personalized conversation. This tool is exclusive to ANTSAbot and provides quick access to user details during conversation.",
+                        "description": "Get a privacy-minimized profile (age, gender, occupation and role only) for relevant personalization. Never exposes contact details, dates of birth or internal identifiers.",
                         "parameters": {
                             "type": "object",
                             "properties": {}
@@ -1362,7 +1401,8 @@ class ToolManager:
                 self.tools["coping_strategies"]["definition"],
                 self.tools["breathing_exercise"]["definition"],
                 self.tools["get_client_mood_profile"]["definition"],
-                self.tools["get_user_profile"]["definition"]
+                self.tools["get_user_profile"]["definition"],
+                self.tools["search_psychoeducation"]["definition"]
             ]
         elif persona_type == "transcriber_agent":
             # Single capability: generate document using currently loaded sessions and selected template
@@ -1419,7 +1459,8 @@ class ToolManager:
                 "coping_strategies": self.tools["coping_strategies"]["implementation"],
                 "breathing_exercise": self.tools["breathing_exercise"]["implementation"],
                 "get_client_mood_profile": self.tools["get_client_mood_profile"]["implementation"],
-                "get_user_profile": self.tools["get_user_profile"]["implementation"]
+                "get_user_profile": self.tools["get_user_profile"]["implementation"],
+                "search_psychoeducation": self.tools["search_psychoeducation"]["implementation"]
             }
         elif persona_type == "transcriber_agent":
             # Map only the document generation related tools
@@ -3292,6 +3333,64 @@ Please refine the following document according to these instructions:
                 "results": []
             }
     
+    async def _search_psychoeducation(self, query: str, max_results: int = 3) -> Dict[str, Any]:
+        """Retrieve grounded, curated ANTSA psychoeducation passages."""
+        normalized_query = query.strip() if isinstance(query, str) else ""
+        if len(normalized_query) < 2:
+            return {
+                "retrieval": "none",
+                "matches": [],
+                "message": "Please provide a more specific psychoeducation topic."
+            }
+
+        try:
+            bounded_limit = max(1, min(int(max_results or 3), 5))
+        except (TypeError, ValueError):
+            bounded_limit = 3
+        try:
+            response = await self._make_api_request(
+                "GET",
+                "/psychoeducation/agent-search",
+                params={"query": normalized_query[:500], "limit": bounded_limit}
+            )
+            raw_matches = response.get("matches", []) if isinstance(response, dict) else []
+            matches = []
+            for item in raw_matches[:bounded_limit]:
+                if not isinstance(item, dict):
+                    continue
+                passages = [
+                    passage
+                    for passage in item.get("passages", [])[:2]
+                    if isinstance(passage, str) and passage.strip()
+                ]
+                if not passages:
+                    continue
+                matches.append({
+                    "title": item.get("title"),
+                    "topic": item.get("topic"),
+                    "author_name": item.get("authorName"),
+                    "resource_type": item.get("type"),
+                    "passages": passages,
+                })
+
+            return {
+                "data_source": "ANTSA clinician-curated psychoeducation library",
+                "retrieval": response.get("retrieval", "none") if isinstance(response, dict) else "none",
+                "matches": matches,
+                "grounding_rules": (
+                    "Base ANTsA-attributed educational claims only on these passages. "
+                    "Paraphrase concisely, name source titles, do not diagnose, and say when no match was found."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error searching psychoeducation library: {e}")
+            return {
+                "data_source": "ANTSA clinician-curated psychoeducation library",
+                "retrieval": "unavailable",
+                "matches": [],
+                "message": "The curated psychoeducation library is temporarily unavailable."
+            }
+
     async def _mood_check_in(self, current_mood: str, mood_scale: int) -> Dict[str, Any]:
         """Process mood check-in"""
         insights = []
@@ -3419,7 +3518,6 @@ Please refine the following document according to these instructions:
                         
                         result["mood_data"] = {
                             "recent_entries": translated_entries,  # Now includes mood_label, mood_category, etc.
-                            "raw_entries": mood_response,  # Keep original data for debugging
                             "mood_summary": self._analyze_mood_data(mood_response),
                             "last_mood_entry": translated_entries[0] if translated_entries else None,
                             "total_entries": len(mood_response)
@@ -3460,29 +3558,18 @@ Please refine the following document according to these instructions:
                                 selected_profile = next((p for p in profiles if p.get('id') == self.profile_id), profiles[0])
                             
                             result["profile"] = {
-                                "name": f"{selected_profile.get('firstName', '')} {selected_profile.get('lastName', '')}".strip() or "Unknown Practitioner",
-                                "profile_id": selected_profile.get("id"),
                                 "role": selected_profile.get("role", "practitioner"),
                                 "status": selected_profile.get("status"),
-                                "clinic_info": {
-                                    "name": selected_profile.get("clinic", {}).get("name"),
-                                    "timezone": selected_profile.get("clinic", {}).get("timezone")
-                                }
                             }
                         else:
                             # User is a client - extract from top-level response
                             client_data = account_response.get('client', {})
                             result["profile"] = {
-                                "name": f"{client_data.get('firstName', '')} {client_data.get('lastName', '')}".strip() or "Unknown Client",
-                                "profile_id": account_response.get('id'),  # Use account ID
                                 "role": user_role.lower(),
                                 "status": account_response.get('status', 'ACTIVE'),
                                 "age": self._calculate_age_from_dob(client_data.get('dob')),
                                 "gender": client_data.get('gender'),
                                 "occupation": client_data.get('occupation'),
-                                "dob": client_data.get('dob'),
-                                "phone": client_data.get('phone'),
-                                "email": account_response.get('email')
                             }
                     else:
                         result["profile"] = {"error": "Could not access account information"}
@@ -3745,38 +3832,26 @@ Please refine the following document according to these instructions:
                             selected_profile = next((p for p in profiles if p.get('id') == self.profile_id), profiles[0])
                         
                         result["profile"] = {
-                            "name": f"{selected_profile.get('firstName', '')} {selected_profile.get('lastName', '')}".strip() or "Unknown Practitioner",
-                            "profile_id": selected_profile.get("id"),
                             "role": selected_profile.get("role", "practitioner"),
                             "status": selected_profile.get("status"),
-                            "clinic_info": {
-                                "name": selected_profile.get("clinic", {}).get("name"),
-                                "timezone": selected_profile.get("clinic", {}).get("timezone")
-                            }
                         }
                     else:
                         # User is a client - extract from top-level response
                         client_data = account_response.get('client', {})
                         result["profile"] = {
-                            "name": f"{client_data.get('firstName', '')} {client_data.get('lastName', '')}".strip() or "Unknown Client",
-                            "profile_id": account_response.get('id'),  # Use account ID
                             "role": user_role.lower(),
                             "status": account_response.get('status', 'ACTIVE'),
                             "age": self._calculate_age_from_dob(client_data.get('dob')),
                             "gender": client_data.get('gender'),
                             "occupation": client_data.get('occupation'),
-                            "dob": client_data.get('dob'),
-                            "phone": client_data.get('phone'),
-                            "email": account_response.get('email')
                         }
                         
                         # Create a friendly summary for ANTSAbot
-                        name = result["profile"].get("name", "the user")
                         age = result["profile"].get("age")
                         gender = result["profile"].get("gender")
                         occupation = result["profile"].get("occupation")
                         
-                        summary_parts = [f"User name: {name}"]
+                        summary_parts = ["Authenticated client profile"]
                         
                         personal_details = []
                         if age:

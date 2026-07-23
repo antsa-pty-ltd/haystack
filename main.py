@@ -1122,9 +1122,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # while still running generation through Haystack's agentic
                 # tool pipeline. Never trust equivalent fields from a browser.
                 if trusted_api_proxy:
-                    system_prompt_override = incoming_context.get("system_prompt_override")
-                    if isinstance(system_prompt_override, str) and system_prompt_override.strip():
-                        context_for_pipeline["system_prompt_override"] = system_prompt_override
+                    system_prompt_append = incoming_context.get("system_prompt_append")
+                    if isinstance(system_prompt_append, str) and system_prompt_append.strip():
+                        context_for_pipeline["system_prompt_append"] = system_prompt_append
                     history_limit = incoming_context.get("history_limit")
                     if isinstance(history_limit, int):
                         context_for_pipeline["history_limit"] = history_limit
