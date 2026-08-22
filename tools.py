@@ -1612,7 +1612,11 @@ class ToolManager:
         else:
             return {}
     
-    def get_haystack_component_tools(self, persona_type: str) -> List:
+    def get_haystack_component_tools(
+        self,
+        persona_type: str,
+        allowed_tool_names: Optional[List[str]] = None,
+    ) -> List:
         """
         Get Haystack Tool objects for a specific persona.
 
@@ -1636,11 +1640,19 @@ class ToolManager:
         
         # Get the list of allowed tools for this persona
         tool_definitions = self.get_tools_for_persona(persona_type)
-        allowed_tool_names = [
+        default_tool_names = [
             t.get("function", {}).get("name") 
             for t in tool_definitions 
             if isinstance(t.get("function"), dict)
         ]
+        if allowed_tool_names is None:
+            allowed_tool_names = default_tool_names
+        else:
+            requested = set(allowed_tool_names)
+            # Preserve the built-in order and refuse privilege expansion: a
+            # published config can disable existing tools, never add tools
+            # from another persona.
+            allowed_tool_names = [name for name in default_tool_names if name in requested]
         
         for tool_name in allowed_tool_names:
             if tool_name not in self.tools:

@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Dict, Any, Optional, List, Callable
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class PersonaType(str, Enum):
     WEB_ASSISTANT = "web_assistant"
@@ -16,6 +16,7 @@ def normalize_persona_type(persona_type: str) -> str:
     return persona_type
 
 class PersonaConfig(BaseModel):
+    version: int = 0
     name: str
     description: str
     system_prompt: str
@@ -23,8 +24,8 @@ class PersonaConfig(BaseModel):
     temperature: float = 0.7
     max_completion_tokens: int = 1000
     has_db_access: bool = False
-    tools: List[Dict[str, Any]] = []  # OpenAI function definitions
-    available_functions: Dict[str, Callable] = {}  # Function implementations
+    tools: List[Dict[str, Any]] = Field(default_factory=list)  # OpenAI function definitions
+    available_functions: Dict[str, Callable] = Field(default_factory=dict)  # Function implementations
     
 class PersonaManager:
     def __init__(self):
@@ -348,8 +349,13 @@ Legacy document creation (for backward compatibility):
     def get_persona(self, persona_type: PersonaType) -> PersonaConfig:
         return self.personas.get(persona_type)
     
-    def get_system_prompt(self, persona_type: PersonaType, context: Optional[Dict[str, Any]] = None) -> str:
-        persona = self.get_persona(persona_type)
+    def get_system_prompt(
+        self,
+        persona_type: PersonaType,
+        context: Optional[Dict[str, Any]] = None,
+        persona_config: Optional[PersonaConfig] = None,
+    ) -> str:
+        persona = persona_config or self.get_persona(persona_type)
         if not persona:
             raise ValueError(f"Unknown persona type: {persona_type}")
         
@@ -365,6 +371,28 @@ Legacy document creation (for backward compatibility):
                 system_prompt += f"\n\nRelevant clinic data: {context['clinic_data']}"
         
         return system_prompt
+
+    def export_default(self, persona_type: PersonaType) -> Dict[str, Any]:
+        """Return the deployed built-in config used to seed the version store."""
+        canonical = PersonaType(normalize_persona_type(persona_type.value))
+        persona = self.get_persona(canonical)
+        if not persona:
+            raise ValueError(f"Unknown persona type: {persona_type}")
+        return {
+            "persona": canonical.value,
+            "name": persona.name,
+            "description": persona.description,
+            "systemPrompt": persona.system_prompt,
+            "model": persona.model,
+            "temperature": persona.temperature,
+            "maxCompletionTokens": persona.max_completion_tokens,
+            "hasDbAccess": persona.has_db_access,
+            "toolNames": [
+                tool.get("function", {}).get("name")
+                for tool in persona.tools
+                if tool.get("function", {}).get("name")
+            ],
+        }
 
 # Global persona manager instance
 persona_manager = PersonaManager()
