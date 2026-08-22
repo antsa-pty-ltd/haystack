@@ -17,7 +17,8 @@ from haystack.utils import Secret
 from config import settings
 from crisis_resources import build_crisis_resources_block
 from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
-from personas import PersonaType, persona_manager
+from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
+from persona_config_provider import persona_config_provider
 from session_manager import session_manager
 from tools import tool_manager
 from components.ui_actions import UIActionCollector, MessageCollector
@@ -70,6 +71,8 @@ class HaystackPipelineManager:
     
     def __init__(self):
         self.pipelines: Dict[PersonaType, Pipeline] = {}
+        self._pipeline_signatures: Dict[PersonaType, tuple] = {}
+        self._pipeline_config_lock = asyncio.Lock()
         self._initialized = False
         self._streaming_callback: Optional[Callable] = None
         self._ui_actions: List[Dict[str, Any]] = []
@@ -92,7 +95,7 @@ class HaystackPipelineManager:
             logger.error(f"❌ Failed to initialize Haystack pipelines: {e}")
             raise
     
-    def _create_web_assistant_pipeline(self):
+    def _create_web_assistant_pipeline(self, persona_config: Optional[PersonaConfig] = None):
         """
         Create WEB_ASSISTANT pipeline with multi-tool support and UI actions.
         
@@ -104,8 +107,10 @@ class HaystackPipelineManager:
         - MessageCollector accumulates messages
         - Loop continues until no more tool calls
         """
-        persona_config = persona_manager.get_persona(PersonaType.WEB_ASSISTANT)
-        tools = tool_manager.get_haystack_component_tools("web_assistant")
+        persona_config = persona_config or persona_manager.get_persona(PersonaType.WEB_ASSISTANT)
+        tools = tool_manager.get_haystack_component_tools(
+            "web_assistant", self._tool_names(persona_config)
+        )
         
         # Define routing conditions
         routes = [
@@ -149,9 +154,10 @@ class HaystackPipelineManager:
         pipeline.connect("message_collector", "generator.messages")
         
         self.pipelines[PersonaType.WEB_ASSISTANT] = pipeline
+        self._pipeline_signatures[PersonaType.WEB_ASSISTANT] = self._config_signature(persona_config)
         logger.info("✅ Created WEB_ASSISTANT declarative pipeline with auto-loop")
     
-    def _create_antsabot_therapist_pipeline(self):
+    def _create_antsabot_therapist_pipeline(self, persona_config: Optional[PersonaConfig] = None):
         """
         Create ANTSABOT_THERAPIST pipeline with therapeutic tools.
 
@@ -160,8 +166,10 @@ class HaystackPipelineManager:
         - No UI actions needed
         - More empathetic tone (higher temperature)
         """
-        persona_config = persona_manager.get_persona(PersonaType.ANTSABOT_THERAPIST)
-        tools = tool_manager.get_haystack_component_tools("antsabot_therapist")
+        persona_config = persona_config or persona_manager.get_persona(PersonaType.ANTSABOT_THERAPIST)
+        tools = tool_manager.get_haystack_component_tools(
+            "antsabot_therapist", self._tool_names(persona_config)
+        )
         
         routes = [
             {
@@ -202,9 +210,12 @@ class HaystackPipelineManager:
         self.pipelines[PersonaType.ANTSABOT_THERAPIST] = pipeline
         # Backward compatibility: jaimee_therapist resolves to the same pipeline
         self.pipelines[PersonaType.JAIMEE_THERAPIST] = pipeline
+        signature = self._config_signature(persona_config)
+        self._pipeline_signatures[PersonaType.ANTSABOT_THERAPIST] = signature
+        self._pipeline_signatures[PersonaType.JAIMEE_THERAPIST] = signature
         logger.info("✅ Created ANTSABOT_THERAPIST declarative pipeline")
 
-    def _create_antsabot_companion_pipeline(self):
+    def _create_antsabot_companion_pipeline(self, persona_config: Optional[PersonaConfig] = None):
         """
         Create ANTSABOT_COMPANION pipeline — the B2C wellbeing companion.
 
@@ -212,8 +223,10 @@ class HaystackPipelineManager:
         no UI actions). Differs only in persona config (system prompt framing);
         the therapist pipeline is left untouched.
         """
-        persona_config = persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION)
-        tools = tool_manager.get_haystack_component_tools("antsabot_companion")
+        persona_config = persona_config or persona_manager.get_persona(PersonaType.ANTSABOT_COMPANION)
+        tools = tool_manager.get_haystack_component_tools(
+            "antsabot_companion", self._tool_names(persona_config)
+        )
 
         routes = [
             {
@@ -252,7 +265,58 @@ class HaystackPipelineManager:
         pipeline.connect("message_collector", "generator.messages")
 
         self.pipelines[PersonaType.ANTSABOT_COMPANION] = pipeline
+        self._pipeline_signatures[PersonaType.ANTSABOT_COMPANION] = self._config_signature(persona_config)
         logger.info("✅ Created ANTSABOT_COMPANION declarative pipeline")
+
+    @staticmethod
+    def _tool_names(persona_config: PersonaConfig) -> List[str]:
+        return [
+            tool.get("function", {}).get("name")
+            for tool in persona_config.tools
+            if tool.get("function", {}).get("name")
+        ]
+
+    @classmethod
+    def _config_signature(cls, persona_config: PersonaConfig) -> tuple:
+        return (
+            persona_config.version,
+            persona_config.model,
+            persona_config.temperature,
+            persona_config.max_completion_tokens,
+            tuple(cls._tool_names(persona_config)),
+        )
+
+    async def _get_runtime_config(self, persona_type: PersonaType) -> PersonaConfig:
+        canonical = PersonaType(normalize_persona_type(persona_type.value))
+        config = await persona_config_provider.get(canonical)
+        if canonical == PersonaType.TRANSCRIBER_AGENT:
+            return config
+
+        # Focused tests and embedders may inject an already-built pipeline
+        # while deliberately skipping initialize(). A built-in fallback
+        # (version 0) does not need to replace that pipeline.
+        if config.version == 0 and canonical in self.pipelines and canonical not in self._pipeline_signatures:
+            return config
+
+        signature = self._config_signature(config)
+        if self._pipeline_signatures.get(canonical) == signature:
+            return config
+
+        async with self._pipeline_config_lock:
+            if self._pipeline_signatures.get(canonical) == signature:
+                return config
+            if canonical == PersonaType.WEB_ASSISTANT:
+                self._create_web_assistant_pipeline(config)
+            elif canonical == PersonaType.ANTSABOT_THERAPIST:
+                self._create_antsabot_therapist_pipeline(config)
+            elif canonical == PersonaType.ANTSABOT_COMPANION:
+                self._create_antsabot_companion_pipeline(config)
+            logger.info(
+                "persona-config: activated %s v%s without restart",
+                canonical.value,
+                config.version,
+            )
+        return config
     
     def _create_transcriber_agent_pipeline(self):
         """
@@ -440,6 +504,8 @@ class HaystackPipelineManager:
         try:
             if not self._initialized:
                 await self.initialize()
+
+            runtime_config = await self._get_runtime_config(persona_type)
             
             # Get or create session
             session = await session_manager.get_session(session_id)
@@ -492,7 +558,11 @@ class HaystackPipelineManager:
             # Haystack owns the static persona and safety contract. The trusted
             # API bridge may append tokenized, request-specific context but can
             # no longer replace those rules wholesale.
-            system_prompt = persona_manager.get_system_prompt(persona_type, context or session.context)
+            system_prompt = persona_manager.get_system_prompt(
+                persona_type,
+                context or session.context,
+                persona_config=runtime_config,
+            )
             if trusted_prompt_append:
                 system_prompt += f"\n\n# TRUSTED DYNAMIC CLIENT CONTEXT\n{trusted_prompt_append}"
 
