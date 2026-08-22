@@ -28,6 +28,11 @@ from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
 from config import settings
 from service_auth import is_valid_service_secret
+from previous_session_summary import (
+    PreviousSessionSummaryRequest,
+    PreviousSessionSummaryResponse,
+    generate_previous_session_summary,
+)
 
 # Load environment variables
 load_dotenv()
@@ -879,6 +884,28 @@ async def generate_document_from_template(
         detect_policy_violation_func=detect_policy_violation,
         log_violation_func=log_violation_to_api
     )
+
+
+@app.post("/previous-session-summary", response_model=PreviousSessionSummaryResponse)
+async def previous_session_summary(
+    request: PreviousSessionSummaryRequest,
+    x_haystack_secret: str = Header(None),
+):
+    """Generate the API's durable previous-session continuity summary."""
+    if not is_valid_service_secret(x_haystack_secret):
+        raise HTTPException(status_code=401, detail="Invalid service credential")
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="OpenAI client not configured")
+
+    try:
+        return await generate_previous_session_summary(request, openai_client)
+    except ValueError as error:
+        # Model/schema errors are upstream failures so the API's Bull worker
+        # retries them; invalid blank input is a stable caller error.
+        status = 400 if str(error) == "transcript is empty" else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
 @app.post("/summarize-ai-conversations")
 async def summarize_ai_conversations_endpoint(request: dict):
     """
