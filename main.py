@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 from ui_state_manager import ui_state_manager
 from openai import AsyncOpenAI
 from haystack_pipeline import haystack_pipeline_manager
-from personas import PersonaType, persona_manager
+from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
+from persona_config_provider import persona_config_provider
 from session_manager import session_manager
 from agents.document_agent import initialize_agent, get_document_agent
 from document_generation.generator import generate_document_from_context
@@ -273,7 +274,11 @@ class ChatResponse(BaseModel):
     timestamp: str
     metadata: Optional[Dict[str, Any]] = None
 
-def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = None) -> str:
+def get_enhanced_system_prompt(
+    persona_type: str,
+    ui_state: Dict[str, Any] = None,
+    persona_config: Optional[PersonaConfig] = None,
+) -> str:
     """Get enhanced system prompt using personas.py"""
     try:
         # Convert string to PersonaType enum
@@ -282,7 +287,9 @@ def get_enhanced_system_prompt(persona_type: str, ui_state: Dict[str, Any] = Non
         persona_enum = PersonaType.WEB_ASSISTANT
 
     # Get base system prompt from personas.py
-    base_prompt = persona_manager.get_system_prompt(persona_enum)
+    base_prompt = persona_manager.get_system_prompt(
+        persona_enum, persona_config=persona_config
+    )
 
     # Debug: Log if UI state is missing
     if not ui_state:
@@ -535,6 +542,27 @@ async def health_check():
         "tools": "available" if tool_manager else "unavailable"
     }
 
+
+@app.get("/internal/persona-defaults/{persona_type}")
+async def get_internal_persona_default(
+    persona_type: str,
+    x_haystack_secret: Optional[str] = Header(None, alias="X-Haystack-Secret"),
+):
+    """Expose deployed built-ins to the API for first-version bootstrap only."""
+    if not is_valid_service_secret(x_haystack_secret):
+        raise HTTPException(status_code=401, detail="Invalid Haystack service credential")
+    try:
+        canonical = PersonaType(normalize_persona_type(persona_type))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Persona not found") from error
+    if canonical not in (
+        PersonaType.WEB_ASSISTANT,
+        PersonaType.ANTSABOT_THERAPIST,
+        PersonaType.ANTSABOT_COMPANION,
+    ):
+        raise HTTPException(status_code=404, detail="Persona not found")
+    return persona_manager.export_default(canonical)
+
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(request: CreateSessionRequest, authorization: str = Header(None), profileid: str = Header(None)):
     try:
@@ -610,8 +638,16 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
         persona_type = sess.persona_type if sess else request.persona_type
         ui_state = await ui_state_manager.get_state(session_id)
         
+        try:
+            persona_enum = PersonaType(normalize_persona_type(persona_type))
+        except ValueError:
+            persona_enum = PersonaType.WEB_ASSISTANT
+        runtime_config = await persona_config_provider.get(persona_enum)
+
         # Get enhanced system prompt
-        system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
+        system_prompt = get_enhanced_system_prompt(
+            persona_type, ui_state, persona_config=runtime_config
+        )
         
         # Add user message to session history
         await session_manager.add_message(session_id, "user", request.message)
@@ -629,10 +665,10 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
             raise HTTPException(status_code=500, detail="OpenAI client not configured")
         
         response = await openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model=runtime_config.model,
             messages=messages,
-            temperature=0.7,
-            max_completion_tokens=4096
+            temperature=runtime_config.temperature,
+            max_completion_tokens=runtime_config.max_completion_tokens
         )
         
         response_text = response.choices[0].message.content or ""
@@ -649,7 +685,10 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
             session_id=session_id,
             message_id=message_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
-            metadata={"persona_type": persona_type}
+            metadata={
+                "persona_type": persona_type,
+                "persona_config_version": runtime_config.version,
+            }
         )
         
     except Exception as e:
@@ -1283,7 +1322,14 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
         # Debug: Log retrieved UI state
         logger.info(f"🔍 Retrieved UI state for {session_id}: page_type={ui_state.get('page_type') if ui_state else None}, keys={list(ui_state.keys()) if ui_state else 'None'}")
 
-        system_prompt = get_enhanced_system_prompt(persona_type, ui_state)
+        try:
+            persona_enum = PersonaType(normalize_persona_type(persona_type))
+        except ValueError:
+            persona_enum = PersonaType.WEB_ASSISTANT
+        runtime_config = await persona_config_provider.get(persona_enum)
+        system_prompt = get_enhanced_system_prompt(
+            persona_type, ui_state, persona_config=runtime_config
+        )
         
         # Add context from message_data
         context = message_data.get("context", {})
@@ -1298,11 +1344,11 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
         
         # OpenAI streaming
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=runtime_config.model,
             messages=messages,
             stream=True,
-            max_tokens=1000,
-            temperature=0.7
+            max_completion_tokens=runtime_config.max_completion_tokens,
+            temperature=runtime_config.temperature
         )
         
         full_content = ""
