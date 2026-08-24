@@ -133,6 +133,36 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
+      - name: Ensure staging app is running
+        if: env.DEPLOY_ENV == 'staging'
+        run: |
+          az webapp start \
+            --resource-group rg-antsa-staging \
+            --name "$APP_NAME"
+
+      - name: Require bounded deployed readiness
+        run: |
+          set -euo pipefail
+          health_url="https://${APP_NAME}.azurewebsites.net/health"
+
+          ready=false
+          deadline=$((SECONDS + 300))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
+
+            if [ -n "$body" ] && \
+               printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); sys.exit(0 if body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" else 1)'; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$ready" != "true" ]; then
+            echo "Haystack readiness did not become healthy within five minutes" >&2
+            exit 1
+          fi
+
 
   notify-develop-failure:
     name: Notify Teams — develop workflow failed

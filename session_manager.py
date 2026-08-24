@@ -1,11 +1,16 @@
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 import redis.asyncio as redis
 from config import settings
+
+
+def _requires_redis() -> bool:
+    return os.getenv("ENVIRONMENT", os.getenv("NODE_ENV", "")).strip().lower() == "production"
 
 @dataclass
 class ChatMessage:
@@ -75,6 +80,8 @@ class SessionManager:
     def __init__(self):
         self.redis_client: Optional[redis.Redis] = None
         self.local_sessions: Dict[str, ChatSession] = {}
+        self.max_messages_per_session = max(20, int(os.getenv("MAX_SESSION_MESSAGES", "500")))
+        self.max_local_sessions = max(10, int(os.getenv("MAX_LOCAL_SESSIONS", "1000")))
         self._cleanup_task: Optional[asyncio.Task] = None
     
     async def initialize(self):
@@ -88,8 +95,10 @@ class SessionManager:
             await self.redis_client.ping()
             print("✅ Connected to Redis for session management")
         except Exception as e:
-            print(f"⚠️ Redis connection failed, using in-memory sessions: {e}")
+            print("⚠️ Redis connection failed for session management")
             self.redis_client = None
+            if _requires_redis():
+                raise RuntimeError("Redis is required for production session management") from e
         
         # Start cleanup task
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
@@ -176,6 +185,8 @@ class SessionManager:
         )
         
         session.messages.append(message)
+        if len(session.messages) > self.max_messages_per_session:
+            session.messages = session.messages[-self.max_messages_per_session:]
         session.last_activity = datetime.utcnow()
         
         await self._save_session(session)
@@ -243,8 +254,10 @@ class SessionManager:
         """Get count of active sessions"""
         if self.redis_client:
             try:
-                keys = await self.redis_client.keys("session:*")
-                return len(keys)
+                count = 0
+                async for _key in self.redis_client.scan_iter(match="session:*", count=500):
+                    count += 1
+                return count
             except Exception as e:
                 print(f"Error counting Redis sessions: {e}")
         
@@ -252,7 +265,7 @@ class SessionManager:
     
     async def _save_session(self, session: ChatSession):
         """Save session to storage"""
-        # Save to Redis with TTL
+        saved_to_redis = False
         if self.redis_client:
             try:
                 session_data = json.dumps(session.to_dict())
@@ -262,11 +275,23 @@ class SessionManager:
                     ttl_seconds,
                     session_data
                 )
+                saved_to_redis = True
             except Exception as e:
                 print(f"Error saving session to Redis: {e}")
-        
-        # Also save to local storage as backup
-        self.local_sessions[session.session_id] = session
+
+        # Do not mirror every Redis session into process memory: that defeats
+        # horizontal scaling and grows each replica with global traffic. The
+        # local map is a bounded-TTL degraded-mode store only when Redis fails.
+        if saved_to_redis:
+            self.local_sessions.pop(session.session_id, None)
+        else:
+            self.local_sessions[session.session_id] = session
+            while len(self.local_sessions) > self.max_local_sessions:
+                oldest_id = min(
+                    self.local_sessions,
+                    key=lambda candidate: self.local_sessions[candidate].last_activity,
+                )
+                self.local_sessions.pop(oldest_id, None)
     
     async def _periodic_cleanup(self):
         """Periodically cleanup expired local sessions"""

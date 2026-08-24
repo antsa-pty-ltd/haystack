@@ -10,11 +10,13 @@ import logging
 import json
 import uuid
 import httpx
+import hmac
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
@@ -161,7 +163,7 @@ async def emit_progress(generation_id: str, data: dict, authorization: Optional[
             )
 
             if response.status_code != 200:
-                logger.warning(f"Failed to emit progress (HTTP {response.status_code}): {response.text}")
+                logger.warning(f"Failed to emit progress (HTTP {response.status_code})")
     except Exception as e:
         # Don't fail document generation if progress emission fails
         logger.error(f"Failed to emit progress for generation {generation_id}: {e}")
@@ -174,6 +176,10 @@ app = FastAPI(
     version="3.0.0"
 )
 
+
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", os.getenv("NODE_ENV", "")).strip().lower() == "production"
+
 # Startup: initialize session store and pipeline
 @app.on_event("startup")
 async def on_startup():
@@ -182,10 +188,14 @@ async def on_startup():
         logger.info("✅ UI State Manager initialized")
     except Exception as e:
         logger.warning(f"⚠️ UI State Manager init warning: {e}")
+        if _is_production():
+            raise
     try:
         await session_manager.initialize()
     except Exception as e:
         logger.warning(f"Session manager init warning: {e}")
+        if _is_production():
+            raise
     
     # Initialize document exploration agent
     if openai_api_key:
@@ -203,7 +213,7 @@ async def on_startup():
 cors_origins = os.getenv("CORS_ORIGINS", "").split(",")
 cors_origins = [o.strip() for o in cors_origins if o.strip()]
 if not cors_origins:
-    cors_origins = ["*"]  # fallback for local dev only
+    cors_origins = [] if _is_production() else ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -218,9 +228,16 @@ app.add_middleware(
 # (/ws/{session_id}) is a separate scope and is passed through untouched.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# WebSocket connections and message buffers for ordering
-websocket_connections: Dict[str, WebSocket] = {}
-message_buffers: Dict[str, List[Dict[str, Any]]] = {}
+
+@app.middleware("http")
+async def require_api_service_auth(request: Request, call_next):
+    """Keep clinical/session endpoints behind the Nest API service boundary."""
+    public_paths = {"/", "/health", "/docs", "/openapi.json", "/redoc"}
+    if request.url.path not in public_paths and not is_valid_service_secret(
+        request.headers.get("x-haystack-secret")
+    ):
+        return JSONResponse(status_code=401, content={"detail": "Invalid service credential"})
+    return await call_next(request)
 
 
 def _is_trusted_api_proxy(websocket: WebSocket) -> bool:
@@ -231,7 +248,21 @@ def _is_trusted_api_proxy(websocket: WebSocket) -> bool:
     Those capabilities require the same shared secret already used for
     Haystack -> API webhooks.
     """
-    return is_valid_service_secret(websocket.headers.get("x-haystack-secret"))
+    return (
+        is_valid_service_secret(websocket.headers.get("x-haystack-secret"))
+        and websocket.headers.get("x-haystack-bridge-type") == "client-agent"
+    )
+
+
+async def _require_session_owner(session_id: str, presented_profile_id: Optional[str]):
+    session = await session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not presented_profile_id or not session.profile_id or not hmac.compare_digest(
+        session.profile_id, presented_profile_id
+    ):
+        raise HTTPException(status_code=403, detail="Session is not available")
+    return session
 
 class CreateSessionRequest(BaseModel):
     persona_type: str = "web_assistant"
@@ -306,7 +337,12 @@ def get_enhanced_system_prompt(
     page_url = ui_state.get('page_url', '')
     has_page_summary = 'page_summary' in ui_state
     has_page_content = 'page_content' in ui_state
-    logger.info(f"🔍 Building system prompt with UI state: page_type={page_type}, page_url={page_url}, has_page_summary={has_page_summary}, has_page_content={has_page_content}")
+    logger.info(
+        "Building system prompt: page_type=%s, has_page_summary=%s, has_page_content=%s",
+        page_type,
+        has_page_summary,
+        has_page_content,
+    )
 
     # Add UI-specific context enhancements
     if ui_state:
@@ -468,11 +504,15 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     if not tool_manager:
         return
 
+    tool_manager.set_ui_session_id(session_id)
+
     # Prefer token from incoming message, else from stored UI state manager, else from stored session
     incoming_token = message_data.get("auth_token") or message_data.get("token")
     ui_state_token = await ui_state_manager.get_auth_token(session_id)
     
-    # Also check the stored session for auth token and profile_id
+    # Also check the stored session for auth token and profile_id. The session
+    # owner was bound by the authenticated API bridge when the session was
+    # created; message-body identity fields are never authoritative.
     session_token = None
     session_profile_id = None
     try:
@@ -485,28 +525,25 @@ async def _ensure_tools_context(session_id: str, message_data: Dict[str, Any]):
     
     token = incoming_token or ui_state_token or session_token
 
-    logger.info(f"🔍 Debug auth context for session {session_id}: incoming_token={bool(incoming_token)}, ui_state_token={bool(ui_state_token)}, session_token={bool(session_token)}, final_token={bool(token)}")
+    logger.debug("Resolved request-scoped authentication context")
 
     if token:
-        # Try to get profile_id from message, then fall back to session
-        profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
-        logger.info(f"🔍 Debug profile_id extraction: from_message={message_data.get('profile_id') or message_data.get('profileId')}, from_session={session_profile_id}, final={profile_id}")
+        profile_id = session_profile_id
         try:
             # Only attach profile_id for practitioner contexts; clients use JWT clientId, not profile header
             if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
                 tool_manager.set_auth_token(token, profile_id)
             else:
                 tool_manager.set_auth_token(token)
-            logger.info(f"🔍 Debug: set auth token, profile_id={getattr(tool_manager, 'profile_id', None)}")
+            logger.debug("Installed request-scoped tool authentication")
         except Exception:
             # Non-fatal; tool calls will fail clearly if required
             pass
 
     # Set profile id explicitly only for practitioner contexts (avoid client-* IDs)
-    # Try message first, then session fallback
-    profile_id = message_data.get("profile_id") or message_data.get("profileId") or session_profile_id
+    profile_id = session_profile_id
     if profile_id and isinstance(profile_id, str) and not profile_id.startswith("client-"):
-        logger.info(f"🔍 Debug: explicitly setting profile_id={profile_id}")
+        logger.debug("Installed request-scoped tool profile")
         try:
             tool_manager.set_profile_id(profile_id)
         except Exception:
@@ -538,14 +575,27 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
+    redis_healthy = False
+    try:
+        if ui_state_manager.redis_client is not None and session_manager.redis_client is not None:
+            await asyncio.wait_for(ui_state_manager.redis_client.ping(), timeout=1.5)
+            await asyncio.wait_for(session_manager.redis_client.ping(), timeout=1.5)
+            redis_healthy = True
+    except Exception:
+        redis_healthy = False
+
+    ready = bool(openai_client and tool_manager and pipeline_manager._initialized and redis_healthy)
+    payload = {
+        "status": "healthy" if ready else "degraded",
         "service": "haystack-au-service",
         "version": "3.0.0",
         "openai": "enabled" if openai_api_key else "disabled",
         "streaming": "active",
-        "tools": "available" if tool_manager else "unavailable"
+        "tools": "available" if tool_manager else "unavailable",
+        "pipeline": "ready" if pipeline_manager._initialized else "unavailable",
+        "redis": "ready" if redis_healthy else "unavailable",
     }
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
 
 
 @app.get("/internal/persona-defaults/{persona_type}")
@@ -569,7 +619,12 @@ async def get_internal_persona_default(
     return persona_manager.export_default(canonical)
 
 @app.post("/sessions", response_model=SessionResponse)
-async def create_session(request: CreateSessionRequest, authorization: str = Header(None), profileid: str = Header(None)):
+async def create_session(
+    request: CreateSessionRequest,
+    authorization: str = Header(None),
+    profileid: str = Header(None),
+    clientid: str = Header(None),
+):
     try:
         logger.info(
             "🔐 Received session headers - Authorization present: %s, ProfileID: %s",
@@ -582,10 +637,12 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         if authorization and authorization.startswith("Bearer "):
             auth_token = authorization[7:]  # Remove "Bearer " prefix
         
-        # Use profileid from header if not provided in request
-        profile_id = request.profile_id or profileid
+        # Ownership comes from the authenticated API bridge, never the body.
+        profile_id = f"client-{clientid}" if clientid else profileid
+        if not profile_id:
+            raise HTTPException(status_code=400, detail="A session owner is required")
         
-        logger.info(f"Creating session with auth_token: {bool(auth_token)}, profile_id: {profile_id}")
+        logger.info("Creating an authenticated chat session")
         
         # Create persisted session
         session_id = await session_manager.create_session(
@@ -598,26 +655,51 @@ async def create_session(request: CreateSessionRequest, authorization: str = Hea
         logger.info(f"Session created: {session_id} for persona {request.persona_type}")
         return SessionResponse(session_id=session_id, persona_type=request.persona_type, created_at=created_at)
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Unable to create session")
 
 
 @app.delete("/sessions/{session_id}")
 async def delete_api_proxy_session(
     session_id: str,
     x_haystack_secret: Optional[str] = Header(None, alias="X-Haystack-Secret"),
+    profileid: Optional[str] = Header(None),
 ):
     """Delete an ephemeral session created by the API mobile-chat bridge."""
     if not is_valid_service_secret(x_haystack_secret):
         raise HTTPException(status_code=401, detail="Invalid Haystack service credential")
 
+    await _require_session_owner(session_id, profileid)
     await session_manager.delete_session(session_id)
     await ui_state_manager.cleanup_session(session_id)
     return {"deleted": True}
 
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    limit: Optional[int] = None,
+    profileid: Optional[str] = Header(None),
+):
+    """Return only a session owned by the authenticated API profile."""
+    await _require_session_owner(session_id, profileid)
+    bounded_limit = min(max(limit or 100, 1), 500)
+    messages = await session_manager.get_messages(session_id, limit=bounded_limit)
+    return {
+        "session_id": session_id,
+        "messages": [message.to_dict() for message in messages],
+    }
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, authorization: str = Header(None), profileid: str = Header(None)):
+async def chat(
+    request: ChatRequest,
+    authorization: str = Header(None),
+    profileid: str = Header(None),
+    clientid: str = Header(None),
+):
     """Send a chat message and get a complete response (non-streaming)"""
     try:
         logger.info(f"📨 Chat request received - persona: {request.persona_type}, session: {request.session_id}")
@@ -630,13 +712,19 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
         # Create session if not provided
         session_id = request.session_id
         if not session_id:
+            owner_id = f"client-{clientid}" if clientid else profileid
+            if not owner_id:
+                raise HTTPException(status_code=400, detail="A session owner is required")
             session_id = await session_manager.create_session(
                 persona_type=request.persona_type,
                 context=request.context or {},
                 auth_token=auth_token,
-                profile_id=profileid,
+                profile_id=owner_id,
             )
             logger.info(f"Created new session for chat: {session_id}")
+        else:
+            owner_id = f"client-{clientid}" if clientid else profileid
+            await _require_session_owner(session_id, owner_id)
         
         # Get session info and UI state
         sess = await session_manager.get_session(session_id)
@@ -696,9 +784,11 @@ async def chat(request: ChatRequest, authorization: str = Header(None), profilei
             }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Chat error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Unable to complete chat request")
 
 async def fetch_session_metadata(session_id: str, authorization: str = None) -> Optional[Dict[str, Any]]:
     """
@@ -773,6 +863,12 @@ async def log_violation_to_api(
 ) -> None:
     """Log policy violation to the API database"""
     try:
+        webhook_secret = os.getenv("HAYSTACK_WEBHOOK_SECRET")
+        if not webhook_secret:
+            logger.error(
+                "HAYSTACK_WEBHOOK_SECRET is not set; policy violation callback was not sent"
+            )
+            return
         async with httpx.AsyncClient(timeout=10.0) as client:
             payload = {
                 "profileId": profile_id,
@@ -791,13 +887,16 @@ async def log_violation_to_api(
             response = await client.post(
                 f"{settings.nestjs_api_url}/api/v1/admin/policy-violations",
                 json=payload,
-                headers={"Content-Type": "application/json"}
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Haystack-Secret": webhook_secret,
+                }
             )
             
             if response.status_code in [200, 201]:
                 logger.info(f"✅ Successfully logged violation to API for profile {profile_id}")
             else:
-                logger.error(f"❌ Failed to log violation to API: {response.status_code} - {response.text}")
+                logger.error(f"❌ Failed to log violation to API: status={response.status_code}")
     
     except Exception as e:
         logger.error(f"❌ Error logging violation to API: {e}")
@@ -878,7 +977,7 @@ Respond with JSON only."""
         
         result = json.loads(result_text)
         
-        logger.info(f"🔍 Policy check result: {result}")
+        logger.info("Policy check completed")
         
         return {
             "is_violation": result.get("is_violation", False),
@@ -888,7 +987,7 @@ Respond with JSON only."""
         }
     
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse policy check response: {e}, Response: {result_text if 'result_text' in locals() else 'N/A'}")
+        logger.error(f"Failed to parse policy check response: {e}")
         # Fail open - allow template if we can't parse the response
         return {"is_violation": False, "violation_type": None, "reason": None}
     except Exception as e:
@@ -941,8 +1040,9 @@ async def previous_session_summary(
     except ValueError as error:
         # Model/schema errors are upstream failures so the API's Bull worker
         # retries them; invalid blank input is a stable caller error.
-        status = 400 if str(error) == "transcript is empty" else 502
-        raise HTTPException(status_code=status, detail=str(error)) from error
+        if str(error) == "transcript is empty":
+            raise HTTPException(status_code=400, detail="transcript is empty") from error
+        raise HTTPException(status_code=502, detail="Summary provider returned an invalid response") from error
 
 
 @app.post("/summarize-ai-conversations")
@@ -995,13 +1095,27 @@ async def summarize_ai_conversations_endpoint(request: dict):
         raise
     except Exception as e:
         logger.error(f"❌ Error in conversation summarization endpoint: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to summarize conversations: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to summarize conversations")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     trusted_api_proxy = _is_trusted_api_proxy(websocket)
+    if not is_valid_service_secret(websocket.headers.get("x-haystack-secret")):
+        await websocket.close(code=4401, reason="Invalid service credential")
+        return
+
+    bridge_type = websocket.headers.get("x-haystack-bridge-type")
+    presented_profile_id = websocket.headers.get("x-profile-id")
+    if bridge_type not in {"practitioner", "client-agent"}:
+        await websocket.close(code=4403, reason="Invalid bridge type")
+        return
+    try:
+        await _require_session_owner(session_id, presented_profile_id)
+    except HTTPException as error:
+        await websocket.close(code=4404 if error.status_code == 404 else 4403, reason="Session unavailable")
+        return
+
     await websocket.accept()
-    websocket_connections[session_id] = websocket
     logger.info(f"WebSocket connected for session {session_id}")
     if trusted_api_proxy:
         logger.info(f"[mobile-chat] Trusted API agent bridge connected for session {session_id}")
@@ -1033,18 +1147,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Extract auth token if present
                 auth_token = message_data.get("auth_token") or message_data.get("token")
                 
-                # Extract profile_id if present
-                profile_id = message_data.get("profile_id") or message_data.get("profileId")
-                
                 # Check which format we received
                 if "state" in message_data:
                     # Full state format from ai-ui-integration.ts
-                    full_state = message_data.get("state", {})
+                    incoming_state = message_data.get("state", {})
+                    full_state = dict(incoming_state) if isinstance(incoming_state, dict) else {}
                     timestamp = full_state.get("timestamp", datetime.now(timezone.utc).isoformat())
-                    
-                    # Add profile_id to state for tracking
-                    if profile_id:
-                        full_state["profile_id"] = profile_id
+                    full_state["profile_id"] = presented_profile_id
                     
                     # Store the full state directly
                     try:
@@ -1070,9 +1179,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "page_url": page_url,
                     }
                     
-                    # Add profile_id to changes if present
-                    if profile_id:
-                        changes["profile_id"] = profile_id
+                    changes["profile_id"] = presented_profile_id
                     
                     # Add sequence if provided
                     if sequence:
@@ -1107,15 +1214,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 
                 # Proactively set tool context if available
                 await _ensure_tools_context(session_id, message_data)
-                
-                # Process any buffered chat messages waiting for state
-                if session_id in message_buffers and message_buffers[session_id]:
-                    logger.info(f"🔄 Processing {len(message_buffers[session_id])} buffered messages for {session_id}")
-                    buffered = message_buffers[session_id]
-                    message_buffers[session_id] = []
-                    for buffered_msg in buffered:
-                        # Re-process buffered message (will be handled by main loop)
-                        pass
                 
                 continue
             
@@ -1156,15 +1254,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 derived = _build_page_context_from_ui_state(ui_state)
 
-                # Extract profile_id for session recovery
-                profile_id = message_data.get("profile_id") or message_data.get("profileId")
                 context_for_pipeline: Dict[str, Any] = {
                     "page_url": ui_state.get("page_url"),
                     "ui_capabilities": derived.get("capabilities", []),
                     "client_id": ui_state.get("client_id"),
                     "active_tab": ui_state.get("active_tab"),
                     "page_context": derived.get("page_type"),
-                    "profile_id": profile_id,  # Include profile_id for session recovery
+                    "profile_id": presented_profile_id,
                 }
                 # Country code (root CLAUDE.md: x-country-code on every request)
                 # threads through so the B2C companion can surface the correct
@@ -1245,7 +1341,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     ui_actions = pipeline_manager.pop_ui_actions()
                     logger.info(f"🎯 [WEBSOCKET] Retrieved {len(ui_actions)} UI actions from pipeline")
                     for action in ui_actions:
-                        logger.info(f"🎯 [WEBSOCKET] Sending UI action to frontend: {action}")
+                        logger.info("Sending a UI action to the requesting connection")
                         await websocket.send_text(json.dumps({
                             "type": "ui_action",
                             "action": action,
@@ -1285,18 +1381,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")
-        if session_id in websocket_connections:
-            del websocket_connections[session_id]
         # Note: UI state is NOT cleaned up here - it persists with 24h TTL in Redis
         # This allows reconnection and state recovery
-        # Cleanup message buffer
-        message_buffers.pop(session_id, None)
     except Exception as e:
         logger.error(f"WebSocket error for session {session_id}: {e}")
-        if session_id in websocket_connections:
-            del websocket_connections[session_id]
         # On error, also keep state for potential recovery
-        message_buffers.pop(session_id, None)
 
 async def handle_template_request(message: str, session_id: str) -> str:
     """Handle template-related requests"""
@@ -1309,7 +1398,10 @@ async def handle_template_request(message: str, session_id: str) -> str:
             if not tool_manager:
                 return "Templates are unavailable right now."
 
-            tool_result = await tool_manager.execute_tool("get_templates", {})
+            tool_manager.set_ui_session_id(session_id)
+            tool_result = await tool_manager.execute_tool(
+                "get_templates", {}, ui_session_id=session_id
+            )
             if tool_result.get("success"):
                 result_payload = tool_result.get("result") or {}
                 templates = result_payload.get("templates", [])
@@ -1335,7 +1427,7 @@ async def handle_template_request(message: str, session_id: str) -> str:
             
     except Exception as e:
         logger.error(f"Template request error: {e}")
-        return f"I encountered an error with templates: {str(e)}"
+        return "I encountered an error with templates. Please try again."
 
 async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str, message_data: Dict[str, Any]):
     """Handle regular OpenAI chat with streaming"""
@@ -1430,12 +1522,21 @@ async def send_streaming_response(websocket: WebSocket, session_id: str, respons
     }))
 
 # Debug endpoints for state inspection
+def _require_debug_endpoints() -> None:
+    """Keep state-enumeration endpoints opt-in and unavailable in production."""
+    enabled = os.getenv("HAYSTACK_DEBUG_ENDPOINTS", "").lower() == "true"
+    if _is_production() or not enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 @app.get("/debug/sessions/{session_id}/state")
-async def debug_session_state(session_id: str, authorization: Optional[str] = Header(None)):
-    """Debug endpoint - get UI state for a specific session (requires auth in production)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
+async def debug_session_state(
+    session_id: str,
+    profileid: Optional[str] = Header(None),
+):
+    """Inspect one owned UI session when diagnostics are explicitly enabled."""
+    _require_debug_endpoints()
+    await _require_session_owner(session_id, profileid)
     ui_state = await ui_state_manager.get_state(session_id)
     capabilities = await ui_state_manager.get_page_capabilities(session_id)
     
@@ -1448,11 +1549,9 @@ async def debug_session_state(session_id: str, authorization: Optional[str] = He
     }
 
 @app.get("/debug/sessions")
-async def debug_all_sessions(authorization: Optional[str] = Header(None)):
-    """Debug endpoint - list all active sessions (requires auth in production)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
+async def debug_all_sessions():
+    """List active session metadata only in an explicitly enabled debug env."""
+    _require_debug_endpoints()
     # Get all sessions summary from ui_state_manager
     sessions = await ui_state_manager.get_all_sessions_summary()
     
@@ -1463,11 +1562,9 @@ async def debug_all_sessions(authorization: Optional[str] = Header(None)):
     }
 
 @app.get("/debug/redis/health")
-async def debug_redis_health(authorization: Optional[str] = Header(None)):
-    """Debug endpoint - check Redis connection health"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - Authorization header required")
-    
+async def debug_redis_health():
+    """Inspect Redis connectivity only in an explicitly enabled debug env."""
+    _require_debug_endpoints()
     try:
         if ui_state_manager._initialized and ui_state_manager.redis_client:
             await ui_state_manager.redis_client.ping()
@@ -1486,7 +1583,7 @@ async def debug_redis_health(authorization: Optional[str] = Header(None)):
         return {
             "redis_connected": False,
             "status": "error",
-            "message": f"Redis connection error: {str(e)}"
+            "message": "Redis connection error"
         }
 
 if __name__ == "__main__":

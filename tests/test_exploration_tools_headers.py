@@ -131,6 +131,37 @@ class TestResetExplorationContext:
         ctx = get_exploration_context()
         assert ctx.profileid is None
 
+    def test_concurrent_generations_keep_credentials_and_segments_isolated(self):
+        async def worker(profileid: str, segment_text: str, delay: float):
+            reset_exploration_context(
+                authorization=f"Bearer {profileid}",
+                generation_id=f"gen-{profileid}",
+                profileid=profileid,
+            )
+            context = get_exploration_context()
+            context.add_segments([{"transcript_id": profileid, "text": segment_text}])
+            await asyncio.sleep(delay)
+            final = get_exploration_context()
+            return final.profileid, final.authorization, final.accumulated_segments
+
+        async def run_workers():
+            return await asyncio.gather(
+                worker("profile-a", "tenant A", 0.01),
+                worker("profile-b", "tenant B", 0),
+            )
+
+        first, second = asyncio.run(run_workers())
+        assert first == (
+            "profile-a",
+            "Bearer profile-a",
+            [{"transcript_id": "profile-a", "text": "tenant A"}],
+        )
+        assert second == (
+            "profile-b",
+            "Bearer profile-b",
+            [{"transcript_id": "profile-b", "text": "tenant B"}],
+        )
+
 
 # ── Each agent tool forwards both headers on its API callback ─────────────
 

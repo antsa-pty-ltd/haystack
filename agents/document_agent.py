@@ -7,6 +7,7 @@ and build context for document generation.
 
 import asyncio
 import logging
+from contextvars import copy_context
 from typing import List, Dict, Any, Optional
 from haystack.components.agents import Agent
 from haystack.components.generators.chat import OpenAIChatGenerator
@@ -213,21 +214,56 @@ class DocumentExplorationAgent:
             )
         ]
         
-        # Create the Haystack agent
-        self.agent = Agent(
+        # Retain one initialized instance for startup validation. Each request
+        # receives a fresh Agent below so internal component state cannot cross
+        # concurrent clinical document generations.
+        self.agent = self._create_agent()
+
+        logger.info(f"✅ DocumentExplorationAgent initialized with {len(self.tools)} tools")
+
+    def _request_bound_tools(self) -> List[Tool]:
+        """Clone tools with the current ContextVars propagated to workers."""
+        request_context = copy_context()
+        tools: List[Tool] = []
+
+        for source in self.tools:
+            source_function = source.function
+
+            def bind(function):
+                def invoke(**kwargs):
+                    # ToolInvoker uses a thread pool and does not propagate
+                    # contextvars itself. Each parallel call needs its own copy.
+                    return request_context.copy().run(function, **kwargs)
+
+                return invoke
+
+            tools.append(
+                Tool(
+                    name=source.name,
+                    description=source.description,
+                    parameters=source.parameters,
+                    function=bind(source_function),
+                    outputs_to_string=source.outputs_to_string,
+                    inputs_from_state=source.inputs_from_state,
+                    outputs_to_state=source.outputs_to_state,
+                )
+            )
+
+        return tools
+
+    def _create_agent(self, tools: Optional[List[Tool]] = None) -> Agent:
+        return Agent(
             chat_generator=OpenAIChatGenerator(
-                api_key=Secret.from_token(openai_api_key),
-                model=model,
+                api_key=Secret.from_token(self.openai_api_key),
+                model=self.model,
                 generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
             ),
-            tools=self.tools,
+            tools=tools or self.tools,
             system_prompt=AGENT_SYSTEM_PROMPT,
             exit_conditions=["generate_document"],  # Agent stops when it calls generate_document
             max_agent_steps=50,  # Safety limit
             raise_on_tool_invocation_failure=False  # Continue on tool errors
         )
-        
-        logger.info(f"✅ DocumentExplorationAgent initialized with {len(self.tools)} tools")
     
     async def explore_and_decide(
         self,
@@ -293,8 +329,10 @@ Start exploring!"""
         
         # Run the agent
         try:
-            result = self.agent.run(
-                messages=[ChatMessage.from_user(initial_message)]
+            request_agent = self._create_agent(self._request_bound_tools())
+            result = await asyncio.to_thread(
+                request_agent.run,
+                messages=[ChatMessage.from_user(initial_message)],
             )
             
             # Get the exploration context
@@ -418,4 +456,3 @@ def initialize_agent(openai_api_key: str, model: str = "gpt-5.2"):
 def get_document_agent() -> Optional[DocumentExplorationAgent]:
     """Get the global document agent instance."""
     return _document_agent
-

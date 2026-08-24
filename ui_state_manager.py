@@ -5,6 +5,7 @@ This allows AI tools to access information about loaded sessions, selected clien
 import logging
 import json
 import os
+import time
 from typing import Dict, List, Optional, TypedDict, Union, cast
 from datetime import datetime
 
@@ -16,6 +17,10 @@ except ImportError:
     redis_sync = redis_async  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+def _requires_redis() -> bool:
+    return os.getenv("ENVIRONMENT", os.getenv("NODE_ENV", "")).strip().lower() == "production"
 
 # Type definitions for UI state structure
 class LoadedSessionData(TypedDict, total=False):
@@ -60,6 +65,7 @@ class UIStateManager:
     """Redis-backed UI state manager with strict typing"""
     
     STATE_TTL = 86400  # 24 hours in seconds
+    MAX_FALLBACK_ENTRIES = max(20, int(os.getenv("MAX_LOCAL_UI_STATE_ENTRIES", "2000")))
     
     def __init__(self) -> None:
         self.redis_client: Optional[redis_async.Redis] = None  # Async client for FastAPI
@@ -67,6 +73,31 @@ class UIStateManager:
         self._initialized: bool = False
         self._in_memory_fallback: Dict[str, str] = {}  # Fallback storage if Redis fails
         self._in_memory_tokens: Dict[str, str] = {}
+        self._in_memory_expiry: Dict[str, float] = {}
+
+    def _prune_fallback(self) -> None:
+        now = time.time()
+        for key, expires_at in list(self._in_memory_expiry.items()):
+            if expires_at <= now:
+                self._in_memory_fallback.pop(key, None)
+                self._in_memory_tokens.pop(key, None)
+                self._in_memory_expiry.pop(key, None)
+
+    def _set_fallback(self, key: str, value: str, *, token: bool = False) -> None:
+        self._prune_fallback()
+        target = self._in_memory_tokens if token else self._in_memory_fallback
+        target[key] = value
+        self._in_memory_expiry[key] = time.time() + self.STATE_TTL
+        while len(self._in_memory_expiry) > self.MAX_FALLBACK_ENTRIES:
+            oldest_key = min(self._in_memory_expiry, key=self._in_memory_expiry.get)
+            self._in_memory_fallback.pop(oldest_key, None)
+            self._in_memory_tokens.pop(oldest_key, None)
+            self._in_memory_expiry.pop(oldest_key, None)
+
+    def _get_fallback(self, key: str, *, token: bool = False) -> Optional[str]:
+        self._prune_fallback()
+        target = self._in_memory_tokens if token else self._in_memory_fallback
+        return target.get(key)
     
     async def initialize(self) -> None:
         """Initialize Redis connection (async for FastAPI)"""
@@ -84,9 +115,11 @@ class UIStateManager:
             # startup diagnostics.
             logger.info("✅ UIStateManager initialized with Redis (async + sync clients)")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Redis: {e}")
-            logger.warning("⚠️  Falling back to in-memory state storage")
+            logger.error("❌ Failed to initialize Redis for UI state")
             self._initialized = False
+            if _requires_redis():
+                raise RuntimeError("Redis is required for production UI state") from e
+            logger.warning("⚠️  Falling back to in-memory state storage")
     
     def _state_key(self, session_id: str) -> str:
         """Generate Redis key for UI state"""
@@ -132,7 +165,7 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 key = self._state_key(session_id)
-                current_json = self._in_memory_fallback.get(key, "{}")
+                current_json = self._get_fallback(key) or "{}"
                 current: UIState = json.loads(current_json)
                 
                 last_updated = current.get("last_updated", "1970-01-01T00:00:00Z")
@@ -146,7 +179,7 @@ class UIStateManager:
                 current["last_updated"] = timestamp
                 current["session_id"] = session_id
                 
-                self._in_memory_fallback[key] = json.dumps(current)
+                self._set_fallback(key, json.dumps(current))
                 logger.info(f"✅ Updated UI state for {session_id} (in-memory fallback)")
                 return True
                 
@@ -193,11 +226,11 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 key = self._state_key(session_id)
-                self._in_memory_fallback[key] = json.dumps(ui_state)
+                self._set_fallback(key, json.dumps(ui_state))
                 
                 if auth_token:
                     token_key = self._token_key(session_id)
-                    self._in_memory_tokens[token_key] = auth_token
+                    self._set_fallback(token_key, auth_token, token=True)
                 
                 logger.info(f"✅ Full state update for {session_id} (in-memory fallback)")
                 return True
@@ -219,7 +252,7 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 key = self._state_key(session_id)
-                state_json = self._in_memory_fallback.get(key)
+                state_json = self._get_fallback(key)
                 if state_json:
                     return cast(UIState, json.loads(state_json))
                 return {}
@@ -258,7 +291,7 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 token_key = self._token_key(session_id)
-                return self._in_memory_tokens.get(token_key)
+                return self._get_fallback(token_key, token=True)
                 
         except Exception as e:
             logger.error(f"❌ Error getting auth token for {session_id}: {e}")
@@ -276,6 +309,8 @@ class UIStateManager:
                 # In-memory fallback
                 self._in_memory_fallback.pop(self._state_key(session_id), None)
                 self._in_memory_tokens.pop(self._token_key(session_id), None)
+                self._in_memory_expiry.pop(self._state_key(session_id), None)
+                self._in_memory_expiry.pop(self._token_key(session_id), None)
                 logger.info(f"🧹 Cleaned up state for {session_id} (in-memory)")
                 
         except Exception as e:
@@ -338,8 +373,7 @@ class UIStateManager:
         try:
             if self._initialized and self.redis_client is not None:
                 # Redis path - scan for all ui_state:* keys
-                keys = await self.redis_client.keys("ui_state:*")
-                for key in keys:
+                async for key in self.redis_client.scan_iter(match="ui_state:*", count=500):
                     if isinstance(key, str):
                         session_id = key.split(":", 1)[1]
                         state = await self.get_state(session_id)
@@ -350,6 +384,7 @@ class UIStateManager:
                         }
             else:
                 # In-memory fallback
+                self._prune_fallback()
                 for key, state_json in self._in_memory_fallback.items():
                     if key.startswith("ui_state:"):
                         session_id = key.split(":", 1)[1]
@@ -376,8 +411,7 @@ class UIStateManager:
         try:
             if self._initialized and self.redis_client_sync is not None:
                 # Use sync Redis client
-                keys = self.redis_client_sync.keys("ui_state:*")
-                for key in keys:
+                for key in self.redis_client_sync.scan_iter(match="ui_state:*", count=500):
                     if isinstance(key, (str, bytes)):
                         session_id = (key.decode() if isinstance(key, bytes) else key).split(":", 1)[1]
                         state = self.get_state_sync(session_id)
@@ -388,6 +422,7 @@ class UIStateManager:
                         }
             else:
                 # In-memory fallback
+                self._prune_fallback()
                 for key, state_json in self._in_memory_fallback.items():
                     if key.startswith("ui_state:"):
                         session_id = key.split(":", 1)[1]
@@ -414,7 +449,7 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 key = self._state_key(session_id)
-                state_json = self._in_memory_fallback.get(key)
+                state_json = self._get_fallback(key)
                 if state_json:
                     return cast(UIState, json.loads(state_json))
                 return {}
@@ -452,7 +487,7 @@ class UIStateManager:
             else:
                 # In-memory fallback
                 key = self._token_key(session_id)
-                return self._in_memory_tokens.get(key)
+                return self._get_fallback(key, token=True)
         except Exception as e:
             logger.error(f"❌ Error getting auth token (sync) for {session_id}: {e}")
             return None

@@ -334,11 +334,11 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
 
         # Validate response
         if not response or not response.choices or len(response.choices) == 0:
-            logger.error(f"Invalid OpenAI response: {response}")
+            logger.error("Invalid OpenAI response shape")
             raise Exception("Invalid response from OpenAI API")
 
         if not response.choices[0].message:
-            logger.error(f"No message in OpenAI response: {response.choices[0]}")
+            logger.error("OpenAI response contained no message")
             raise Exception("No message content in OpenAI response")
 
         generated_content = response.choices[0].message.content
