@@ -22,9 +22,9 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -62,10 +62,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -74,12 +74,15 @@ jobs:
           if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
             ENV="production"
             APP_NAME="antsa-haystack-au-production"
+            RESOURCE_GROUP="PRODUCTION"
           else
             ENV="staging"
             APP_NAME="antsa-haystack-au-staging"
+            RESOURCE_GROUP="rg-antsa-staging"
           fi
           echo "DEPLOY_ENV=${ENV}" >> $GITHUB_ENV
           echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
+          echo "RESOURCE_GROUP=${RESOURCE_GROUP}" >> $GITHUB_ENV
 
       - name: Validate dependencies
         run: |
@@ -133,11 +136,15 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
-      - name: Ensure staging app is running
-        if: env.DEPLOY_ENV == 'staging'
+      - name: Activate the exact deployed artifact
         run: |
+          # Zip deployment can finish before an Always On worker recycles. An
+          # explicit start/restart prevents readiness from observing stale code.
           az webapp start \
-            --resource-group rg-antsa-staging \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$APP_NAME"
+          az webapp restart \
+            --resource-group "$RESOURCE_GROUP" \
             --name "$APP_NAME"
 
       - name: Require bounded deployed readiness
@@ -176,7 +183,7 @@ jobs:
     timeout-minutes: 2
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Notify Teams
         env:
