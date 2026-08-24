@@ -133,50 +133,22 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
+      - name: Ensure staging app is running
+        if: env.DEPLOY_ENV == 'staging'
+        run: |
+          az webapp start \
+            --resource-group rg-antsa-staging \
+            --name "$APP_NAME"
+
       - name: Require bounded deployed readiness
-        env:
-          STAGING_PUBLISH_PROFILE: ${{ github.ref == 'refs/heads/develop' && secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING || '' }}
         run: |
           set -euo pipefail
           health_url="https://${APP_NAME}.azurewebsites.net/health"
 
-          # Staging is intentionally inaccessible from hosted runners. Use the
-          # authenticated Kudu command API to probe the app's localhost from
-          # inside its App Service boundary without changing access rules.
-          if [ "$DEPLOY_ENV" = "staging" ]; then
-            test -n "$STAGING_PUBLISH_PROFILE"
-            IFS=$'\t' read -r kudu_user kudu_password < <(
-              python -c 'import os,xml.etree.ElementTree as ET; root=ET.fromstring(os.environ["STAGING_PUBLISH_PROFILE"]); profile=next(p for p in root if p.get("publishMethod") == "MSDeploy"); print(profile.get("userName"), profile.get("userPWD"), sep="\t")'
-            )
-            test -n "$kudu_user"
-            test -n "$kudu_password"
-            kudu_url="https://${APP_NAME}.scm.azurewebsites.net/api/command"
-            kudu_command="curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8001/health"
-            kudu_payload="$(
-              python -c 'import json,sys; print(json.dumps({"command": sys.argv[1], "dir": "/home/site/wwwroot"}))' "$kudu_command"
-            )"
-          fi
-
           ready=false
           deadline=$((SECONDS + 300))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            if [ "$DEPLOY_ENV" = "staging" ]; then
-              if kudu_response="$(
-                curl --fail --silent --show-error --max-time 20 \
-                  --user "${kudu_user}:${kudu_password}" \
-                  --header 'Content-Type: application/json' \
-                  --data "$kudu_payload" \
-                  "$kudu_url"
-              )"; then
-                body="$(
-                  printf '%s' "$kudu_response" | python -c 'import json,sys; response=json.load(sys.stdin); sys.exit(1) if response.get("ExitCode") != 0 else print(response.get("Output", ""), end="")'
-                )" || body=""
-              else
-                body=""
-              fi
-            else
-              body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
-            fi
+            body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
 
             if [ -n "$body" ] && \
                printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); sys.exit(0 if body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" else 1)'; then
