@@ -137,6 +137,57 @@ jobs:
         run: |
           set -euo pipefail
           health_url="https://${APP_NAME}.azurewebsites.net/health"
+          probe_rule_name=""
+
+          cleanup_probe_rule() {
+            if [ -n "$probe_rule_name" ]; then
+              az webapp config access-restriction remove \
+                --resource-group "$resource_group" \
+                --name "$APP_NAME" \
+                --rule-name "$probe_rule_name" \
+                --output none || true
+              probe_rule_name=""
+            fi
+          }
+          trap cleanup_probe_rule EXIT INT TERM
+
+          # Staging is intentionally IP-restricted. Admit only this ephemeral
+          # hosted runner while it performs the readiness probe, then remove
+          # that exact rule on success, failure, or cancellation.
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            resource_group="$(az webapp list --query "[?name=='${APP_NAME}'].resourceGroup | [0]" --output tsv)"
+            test -n "$resource_group"
+
+            runner_ip="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+            python -c 'import ipaddress,sys; assert ipaddress.ip_address(sys.argv[1]).version == 4' "$runner_ip"
+
+            minimum_priority="$(
+              az webapp config access-restriction show \
+                --resource-group "$resource_group" \
+                --name "$APP_NAME" \
+                --query 'min(ipSecurityRestrictions[].priority)' \
+                --output tsv
+            )"
+            if [ -z "$minimum_priority" ] || [ "$minimum_priority" = "None" ]; then
+              probe_priority=100
+            elif [ "$minimum_priority" -gt 1 ]; then
+              probe_priority=$((minimum_priority - 1))
+            else
+              echo "No higher-priority slot is available for the ephemeral staging probe" >&2
+              exit 1
+            fi
+
+            probe_rule_name="ci-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            az webapp config access-restriction add \
+              --resource-group "$resource_group" \
+              --name "$APP_NAME" \
+              --rule-name "$probe_rule_name" \
+              --action Allow \
+              --ip-address "${runner_ip}/32" \
+              --priority "$probe_priority" \
+              --output none
+          fi
+
           for attempt in $(seq 1 60); do
             if body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" && \
                printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); assert body.get("status") == "healthy"; assert body.get("pipeline") == "ready"; assert body.get("redis") == "ready"'; then
