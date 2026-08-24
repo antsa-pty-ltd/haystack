@@ -145,20 +145,18 @@ jobs:
                 --resource-group "$resource_group" \
                 --name "$APP_NAME" \
                 --rule-name "$probe_rule_name" \
-                --output none || true
+                --output none
               probe_rule_name=""
             fi
           }
-          trap cleanup_probe_rule EXIT INT TERM
+          trap 'cleanup_probe_rule || true' EXIT INT TERM
 
-          # Staging is intentionally IP-restricted. Admit only this ephemeral
-          # hosted runner while it performs the readiness probe, then remove
-          # that exact rule on success, failure, or cancellation.
+          # Staging is intentionally IP-restricted. GitHub-hosted runners can
+          # traverse different Azure egress addresses, so briefly admit the
+          # AzureCloud service tag while this readiness probe runs. The exact
+          # run-scoped rule is removed on success, failure, or cancellation.
           if [ "$DEPLOY_ENV" = "staging" ]; then
             resource_group="rg-antsa-staging"
-
-            runner_ip="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
-            python -c 'import ipaddress,sys; assert ipaddress.ip_address(sys.argv[1]).version == 4' "$runner_ip"
 
             minimum_priority="$(
               az webapp config access-restriction show \
@@ -182,20 +180,39 @@ jobs:
               --name "$APP_NAME" \
               --rule-name "$probe_rule_name" \
               --action Allow \
-              --ip-address "${runner_ip}/32" \
+              --service-tag AzureCloud \
               --priority "$probe_priority" \
               --output none
           fi
 
+          ready=false
           for attempt in $(seq 1 60); do
             if body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" && \
                printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); assert body.get("status") == "healthy"; assert body.get("pipeline") == "ready"; assert body.get("redis") == "ready"'; then
-              exit 0
+              ready=true
+              break
             fi
             sleep 5
           done
-          echo "Haystack readiness did not become healthy within five minutes" >&2
-          exit 1
+
+          if [ "$ready" != "true" ]; then
+            echo "Haystack readiness did not become healthy within five minutes" >&2
+            exit 1
+          fi
+
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            completed_probe_rule="$probe_rule_name"
+            cleanup_probe_rule
+            trap - EXIT INT TERM
+            remaining_rules="$(
+              az webapp config access-restriction show \
+                --resource-group "$resource_group" \
+                --name "$APP_NAME" \
+                --query "length(ipSecurityRestrictions[?name=='${completed_probe_rule}'])" \
+                --output tsv
+            )"
+            test "$remaining_rules" = "0"
+          fi
 
 
   notify-develop-failure:
