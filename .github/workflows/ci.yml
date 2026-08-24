@@ -115,7 +115,7 @@ jobs:
           echo "Package size: $(du -sh deploy/ | cut -f1)"
 
       - name: Azure Login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           creds: ${{ env.DEPLOY_ENV == 'production' && secrets.AZURE_CREDENTIALS_AU || secrets.AZURE_CREDENTIALS_STAGING }}
 
