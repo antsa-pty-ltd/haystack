@@ -155,8 +155,7 @@ jobs:
           # hosted runner while it performs the readiness probe, then remove
           # that exact rule on success, failure, or cancellation.
           if [ "$DEPLOY_ENV" = "staging" ]; then
-            resource_group="$(az webapp list --query "[?name=='${APP_NAME}'].resourceGroup | [0]" --output tsv)"
-            test -n "$resource_group"
+            resource_group="rg-antsa-staging"
 
             runner_ip="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
             python -c 'import ipaddress,sys; assert ipaddress.ip_address(sys.argv[1]).version == 4' "$runner_ip"
