@@ -60,19 +60,12 @@ class UIActionCollector:
                     logger.warning(f"⚠️ UIActionCollector: Tool message has no content in tool_call_result or text")
                     continue
                 
-                # Log raw content preview
-                raw_content_preview = str(raw_content)[:300]
-                logger.info(f"🔍 UIActionCollector: Raw content preview: {raw_content_preview}...")
-                
                 # Parse the tool result content
                 content = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
                 
                 logger.info(f"🔍 UIActionCollector: Parsed content type: {type(content)}")
                 if isinstance(content, dict):
-                    logger.info(f"🔍 UIActionCollector: Content keys: {list(content.keys())}")
                     logger.info(f"🔍 UIActionCollector: Content structure: success={content.get('success')}, has_result={bool(content.get('result'))}")
-                    if content.get("result") and isinstance(content["result"], dict):
-                        logger.info(f"🔍 UIActionCollector: Result keys: {list(content['result'].keys())}")
                 
                 if not isinstance(content, dict):
                     logger.warning(f"⚠️ UIActionCollector: Content is not a dict, skipping")
@@ -143,4 +136,3 @@ class MessageCollector:
     def clear(self):
         """Clear accumulated messages (useful between conversations)"""
         self._messages = []
-

@@ -8,6 +8,8 @@ making decisions about how to retrieve and analyze content.
 import os
 import httpx
 import logging
+import threading
+from contextvars import ContextVar
 from typing import Dict, Any, List, Optional, Annotated
 from utils.session_utils import estimate_tokens_from_segments
 
@@ -31,27 +33,29 @@ class ExplorationContext:
         self.profileid: Optional[str] = None
         self.generation_id: Optional[str] = None
         self._segment_ids: set = set()  # Track segment IDs for deduplication
+        self._lock = threading.Lock()
         
     def add_segments(self, segments: List[Dict[str, Any]]):
         """Add segments with deduplication and update token count"""
-        initial_count = len(self.accumulated_segments)
-        duplicates_found = 0
-        
-        for segment in segments:
-            # Create a unique identifier for each segment
-            # Use combination of session_id, start_time, and text to identify duplicates
-            segment_id = self._create_segment_id(segment)
-            
-            if segment_id not in self._segment_ids:
-                self._segment_ids.add(segment_id)
-                self.accumulated_segments.append(segment)
-            else:
-                duplicates_found += 1
-        
-        # Calculate tokens only for newly added segments
-        new_segments_added = len(self.accumulated_segments) - initial_count
-        # Rough estimate: 1 segment ≈ 75 tokens
-        self.tokens_used += new_segments_added * 75
+        with self._lock:
+            initial_count = len(self.accumulated_segments)
+            duplicates_found = 0
+
+            for segment in segments:
+                # Create a unique identifier for each segment
+                # Use combination of session_id, start_time, and text to identify duplicates
+                segment_id = self._create_segment_id(segment)
+
+                if segment_id not in self._segment_ids:
+                    self._segment_ids.add(segment_id)
+                    self.accumulated_segments.append(segment)
+                else:
+                    duplicates_found += 1
+
+            # Calculate tokens only for newly added segments
+            new_segments_added = len(self.accumulated_segments) - initial_count
+            # Rough estimate: 1 segment ≈ 75 tokens
+            self.tokens_used += new_segments_added * 75
         
         # Log deduplication stats if duplicates were found
         if duplicates_found > 0:
@@ -74,22 +78,30 @@ class ExplorationContext:
         return (self.tokens_used + estimated_tokens) <= self.token_budget
 
 
-# Global context instance (will be reset for each document generation)
-_exploration_context = ExplorationContext()
+# The service handles document generations concurrently. A module-global
+# accumulator lets one request overwrite another request's clinical segments
+# and credentials, so each task gets an independent context.
+_exploration_context: ContextVar[Optional[ExplorationContext]] = ContextVar(
+    "document_exploration_context", default=None
+)
 
 
 def get_exploration_context() -> ExplorationContext:
     """Get the current exploration context"""
-    return _exploration_context
+    context = _exploration_context.get()
+    if context is None:
+        context = ExplorationContext()
+        _exploration_context.set(context)
+    return context
 
 
 def reset_exploration_context(authorization: str = None, generation_id: str = None, profileid: str = None):
     """Reset exploration context for a new document generation"""
-    global _exploration_context
-    _exploration_context = ExplorationContext()
-    _exploration_context.authorization = authorization
-    _exploration_context.profileid = profileid
-    _exploration_context.generation_id = generation_id
+    context = ExplorationContext()
+    context.authorization = authorization
+    context.profileid = profileid
+    context.generation_id = generation_id
+    _exploration_context.set(context)
 
 
 def _api_headers(context: "ExplorationContext") -> Dict[str, str]:
@@ -235,7 +247,7 @@ async def search_session(
                 preview_texts.append(f"[Score: {score:.2f}] {speaker}: {text[:100]}...")
             preview = "\n".join(preview_texts)
             
-            logger.info(f"Agent searched session {session_id} for '{query}': {len(segments)} results")
+            logger.info(f"Agent semantic search returned {len(segments)} results")
             
             return {
                 "success": True,
@@ -385,4 +397,3 @@ def generate_document() -> Dict[str, Any]:
         "sessions_explored": context.sessions_explored,
         "message": "Ready to generate document with accumulated context"
     }
-
