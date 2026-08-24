@@ -136,6 +136,13 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING }}
           package: './deploy'
 
+      - name: Configure platform health probing
+        run: |
+          az webapp config set \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$APP_NAME" \
+            --generic-configurations '{"healthCheckPath":"/health"}'
+
       - name: Activate the exact deployed artifact
         run: |
           # Zip deployment can finish before an Always On worker recycles. An
