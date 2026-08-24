@@ -84,6 +84,9 @@ class ToolManager:
         self._page_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
             f"tool_page_context_{id(self)}", default=None
         )
+        self._ui_session_context: ContextVar[Optional[str]] = ContextVar(
+            f"tool_ui_session_{id(self)}", default=None
+        )
 
     @property
     def auth_token(self) -> Optional[str]:
@@ -108,6 +111,20 @@ class ToolManager:
     @current_page_context.setter
     def current_page_context(self, value: Optional[Dict[str, Any]]) -> None:
         self._page_context.set(value)
+
+    @property
+    def current_ui_session_id(self) -> Optional[str]:
+        return self._ui_session_context.get()
+
+    def set_ui_session_id(self, session_id: Optional[str]) -> None:
+        """Bind UI-state access to the current request/session."""
+        self._ui_session_context.set(session_id)
+
+    def _require_ui_session_id(self) -> str:
+        session_id = self.current_ui_session_id
+        if not session_id:
+            raise ValueError("No request-scoped UI session is available")
+        return session_id
     
     def _initialize_tools(self) -> Dict[str, Dict[str, Any]]:
         """Initialize all available tools"""
@@ -1678,7 +1695,11 @@ class ToolManager:
                             asyncio.set_event_loop(loop)
                             try:
                                 result = loop.run_until_complete(
-                                    self.execute_tool(tool_name, kwargs, session_id=kwargs.pop('session_id', None))
+                                    self.execute_tool(
+                                        tool_name,
+                                        kwargs,
+                                        ui_session_id=self.current_ui_session_id,
+                                    )
                                 )
                                 return result
                             finally:
@@ -1727,7 +1748,7 @@ class ToolManager:
         # Set profile ID if provided
         if profile_id:
             self.profile_id = profile_id
-            logger.info(f"Profile ID set explicitly: {profile_id}")
+            logger.debug("Profile context set explicitly")
         else:
             # Try to extract profile ID from JWT token as fallback
             try:
@@ -1741,11 +1762,11 @@ class ToolManager:
                 
                 if profile_id_from_jwt:
                     self.profile_id = profile_id_from_jwt
-                    logger.info(f"Extracted profile ID from JWT: {profile_id_from_jwt}")
+                    logger.debug("Extracted a profile context from JWT")
                 elif client_id_from_jwt:
                     # For client accounts, use client-{clientId} format as profile_id
                     self.profile_id = f"client-{client_id_from_jwt}"
-                    logger.info(f"Extracted client ID from JWT, using as profile: {self.profile_id}")
+                    logger.debug("Extracted a client context from JWT")
                 else:
                     logger.warning("No profile ID or client ID found in JWT token")
                     
@@ -1777,9 +1798,9 @@ class ToolManager:
             # Only add profileid header for practitioner contexts, not client contexts
             if isinstance(self.profile_id, str) and not self.profile_id.startswith("client-"):
                 headers['profileid'] = self.profile_id
-                logger.info(f"🔍 API call headers include profileid: {self.profile_id}")
+                logger.debug("API call includes a practitioner profile header")
             else:
-                logger.info(f"🔍 API call skipping profileid header for client context: {self.profile_id}")
+                logger.debug("API call is using a client context")
         else:
             logger.info("🔍 API call with no profileid header (client auth context)")
         
@@ -2299,7 +2320,12 @@ class ToolManager:
             logger.error(f"Error getting client homework status: {e}")
             return {"error": f"Failed to get homework status: {str(e)}", "assignments": []}
     
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        ui_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute a tool function with session-based context"""
         try:
             if tool_name not in self.tools:
@@ -2311,13 +2337,15 @@ class ToolManager:
                 }
             
             # Check tool availability on current page (if session_id provided)
-            if session_id:
+            if ui_session_id:
                 from ui_state_manager import ui_state_manager
+
+                self.set_ui_session_id(ui_session_id)
                 
                 # Always use sync methods - execute_tool runs in ThreadPoolExecutor with its own event loop
                 # Calling async methods from here causes "Future attached to different loop" errors
-                ui_state = ui_state_manager.get_state_sync(session_id)
-                page_capabilities = ui_state_manager.get_page_capabilities_sync(session_id)
+                ui_state = ui_state_manager.get_state_sync(ui_session_id)
+                page_capabilities = ui_state_manager.get_page_capabilities_sync(ui_session_id)
                 
                 # UI mutation tools require page capability (read-only tools like
                 # get_loaded_sessions are always allowed since they just query state)
@@ -2340,13 +2368,6 @@ class ToolManager:
             
             # Get tool implementation
             implementation = self.tools[tool_name]["implementation"]
-            
-            # Inject session_id into tool arguments if the tool signature supports it
-            import inspect
-            sig = inspect.signature(implementation)
-            if 'session_id' in sig.parameters and session_id:
-                arguments['session_id'] = session_id
-                logger.info(f"🔄 Injected session_id into {tool_name}")
             
             # Execute tool
             result = await implementation(**arguments)
@@ -2451,7 +2472,7 @@ class ToolManager:
                 "templateDescription": template_description
             }
             
-            logger.info(f"🎯 [BACKEND] Creating UI action with payload: {ui_action_payload}")
+            logger.info("Creating a template-selection UI action")
             
             result = {
                 "template_id": template_id,
@@ -2465,7 +2486,7 @@ class ToolManager:
                 "user_message": f"Selected template '{template_name}' for document generation. You can now generate documents using this template."
             }
             
-            logger.info(f"🎯 [BACKEND] Returning result: {result}")
+            logger.info("Template-selection UI action created")
             return result
             
         except Exception as e:
@@ -2518,15 +2539,13 @@ class ToolManager:
     async def _generate_document_from_loaded(self, template_content: str, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None, generation_instructions: str = None) -> Dict[str, Any]:
         """Generate a document in the UI using template content and loaded sessions"""
         try:
-            # If sessions not provided, read from UI state
+            # If sessions are not provided, read only this request's UI state.
+            # Never infer a user's state by scanning every active Redis key.
             from ui_state_manager import ui_state_manager
             ui_sessions = []
-            if page_context:
-                # Use the most recent UI state
-                all_summary = ui_state_manager.get_all_sessions_summary_sync()
-                if all_summary:
-                    latest_session_id = max(all_summary.keys(), key=lambda k: all_summary[k].get('last_updated', ''))
-                    ui_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
+            if not sessions:
+                ui_session_id = self._require_ui_session_id()
+                ui_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
             
             selected_sessions = sessions or [
                 {
@@ -2602,19 +2621,15 @@ PERSONALIZATION INSTRUCTIONS:
             # Get the full template content directly from UI state (not just preview)
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            if not all_sessions_summary:
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "error": "No active UI session found. Template selection requires an active browser session.",
                     "status": "no_active_session"
                 }
-            
-            # Get the most recent session's UI state  
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
-            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
+
+            selected_template = ui_state_manager.get_selected_template_sync(ui_session_id)
             if not selected_template or not selected_template.get("templateId"):
                 return {
                     "error": "No template is currently selected. Please select a template first or use set_selected_template.",
@@ -2673,9 +2688,11 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Use SYNC methods to avoid event loop conflicts when called from threads
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            if not all_sessions_summary:
+            # Use only the current request's state. The sync methods are safe
+            # inside the ToolInvoker worker thread.
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "ready_to_generate": False,
                     "status": "no_active_session",
@@ -2684,21 +2701,17 @@ PERSONALIZATION INSTRUCTIONS:
                     "guidance": "Please open the web interface and navigate to the transcribe page to get started."
                 }
             
-            # Get the most recent session's UI state  
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
             # Check template status (SYNC)
-            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(ui_session_id)
             template_ready = bool(selected_template and selected_template.get("templateId"))
             
             # Check sessions status (SYNC)
-            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
             sessions_ready = bool(loaded_sessions)
             session_count = len(loaded_sessions) if loaded_sessions else 0
             
             # Check client status (SYNC)
-            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
+            current_client = ui_state_manager.get_current_client_sync(ui_session_id)
             client_ready = bool(current_client and current_client.get("clientName"))
             
             # Determine readiness and build response
@@ -2800,47 +2813,18 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Strategy: check the current session first (most reliable — avoids race conditions
-            # where a newly-created session hasn't had its state pushed yet), then fall back
-            # to aggregating documents from ALL sessions.  This is safer than picking only the
-            # "most recently updated" session, which may be a stale empty session.
-            current_session_id = getattr(self, 'session_id', None)
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
+                return {
+                    "generated_documents": [],
+                    "document_count": 0,
+                    "message": "No active UI session found. Document access requires an active browser session.",
+                    "status": "no_active_session"
+                }
 
-            all_documents: list = []
-
-            if current_session_id:
-                all_documents = ui_state_manager.get_generated_documents_sync(current_session_id)
-                logger.info(f"📋 Current session {current_session_id}: {len(all_documents)} document entries")
-
-            # If current session has no documents, aggregate from ALL sessions
-            has_current_docs = any(d.get("isGenerated") for d in all_documents)
-            if not has_current_docs:
-                all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-                logger.info(f"🔍 Checking all {len(all_sessions_summary)} sessions for documents")
-
-                # Collect documents from every session, deduplicating by documentId
-                seen_ids: set = set()
-                aggregated: list = []
-                for sid in all_sessions_summary.keys():
-                    if sid == current_session_id:
-                        continue  # Already checked
-                    docs = ui_state_manager.get_generated_documents_sync(sid)
-                    for doc in docs:
-                        doc_id = doc.get("documentId", "")
-                        if doc_id and doc_id not in seen_ids:
-                            seen_ids.add(doc_id)
-                            aggregated.append(doc)
-
-                if aggregated:
-                    logger.info(f"📂 Found {len(aggregated)} documents across other sessions")
-                    all_documents = aggregated
-                elif not all_sessions_summary:
-                    return {
-                        "generated_documents": [],
-                        "document_count": 0,
-                        "message": "No active UI session found. Document access requires an active browser session.",
-                        "status": "no_active_session"
-                    }
+            all_documents = ui_state_manager.get_generated_documents_sync(ui_session_id)
+            logger.info(f"📋 Current UI session has {len(all_documents)} document entries")
             
             # Filter to only include ACTUAL generated documents (isGenerated=True)
             # Loaded sessions have isGenerated=False and should NOT be listed here
@@ -2905,20 +2889,15 @@ PERSONALIZATION INSTRUCTIONS:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            
-            if not all_sessions_summary:
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "error": "No active UI session found. Document refinement requires an active browser session.",
                     "status": "no_active_session"
                 }
             
-            # Get the most recent session's UI state
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
-            generated_documents = ui_state_manager.get_generated_documents_sync(latest_session_id)
+            generated_documents = ui_state_manager.get_generated_documents_sync(ui_session_id)
             
             # Find the document to refine
             target_document = None
@@ -3292,7 +3271,7 @@ Please refine the following document according to these instructions:
     async def _get_conversation_messages(self, client_id: str, assignment_id: str, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
         """Get messages from a specific conversation thread"""
         try:
-            logger.info(f"🔍 get_conversation_messages called with: client_id={client_id}, assignment_id={assignment_id}")
+            logger.debug("Fetching bounded conversation messages")
             
             if not client_id or not assignment_id:
                 return {
@@ -3335,7 +3314,7 @@ Please refine the following document according to these instructions:
     async def _get_latest_conversation(self, client_id: str, message_limit: int = 50) -> Dict[str, Any]:
         """Get the latest conversation for a client"""
         try:
-            logger.info(f"🔍 get_latest_conversation called with: client_id={client_id}, message_limit={message_limit}")
+            logger.debug(f"Fetching latest conversation with message_limit={message_limit}")
             
             if not client_id:
                 return {
@@ -3437,7 +3416,7 @@ Please refine the following document according to these instructions:
     async def _get_homework_results_by_assignment(self, client_id: str, homework_assign_id: str, limit: int = 50) -> Dict[str, Any]:
         """Get list of homework results for a specific assignment"""
         try:
-            logger.info(f"🔍 _get_homework_results_by_assignment called with: client_id={client_id}, homework_assign_id={homework_assign_id}, limit={limit}")
+            logger.debug(f"Fetching homework results with limit={limit}")
             
             if not client_id or not homework_assign_id:
                 return {
@@ -4835,10 +4814,9 @@ Please refine the following document according to these instructions:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            
-            if not all_sessions_summary:
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "loaded_sessions": [],
                     "session_count": 0,
@@ -4846,13 +4824,9 @@ Please refine the following document according to these instructions:
                     "status": "no_sessions_loaded"
                 }
             
-            # Get the most recent session's UI state
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
-            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(latest_session_id)
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
             session_count = len(loaded_sessions)  # Count sessions from loaded_sessions array
-            current_client = ui_state_manager.get_current_client_sync(latest_session_id)
+            current_client = ui_state_manager.get_current_client_sync(ui_session_id)
             
             logger.info(f"📂 Found {session_count} loaded sessions in UI context")
             
@@ -4902,21 +4876,16 @@ Please refine the following document according to these instructions:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            
-            if not all_sessions_summary:
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "selected_template": None,
                     "message": "No active UI session found. Template selection requires an active browser session.",
                     "status": "no_active_session"
                 }
             
-            # Get the most recent session's UI state
-            latest_session_id = max(all_sessions_summary.keys(), 
-                                  key=lambda k: all_sessions_summary[k].get('last_updated', ''))
-            
-            selected_template = ui_state_manager.get_selected_template_sync(latest_session_id)
+            selected_template = ui_state_manager.get_selected_template_sync(ui_session_id)
             
             if not selected_template or not selected_template.get("templateId"):
                 return {
@@ -4956,10 +4925,9 @@ Please refine the following document according to these instructions:
             # Get UI state from the UI state manager
             from ui_state_manager import ui_state_manager
             
-            # Get all sessions summary to find active UI states
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            
-            if not all_sessions_summary:
+            ui_session_id = self._require_ui_session_id()
+            ui_state = ui_state_manager.get_state_sync(ui_session_id)
+            if not ui_state:
                 return {
                     "session_id": session_id,
                     "content": "",
@@ -4967,23 +4935,14 @@ Please refine the following document according to these instructions:
                     "status": "no_sessions_loaded"
                 }
             
-            # Search across all session states for the specific session
-            session_content = None
-            found_session = None
-            
-            for ws_session_id in all_sessions_summary.keys():
-                # Get loaded sessions for this WebSocket session
-                loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
-                
-                # Find the session with matching sessionId
-                for session in loaded_sessions:
-                    if session.get("sessionId") == session_id:
-                        session_content = session.get("content")
-                        found_session = session
-                        break
-                        
-                if found_session:
-                    break
+            # A clinical transcript is visible only when it is loaded in the
+            # current request's browser session.
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
+            found_session = next(
+                (session for session in loaded_sessions if session.get("sessionId") == session_id),
+                None,
+            )
+            session_content = found_session.get("content") if found_session else None
             
             if not session_content:
                 return {
@@ -5017,21 +4976,14 @@ Please refine the following document according to these instructions:
         try:
             logger.info(f"🔍 analyze_loaded_session called with session_id: {session_id}, analysis_type: {analysis_type}")
             
-            # Debug: Check what sessions are available in UI state
             from ui_state_manager import ui_state_manager
-            all_sessions_summary = ui_state_manager.get_all_sessions_summary_sync()
-            logger.info(f"🔍 DEBUG: All UI sessions: {all_sessions_summary}")
-            
-            # Get the actual loaded session IDs
-            actual_loaded_sessions = []
-            if all_sessions_summary:
-                for ws_session_id in all_sessions_summary.keys():
-                    loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ws_session_id)
-                    session_ids = [s.get('sessionId') for s in loaded_sessions if s.get('sessionId')]
-                    logger.info(f"🔍 DEBUG: Loaded sessions for {ws_session_id}: {session_ids}")
-                    actual_loaded_sessions.extend(session_ids)
-            
-            logger.info(f"🔍 DEBUG: analyze_loaded_session called with session_id='{session_id}', available sessions: {actual_loaded_sessions}")
+            ui_session_id = self._require_ui_session_id()
+            loaded_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
+            actual_loaded_sessions = [
+                session.get("sessionId")
+                for session in loaded_sessions
+                if session.get("sessionId")
+            ]
             
             # AUTO-FIX: If the provided session_id doesn't match any loaded sessions, try to find the best match
             target_session_id = session_id

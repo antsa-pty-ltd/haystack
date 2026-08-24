@@ -15,6 +15,7 @@ if not os.environ.get("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
 
 import haystack_pipeline as pipeline_module  # noqa: E402
+import main as main_module  # noqa: E402
 from haystack_pipeline import HaystackPipelineManager  # noqa: E402
 from personas import PersonaType  # noqa: E402
 from service_auth import is_valid_service_secret  # noqa: E402
@@ -35,11 +36,13 @@ def test_tool_credentials_are_isolated_between_concurrent_client_tasks():
     async def worker(token, profile_id, delay):
         pipeline_module.tool_manager.set_auth_token(token, profile_id)
         pipeline_module.tool_manager.set_page_context({"client_id": profile_id})
+        pipeline_module.tool_manager.set_ui_session_id(f"ui-{profile_id}")
         await asyncio.sleep(delay)
         return (
             pipeline_module.tool_manager.auth_token,
             pipeline_module.tool_manager.profile_id,
             pipeline_module.tool_manager.current_page_context,
+            pipeline_module.tool_manager.current_ui_session_id,
         )
 
     async def run_workers():
@@ -49,8 +52,80 @@ def test_tool_credentials_are_isolated_between_concurrent_client_tasks():
         )
 
     first, second = asyncio.run(run_workers())
-    assert first == ("jwt-client-a", "client-a", {"client_id": "client-a"})
-    assert second == ("jwt-client-b", "client-b", {"client_id": "client-b"})
+    assert first == (
+        "jwt-client-a",
+        "client-a",
+        {"client_id": "client-a"},
+        "ui-client-a",
+    )
+    assert second == (
+        "jwt-client-b",
+        "client-b",
+        {"client_id": "client-b"},
+        "ui-client-b",
+    )
+
+
+def test_message_body_cannot_replace_the_session_owner_for_tools(monkeypatch):
+    calls = []
+
+    class ToolDouble:
+        def set_ui_session_id(self, session_id):
+            calls.append(("ui", session_id))
+
+        def set_auth_token(self, token, profile_id=None):
+            calls.append(("auth", token, profile_id))
+
+        def set_profile_id(self, profile_id):
+            calls.append(("profile", profile_id))
+
+        def set_page_context(self, context):
+            calls.append(("page", context))
+
+    async def get_session(_session_id):
+        return SimpleNamespace(auth_token="stored-token", profile_id="owned-profile")
+
+    async def get_auth_token(_session_id):
+        return None
+
+    async def get_state(_session_id):
+        return {}
+
+    monkeypatch.setattr(main_module, "tool_manager", ToolDouble())
+    monkeypatch.setattr(main_module.session_manager, "get_session", get_session)
+    monkeypatch.setattr(main_module.ui_state_manager, "get_auth_token", get_auth_token)
+    monkeypatch.setattr(main_module.ui_state_manager, "get_state", get_state)
+
+    asyncio.run(
+        main_module._ensure_tools_context(
+            "ui-owned",
+            {
+                "auth_token": "verified-gateway-token",
+                "profile_id": "foreign-profile",
+                "profileId": "foreign-profile",
+            },
+        )
+    )
+
+    assert ("auth", "verified-gateway-token", "owned-profile") in calls
+    assert ("profile", "owned-profile") in calls
+    assert all("foreign-profile" not in call for call in calls)
+
+
+def test_ui_actions_are_isolated_between_concurrent_requests():
+    manager = HaystackPipelineManager()
+
+    async def worker(action_type, delay):
+        manager._ui_actions_context.set([{"type": action_type}])
+        await asyncio.sleep(delay)
+        return manager.pop_ui_actions()
+
+    async def run_workers():
+        return await asyncio.gather(worker("select-a", 0.01), worker("select-b", 0))
+
+    first, second = asyncio.run(run_workers())
+    assert first == [{"type": "select-a"}]
+    assert second == [{"type": "select-b"}]
 
 
 class _FakeGenerator:

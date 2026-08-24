@@ -4,6 +4,7 @@ Following official Haystack recommendations with automatic agent loops
 """
 import asyncio
 import logging
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Any, AsyncGenerator, Callable, Awaitable
 
 # Haystack imports
@@ -75,7 +76,9 @@ class HaystackPipelineManager:
         self._pipeline_config_lock = asyncio.Lock()
         self._initialized = False
         self._streaming_callback: Optional[Callable] = None
-        self._ui_actions: List[Dict[str, Any]] = []
+        self._ui_actions_context: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar(
+            "haystack_ui_actions", default=None
+        )
     
     async def initialize(self):
         """Initialize Haystack pipelines for different personas"""
@@ -621,7 +624,9 @@ class HaystackPipelineManager:
                     f"bug-263 augment: failed to inject active document content "
                     f"for session {session_id}: {_doc_err}"
                 )
-
+            # Bind all UI-state reads to this request before creating runtime
+            # tool wrappers. ContextVars propagate through their worker threads.
+            tool_manager.set_ui_session_id(session_id)
 
             # Set auth token for tool manager
             if auth_token:
@@ -654,7 +659,7 @@ class HaystackPipelineManager:
             logger.info(f"🤖 Running Haystack declarative pipeline for {persona_type.value}")
             
             # Reset UI actions for this run
-            self._ui_actions = []
+            self._ui_actions_context.set([])
             
             # Run the pipeline - Haystack handles the loop automatically
             # We'll use a custom approach to enable streaming
@@ -718,7 +723,12 @@ class HaystackPipelineManager:
                                 generation_task, return_exceptions=True
                             )
                 else:
-                    gen_result = generator.run(messages=current_messages)
+                    # The synchronous SDK call must not block every other
+                    # WebSocket handled by this process. asyncio.to_thread
+                    # also propagates request ContextVars into the worker.
+                    gen_result = await asyncio.to_thread(
+                        generator.run, messages=current_messages
+                    )
                 replies = gen_result.get("replies", [])
                 
                 if not replies:
@@ -758,7 +768,8 @@ class HaystackPipelineManager:
                     runtime_tools = tool_manager.get_haystack_component_tools(
                         persona_type.value
                     )
-                    tool_result = tool_invoker.run(
+                    tool_result = await asyncio.to_thread(
+                        tool_invoker.run,
                         messages=replies,
                         tools=runtime_tools,
                     )
@@ -767,7 +778,11 @@ class HaystackPipelineManager:
                     # Collect UI actions if component exists
                     if ui_collector:
                         ui_result = ui_collector.run(messages=tool_messages)
-                        self._ui_actions.extend(ui_result.get("ui_actions", []))
+                        request_actions = self._ui_actions_context.get()
+                        if request_actions is None:
+                            request_actions = []
+                            self._ui_actions_context.set(request_actions)
+                        request_actions.extend(ui_result.get("ui_actions", []))
                     
                     # Add to message history
                     current_messages.extend(replies)
@@ -823,8 +838,8 @@ class HaystackPipelineManager:
     
     def pop_ui_actions(self) -> List[Dict[str, Any]]:
         """Return and clear accumulated UI actions"""
-        actions = self._ui_actions.copy()
-        self._ui_actions = []
+        actions = list(self._ui_actions_context.get() or [])
+        self._ui_actions_context.set([])
         return actions
     
     async def health_check(self) -> Dict[str, Any]:
