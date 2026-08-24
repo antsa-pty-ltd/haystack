@@ -153,20 +153,29 @@ jobs:
           health_url="https://${APP_NAME}.azurewebsites.net/health"
 
           ready=false
+          consecutive_successes=0
           deadline=$((SECONDS + 300))
           while [ "$SECONDS" -lt "$deadline" ]; do
             body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
 
             if [ -n "$body" ] && \
                printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); sys.exit(0 if body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" else 1)'; then
-              ready=true
-              break
+              consecutive_successes=$((consecutive_successes + 1))
+              if [ "$consecutive_successes" -ge 3 ]; then
+                ready=true
+                break
+              fi
+            else
+              # A worker recycle can briefly leave the previous worker serving
+              # before the replacement starts. Reset the stability window on
+              # every failed or incomplete probe.
+              consecutive_successes=0
             fi
-            sleep 5
+            sleep 10
           done
 
           if [ "$ready" != "true" ]; then
-            echo "Haystack readiness did not become healthy within five minutes" >&2
+            echo "Haystack readiness was not continuously healthy within five minutes" >&2
             exit 1
           fi
 
