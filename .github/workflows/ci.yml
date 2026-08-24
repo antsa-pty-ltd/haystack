@@ -134,61 +134,52 @@ jobs:
           package: './deploy'
 
       - name: Require bounded deployed readiness
+        env:
+          STAGING_PUBLISH_PROFILE: ${{ github.ref == 'refs/heads/develop' && secrets.AZUREAPPSERVICE_HAYSTACK_PUBLISHPROFILE_STAGING || '' }}
         run: |
           set -euo pipefail
           health_url="https://${APP_NAME}.azurewebsites.net/health"
-          probe_rule_name=""
 
-          cleanup_probe_rule() {
-            if [ -n "$probe_rule_name" ]; then
-              az webapp config access-restriction remove \
-                --resource-group "$resource_group" \
-                --name "$APP_NAME" \
-                --rule-name "$probe_rule_name" \
-                --output none
-              probe_rule_name=""
-            fi
-          }
-          trap 'cleanup_probe_rule || true' EXIT INT TERM
-
-          # Staging is intentionally IP-restricted. GitHub-hosted runners can
-          # traverse different Azure egress addresses, so briefly admit the
-          # AzureCloud service tag while this readiness probe runs. The exact
-          # run-scoped rule is removed on success, failure, or cancellation.
+          # Staging is intentionally inaccessible from hosted runners. Use the
+          # authenticated Kudu command API to probe the app's localhost from
+          # inside its App Service boundary without changing access rules.
           if [ "$DEPLOY_ENV" = "staging" ]; then
-            resource_group="rg-antsa-staging"
-
-            minimum_priority="$(
-              az webapp config access-restriction show \
-                --resource-group "$resource_group" \
-                --name "$APP_NAME" \
-                --query 'min(ipSecurityRestrictions[].priority)' \
-                --output tsv
+            test -n "$STAGING_PUBLISH_PROFILE"
+            IFS=$'\t' read -r kudu_user kudu_password < <(
+              python -c 'import os,xml.etree.ElementTree as ET; root=ET.fromstring(os.environ["STAGING_PUBLISH_PROFILE"]); profile=next(p for p in root if p.get("publishMethod") == "MSDeploy"); print(profile.get("userName"), profile.get("userPWD"), sep="\t")'
+            )
+            test -n "$kudu_user"
+            test -n "$kudu_password"
+            kudu_url="https://${APP_NAME}.scm.azurewebsites.net/api/command"
+            kudu_command="curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8001/health"
+            kudu_payload="$(
+              python -c 'import json,sys; print(json.dumps({"command": sys.argv[1], "dir": "/home/site/wwwroot"}))' "$kudu_command"
             )"
-            if [ -z "$minimum_priority" ] || [ "$minimum_priority" = "None" ]; then
-              probe_priority=100
-            elif [ "$minimum_priority" -gt 1 ]; then
-              probe_priority=$((minimum_priority - 1))
-            else
-              echo "No higher-priority slot is available for the ephemeral staging probe" >&2
-              exit 1
-            fi
-
-            probe_rule_name="ci-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            az webapp config access-restriction add \
-              --resource-group "$resource_group" \
-              --name "$APP_NAME" \
-              --rule-name "$probe_rule_name" \
-              --action Allow \
-              --service-tag AzureCloud \
-              --priority "$probe_priority" \
-              --output none
           fi
 
           ready=false
-          for attempt in $(seq 1 60); do
-            if body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" && \
-               printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); assert body.get("status") == "healthy"; assert body.get("pipeline") == "ready"; assert body.get("redis") == "ready"'; then
+          deadline=$((SECONDS + 300))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ "$DEPLOY_ENV" = "staging" ]; then
+              if kudu_response="$(
+                curl --fail --silent --show-error --max-time 20 \
+                  --user "${kudu_user}:${kudu_password}" \
+                  --header 'Content-Type: application/json' \
+                  --data "$kudu_payload" \
+                  "$kudu_url"
+              )"; then
+                body="$(
+                  printf '%s' "$kudu_response" | python -c 'import json,sys; response=json.load(sys.stdin); sys.exit(1) if response.get("ExitCode") != 0 else print(response.get("Output", ""), end="")'
+                )" || body=""
+              else
+                body=""
+              fi
+            else
+              body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
+            fi
+
+            if [ -n "$body" ] && \
+               printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); sys.exit(0 if body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" else 1)'; then
               ready=true
               break
             fi
@@ -198,20 +189,6 @@ jobs:
           if [ "$ready" != "true" ]; then
             echo "Haystack readiness did not become healthy within five minutes" >&2
             exit 1
-          fi
-
-          if [ "$DEPLOY_ENV" = "staging" ]; then
-            completed_probe_rule="$probe_rule_name"
-            cleanup_probe_rule
-            trap - EXIT INT TERM
-            remaining_rules="$(
-              az webapp config access-restriction show \
-                --resource-group "$resource_group" \
-                --name "$APP_NAME" \
-                --query "length(ipSecurityRestrictions[?name=='${completed_probe_rule}'])" \
-                --output tsv
-            )"
-            test "$remaining_rules" = "0"
           fi
 
 
