@@ -58,8 +58,44 @@ def test_generates_all_required_sections_as_structured_data():
     assert result.actionItems == ["Practise before bed."]
     assert result.moodTrend == "improving"
     call = client.chat.completions.create.await_args.kwargs
+    assert call["model"] == "gpt-5.4-mini"
     assert call["response_format"]["type"] == "json_schema"
     assert "Do not diagnose" in call["messages"][0]["content"]
+
+
+def test_uses_the_server_selected_model_alias():
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    return_value=_response(
+                        """{
+                          "summary": "A grounded summary.",
+                          "keyTopics": [],
+                          "homeworkStatus": "Not discussed in this session.",
+                          "insights": [],
+                          "actionItems": [],
+                          "moodTrend": "unknown"
+                        }"""
+                    )
+                )
+            )
+        )
+    )
+
+    asyncio.run(
+        generate_previous_session_summary(
+            PreviousSessionSummaryRequest(
+                sessionId="session-1",
+                transcript="A sufficiently long transcript for summary generation.",
+            ),
+            client,
+            model="antsa-haystack-previous-session-summary-openai",
+        )
+    )
+
+    call = client.chat.completions.create.await_args.kwargs
+    assert call["model"] == "antsa-haystack-previous-session-summary-openai"
 
 
 def test_rejects_invalid_model_output_instead_of_persisting_partial_clinical_data():
