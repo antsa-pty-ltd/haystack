@@ -2,6 +2,15 @@
 # Copy this to .env and update with your values
 
 OPENAI_API_KEY=
+
+# Durable previous-session summary routing only. The gateway key must be a
+# Haystack-dedicated virtual key, not the API service's gateway credential.
+HAYSTACK_LLM_ROUTE_PREVIOUS_SESSION_SUMMARY=direct_openai
+LLM_GATEWAY_BASE_URL=
+HAYSTACK_LLM_GATEWAY_API_KEY=
+HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_OPENAI=antsa-haystack-previous-session-summary-openai
+HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_FOUNDRY=antsa-haystack-previous-session-summary-foundry
+
 REDIS_URL=redis://localhost:6379
 LOG_LEVEL=INFO
 

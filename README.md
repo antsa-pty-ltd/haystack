@@ -77,9 +77,38 @@ ws.send(JSON.stringify({
 Environment variables in `.env`:
 
 - `OPENAI_API_KEY` - OpenAI API key
+- `HAYSTACK_LLM_ROUTE_PREVIOUS_SESSION_SUMMARY` - Server-controlled route for
+  durable previous-session summaries: `direct_openai` (default),
+  `litellm_openai`, or `litellm_foundry`
+- `LLM_GATEWAY_BASE_URL` - OpenAI-compatible LiteLLM URL ending in `/v1`; only
+  required when the summary selects a LiteLLM route
+- `HAYSTACK_LLM_GATEWAY_API_KEY` - Haystack-dedicated LiteLLM virtual key; never
+  reuse the API service's gateway credential
+- `HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_OPENAI` and
+  `HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_FOUNDRY` - Stable gateway
+  aliases for the selected summary provider
 - `REDIS_URL` - Redis connection URL (optional)
 - `MAX_CONCURRENT_REQUESTS` - Max concurrent requests (default: 100)
 - `SESSION_TIMEOUT_MINUTES` - Session timeout (default: 30)
+
+### Previous-session summary rollout
+
+Only `POST /previous-session-summary` uses this route. Every chat, persona,
+document-agent and conversation-summary client remains on its existing direct
+OpenAI path.
+
+1. Keep the route omitted or set it to `direct_openai` for the baseline.
+2. Configure the base URL, Haystack-only virtual key and OpenAI alias, then set
+   the route to `litellm_openai` and restart the service.
+3. After its canary and burn-in, configure the Foundry alias and set the route
+   to `litellm_foundry`.
+4. Roll back only this workload by restoring its last validated route. There is
+   no automatic cross-provider fallback or retry.
+
+Invalid routes and missing selected gateway settings stop service startup. Safe
+logs contain only workload, route, model alias, outcome and elapsed time; they
+must never contain prompts, responses, transcripts, session IDs, credentials or
+gateway URLs.
 
 ## Architecture
 
