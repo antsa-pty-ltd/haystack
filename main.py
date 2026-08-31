@@ -36,6 +36,7 @@ from previous_session_summary import (
     PreviousSessionSummaryResponse,
     generate_previous_session_summary,
 )
+from llm_routing import PreviousSessionSummaryRouter
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +44,10 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# HTTPX logs complete request URLs at INFO, which can expose internal hosts and
+# path identifiers. Keep transport details out of all production-safe logs;
+# workload outcome telemetry below remains available without request URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Configure OpenAI
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -51,6 +56,10 @@ if not openai_api_key:
 
 # Create OpenAI client
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
+
+# This router is deliberately scoped to durable previous-session summaries.
+# All other Haystack model calls continue to use `openai_client` unchanged.
+previous_session_summary_router = PreviousSessionSummaryRouter(openai_client)
 
 
 # Simple tool loading (graceful fallback)
@@ -1032,11 +1041,18 @@ async def previous_session_summary(
     """Generate the API's durable previous-session continuity summary."""
     if not is_valid_service_secret(x_haystack_secret):
         raise HTTPException(status_code=401, detail="Invalid service credential")
-    if not openai_client:
-        raise HTTPException(status_code=503, detail="OpenAI client not configured")
+    target = previous_session_summary_router.target
+    if not target.client:
+        raise HTTPException(status_code=503, detail="Summary model client not configured")
 
     try:
-        return await generate_previous_session_summary(request, openai_client)
+        return await previous_session_summary_router.execute(
+            lambda selected: generate_previous_session_summary(
+                request,
+                selected.client,
+                model=selected.model,
+            )
+        )
     except ValueError as error:
         # Model/schema errors are upstream failures so the API's Bull worker
         # retries them; invalid blank input is a stable caller error.
