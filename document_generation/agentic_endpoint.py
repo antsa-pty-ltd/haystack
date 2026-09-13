@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional
 from fastapi import HTTPException
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
 from agents.document_agent import get_document_agent
+from document_generation.refinement import RefinementValidationError, refinement_parts
 from document_generation.generator import generate_document_from_context
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,24 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 }
             )
         
+        # Refinement already carries its source document. Avoid the exploration
+        # agent fetching old transcripts (or failing when no session is loaded).
+        if refinement_parts(template_content):
+            result = await generate_document_from_context(
+                segments=[], template=template, client_info=client_info,
+                practitioner_info=practitioner_info,
+                generation_instructions=generation_instructions,
+                openai_client=openai_client,
+            )
+            await emit_progress_func(generation_id, {
+                "type": "stage_completed", "stage": "document_ready",
+                "message": "Document refined successfully!",
+            }, authorization)
+            return {
+                "content": result["content"], "generatedAt": result["generated_at"],
+                "metadata": {**result["metadata"], "processingMethod": "document_refinement"},
+            }
+
         # ===== FAST PATH: Notes Only (no sessions) =====
         if not has_sessions and has_notes:
             logger.info(f"✅ [FAST PATH] Notes-only generation ({len(dictated_notes)} notes)")
@@ -414,6 +433,8 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
             metadata=result['metadata']
         )
         
+    except RefinementValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
