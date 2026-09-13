@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
+from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
+
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,8 @@ async def generate_document_from_context(
     """
     try:
         template_content = template.get('content', '')
+        refinement = refinement_parts(template_content)
+        word_limit = shortening_word_limit(*refinement) if refinement else None
         # PRIVACY: the NestJS api sends tokenized identifiers (e.g. [CLIENT_NAME],
         # [PRACTITIONER_NAME]); real names are substituted back only AFTER this
         # LLM call. Default to the tokens so a real name is never the fallback.
@@ -183,21 +187,26 @@ THERAPEUTIC INTERVENTION FOCUS - CRITICAL:
 - Document any homework or between-session tasks exactly as assigned
 
 PERSONALIZATION REQUIREMENTS:
-- Use the client and practitioner identifiers EXACTLY as provided (e.g., [CLIENT_NAME], [PRACTITIONER_NAME])
+- Use privacy-safe identifiers exactly as provided. [CLIENT_NAME] represents the full client name, [CLIENT_FIRST_NAME] the given name, and [CLIENT_LAST_NAME] the surname.
+- If the template or practitioner requests first names only or removal of the client surname, use [CLIENT_FIRST_NAME] wherever the client is named; never use [CLIENT_NAME] or [CLIENT_LAST_NAME] in that case.
+- Follow the requested naming format without asking the practitioner to type the real name or surname.
+- Preserve [PRACTITIONER_NAME] unless the practitioner also asks to change their naming format.
 - These are privacy-safe placeholder tokens that will be replaced with real names in post-processing
 - Use them consistently wherever you would reference the client or practitioner
-- Do NOT replace these tokens with generic terms like "the client" or "the therapist"
+- Use generic descriptions such as "the client" when explicitly requested by the practitioner.
 - Do NOT invent or guess real names — always use the exact identifiers provided
 
 You are an AI assistant helping to generate clinical documentation from therapy session transcripts.
-Use the provided template to structure the document, but fill it with information from the transcript.
+For new documents, use the template and source material. For edits, use the existing document as the source and follow the requested modifications.
+Practitioner instructions about length, naming, and formatting take precedence over default style guidance.
+When asked to shorten, remove repetition and compress wording; do not add information or restore omitted details.
 Be professional, accurate, and only include information that was actually discussed in the session.
 Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
 """
         
         # Add generation instructions if provided
         if generation_instructions:
-            system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nIMPORTANT: This additional context should be integrated into your understanding of the transcript and used to correct any assumptions or add missing background information. Regenerate the document incorporating this new information.\n"
+            system_prompt += f"\n\nADDITIONAL CONTEXT AND INSTRUCTIONS FROM PRACTITIONER:\n{generation_instructions}\n\nUse this context only where relevant to the request. For refinement, apply the requested edit to the existing document and do not regenerate from transcripts or expand the document with background information.\n"
         
         # Check if this is a modification/regeneration request.
         #
@@ -243,7 +252,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                 "🪄 Web refinement detected (ORIGINAL DOCUMENT / REQUESTED MODIFICATIONS markers); "
                 "routing to refinement prompt builder"
             )
-            user_prompt = f"""You are editing an existing clinical document. Apply ONLY the requested modifications. Do NOT regenerate the document from session transcripts. Preserve all unchanged content verbatim — section headings, clinical tone, and structure must remain identical.
+            user_prompt = f"""You are editing an existing clinical document. Apply ONLY the requested modifications. Do NOT regenerate the document from session transcripts. Preserve content and structure that the request does not change. A request to shorten authorises deleting repetition and rewriting sentences concisely; the original wording and length need not be preserved.
 
 **Client:** {client_name}
 **Practitioner:** {practitioner_name}
@@ -261,10 +270,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
 **Template (contains modification request and current document):**
 {template_content}
 
-**Source Content (for reference):**
-{source_content}
-
-**Instructions:** Follow the modification request in the template. Keep comprehensive detail.
+**Instructions:** Apply ONLY the requested modifications. Do NOT regenerate from transcripts. Shortening requests authorise compressing wording and removing repetition while preserving clinically relevant meaning.
 """
         else:
             # Normal generation
@@ -294,21 +300,30 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
 {source_content}
 
 **Key Requirements:**
-- Use {client_name} and {practitioner_name} identifiers exactly as provided throughout the document
+- Use privacy-safe identifiers in the naming format requested by the template or practitioner
 - Replace template placeholders (like {{{{date}}}}, {{{{practitionerName}}}}) with actual values
-- Be thorough and detailed - aim for 800-1500+ words with full paragraphs
-- Document everything discussed with specific examples and quotes
+- Follow the length requested in the template or practitioner instructions; otherwise use only the detail needed for the document purpose.
+- Include relevant supported information without padding or repetition
 - If info isn't in the source content, note "not discussed in this session" or "not included in notes"
 """
         
+        if word_limit is not None:
+            system_prompt += (
+                f"\n\nLENGTH REQUIREMENT: The original document has {len(refinement[0].split())} words. "
+                f"Return the complete edited document in at most {word_limit} words. "
+                "This requirement overrides default verbosity and unchanged-wording guidance. "
+                "Preserve clinically relevant meaning; do not add a preamble or explanation."
+            )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         # Generate document using OpenAI
         try:
             response = await openai_client.chat.completions.create(
                 model="gpt-5.4-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+                messages=messages,
                 temperature=0.3,  # Lower temperature for consistent, deterministic outputs
                 seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
             )
@@ -355,6 +370,33 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             logger.error(error_detail)
             raise Exception(error_detail)
         
+        for attempt in range(2):
+            if word_limit is None or len(generated_content.split()) <= word_limit:
+                break
+            logger.info(
+                "Document refinement length retry: original_words=%s result_words=%s max_words=%s attempt=%s",
+                len(refinement[0].split()), len(generated_content.split()), word_limit, attempt + 1,
+            )
+            response = await openai_client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=messages + [
+                    {"role": "assistant", "content": generated_content},
+                    {"role": "user", "content": (
+                        f"This version has {len(generated_content.split())} words and exceeds the required "
+                        f"maximum of {word_limit}. Rewrite the complete document within that limit, "
+                        "preserving clinically relevant meaning and all requested naming changes. "
+                        "Return only the document."
+                    )},
+                ],
+                temperature=0.3,
+                seed=42,
+            )
+            generated_content = response.choices[0].message.content if response and response.choices else None
+            if not generated_content or not generated_content.strip():
+                raise RefinementValidationError("Document refinement returned no content. Please try again.")
+        if word_limit is not None and len(generated_content.split()) > word_limit:
+            raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
+
         logger.info(f"✅ Document generated: {len(generated_content)} chars")
         
         return {
