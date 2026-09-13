@@ -322,3 +322,33 @@ def test_failed_shortening_is_an_http_error_not_a_saveable_document():
 def test_non_shortening_edits_do_not_impose_a_word_limit(instructions):
     from document_generation.refinement import shortening_word_limit
     assert shortening_word_limit('word ' * 301, instructions) is None
+
+
+@pytest.mark.parametrize('fail_on_retry', [False, True])
+@pytest.mark.parametrize('failure_text', ['sensitive provider response detail', 'content_policy: sensitive provider response detail'])
+def test_refinement_provider_failure_never_returns_an_error_document(fail_on_retry, failure_text, caplog):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from document_generation.agentic_endpoint import generate_document_from_template_agentic
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content='word ' * 412), finish_reason='stop')]
+    failure = RuntimeError(failure_text)
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=[response, failure] if fail_on_retry else failure)
+    request = SimpleNamespace(
+        generationId=None,
+        template={'content': f"ORIGINAL DOCUMENT:\n{'word ' * 301}\nREQUESTED MODIFICATIONS:\nShorten by 50%\nREFINED DOCUMENT:"},
+        sessionIds=[], sessionData=[], dictatedNotes=[],
+        clientInfo={'name': '[CLIENT_NAME]'}, practitionerInfo={'name': '[PRACTITIONER_NAME]'},
+        generationInstructions=None,
+    )
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(generate_document_from_template_agentic(
+            request, MagicMock(), None, None, client, AsyncMock(),
+            AsyncMock(return_value={'is_violation': False}), AsyncMock(),
+        ))
+    assert error.value.status_code == 503
+    assert 'original document has not been changed' in error.value.detail
+    assert 'sensitive provider response detail' not in error.value.detail
+    assert 'sensitive provider response detail' not in caplog.text
+    assert client.chat.completions.create.await_count == (2 if fail_on_retry else 1)
