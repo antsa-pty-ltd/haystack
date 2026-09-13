@@ -50,6 +50,7 @@ async def generate_document_from_context(
     Returns:
         Dict with 'content', 'generated_at', 'metadata' keys
     """
+    refinement = None
     try:
         template_content = template.get('content', '')
         refinement = refinement_parts(template_content)
@@ -328,6 +329,10 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                 seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
             )
         except Exception as e:
+            if refinement:
+                # Provider refusals/errors are failures of the edit, not
+                # replacement clinical content to return and persist.
+                raise
             error_str = str(e).lower()
             if "content_policy" in error_str or "content_filter" in error_str or "policy" in error_str:
                 logger.warning(f"⚠️ Content policy violation during document generation: {e}")
@@ -417,5 +422,8 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         }
         
     except Exception as e:
-        logger.error(f"❌ Error generating document: {e}")
+        if refinement:
+            logger.error("Document refinement failed: %s", type(e).__name__)
+        else:
+            logger.error(f"❌ Error generating document: {e}")
         raise

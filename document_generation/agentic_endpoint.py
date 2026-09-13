@@ -438,6 +438,15 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
     except HTTPException:
         raise
     except Exception as e:
+        # A provider failure (including a failed corrective shortening call)
+        # is not document content. Keep it outside the successful response
+        # contract so neither the API nor the browser can save an error note.
+        if refinement_parts(request.template.get('content', '')):
+            logger.error("Document refinement failed: %s", type(e).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="The document could not be refined right now. Please try again. Your original document has not been changed.",
+            ) from e
         logger.error(f"❌ [AGENTIC] Error: {e}")
         
         # User-friendly error
