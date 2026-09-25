@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
+from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language
 
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
@@ -204,6 +205,7 @@ When asked to shorten, remove repetition and compress wording; do not add inform
 Be professional, accurate, and only include information that was actually discussed in the session.
 Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
 """
+        system_prompt += LANGUAGE_INSTRUCTIONS
         
         # Add generation instructions if provided
         if generation_instructions:
@@ -399,6 +401,19 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             generated_content = response.choices[0].message.content if response and response.choices else None
             if not generated_content or not generated_content.strip():
                 raise RefinementValidationError("Document refinement returned no content. Please try again.")
+        if word_limit is not None and len(generated_content.split()) > word_limit:
+            raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
+
+        # Compare only the sources this request actually sent to the provider.
+        # For refinement, old transcripts are intentionally absent. Only the
+        # template/edit directives and practitioner instructions can request a
+        # different output language; transcript/notes cannot authorise that.
+        language_instructions = (refinement[1] if refinement else template_content)
+        language_instructions += '\n' + (generation_instructions or '')
+        generated_content = await check_document_language(
+            generated_content, user_prompt + '\n' + (generation_instructions or ''),
+            language_instructions, messages, openai_client,
+        )
         if word_limit is not None and len(generated_content.split()) > word_limit:
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
 
