@@ -28,6 +28,7 @@ LANGUAGE_ERROR = (
 _OUTPUT_DIRECTIVE = re.compile(
     r"\b(?:(?:write|draft|generate|produce|translate|respond|output)"
     r"(?:\s+(?:this|the|a|an|these|my|clinical|session|full|complete|entire|"
+    r"short|brief|detailed|following|progress|summary|"
     r"document|report|note|notes|text|response|it)){0,6}\s+(?:in|into|to)"
     r"|(?:output|document|report)\s+language\s*:|use)\s*"
     r"(?:Hindi|Marathi|Nepali|Sanskrit|Konkani|Devanagari)\b", re.IGNORECASE,
@@ -52,6 +53,7 @@ def devanagari_words(text):
 
 
 def explicitly_requests_devanagari(instructions):
+    instructions = instructions.replace('\u2019', "'")
     return any(
         not _NEGATION.search(instructions[:match.start()])
         for match in _OUTPUT_DIRECTIVE.finditer(instructions)

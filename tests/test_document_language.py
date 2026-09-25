@@ -85,7 +85,7 @@ def test_sourced_devanagari_quotes_are_preserved(source):
     assert client.chat.completions.create.await_count == 1
 
 
-@pytest.mark.parametrize('instructions', ['Write the report in Hindi.', 'Translate this note into Hindi.', 'Output language: Hindi', 'Write in Marathi.', 'Write in Nepali.', 'Write in Sanskrit.'])
+@pytest.mark.parametrize('instructions', ['Write the report in Hindi.', 'Translate this note into Hindi.', 'Write a short report in Hindi.', 'Translate the following note into Hindi.', 'Output language: Hindi', 'Write in Marathi.', 'Write in Nepali.', 'Write in Sanskrit.'])
 def test_explicit_language_instructions_remain_supported(instructions):
     client = client_for('प्रस्तुति से पहले तनाव महसूस हुआ।')
     result = asyncio.run(generate_document_from_context(**arguments(client, generation_instructions=instructions)))
@@ -101,7 +101,7 @@ def test_incidental_or_quoted_language_request_in_source_does_not_allow_intrusio
     assert asyncio.run(generate_document_from_context(**arguments(client, **changes)))['content'] == GOOD
 
 
-@pytest.mark.parametrize('instruction', ['Do not write in Hindi.', "Don't translate this note into Hindi.", 'Never output in Hindi.', 'The client speaks Hindi.'])
+@pytest.mark.parametrize('instruction', ['Do not write in Hindi.', "Don't translate this note into Hindi.", 'Don’t write the report in Hindi.', 'Please don’t translate this note into Hindi.', 'Never output in Hindi.', 'The client speaks Hindi.'])
 def test_negated_or_incidental_instruction_does_not_authorise_language_change(instruction):
     client = client_for(BAD, GOOD)
     assert asyncio.run(generate_document_from_context(**arguments(client, generation_instructions=instruction)))['content'] == GOOD
