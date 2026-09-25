@@ -97,7 +97,9 @@ async def check_document_language(content, source_text, instructions, messages, 
                 {'role': 'assistant', 'content': content},
                 {'role': 'user', 'content': (
                     'Correct only the unexpected Devanagari words that were not present in the supplied source. '
-                    'Use English wording supported by that source. Do not invent, infer or add clinical facts. '
+                    'Use source-supported wording in the requested report language; use Australian English by default. '
+                    'For an edit, preserve the existing document language unless a language change was requested. '
+                    'Do not invent, infer or add clinical facts. '
                     'Preserve the report structure, supported meaning, privacy tokens, sourced names and exact quotations. '
                     'Keep every other requested edit and length limit. Return only the complete corrected document.'
                 )},

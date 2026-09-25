@@ -221,3 +221,13 @@ def test_uploaded_reference_still_allows_exact_source_quote():
     client = client_for(BAD)
     instruction = 'Keep it concise.\n\nREFERENCE DOCUMENTS (uploaded by practitioner for additional context):\nThe source used the word तनाव for stress.'
     assert asyncio.run(generate_document_from_context(**arguments(client, generation_instructions=instruction)))['content'] == BAD
+
+
+def test_repair_keeps_an_explicit_french_report_request():
+    french = 'Le client a ressenti du stress avant une présentation. La respiration lente a aidé.'
+    client = client_for(french.replace('stress', 'तनाव'), french)
+    assert asyncio.run(generate_document_from_context(**arguments(client, generation_instructions='Write the report in French.')))['content'] == french
+    retry = client.chat.completions.create.call_args.kwargs['messages']
+    assert 'Write the report in French.' in retry[0]['content']
+    assert 'requested report language' in retry[-1]['content']
+    assert 'Use English wording' not in retry[-1]['content']
