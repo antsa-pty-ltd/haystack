@@ -75,6 +75,15 @@ def directive_text(text):
     return text.split(_REFERENCE_MARKER, 1)[0]
 
 
+def standing_refinement_directives(prefix):
+    """Each web guidance block can have its own source-only reference suffix."""
+    sections = re.split(
+        r'(?m)^(?:STANDING TEMPLATE GUIDANCE|INITIAL PRACTITIONER INSTRUCTIONS|PREVIOUS EDIT INSTRUCTIONS)[^\n]*\n',
+        prefix,
+    )
+    return '\n'.join(directive_text(section) for section in sections)
+
+
 def predominantly_devanagari(text):
     """Preserve edits of a Devanagari original, not an isolated quote in English."""
     letters = [character for character in text if unicodedata.category(character).startswith('L')]

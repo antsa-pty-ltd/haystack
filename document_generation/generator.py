@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
-from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text
+from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
 
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
@@ -409,7 +409,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         # template/edit directives and practitioner instructions can request a
         # different output language; transcript/notes cannot authorise that.
         if refinement:
-            standing_guidance = template_content.split('ORIGINAL DOCUMENT:', 1)[0] if is_web_refinement else ''
+            standing_guidance = standing_refinement_directives(template_content.split('ORIGINAL DOCUMENT:', 1)[0]) if is_web_refinement else ''
             language_instructions = '\n'.join([
                 standing_guidance, directive_text(generation_instructions or ''), directive_text(refinement[1]),
             ])
