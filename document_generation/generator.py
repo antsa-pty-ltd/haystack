@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
-from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language
+from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text
 
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
@@ -408,11 +408,16 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         # For refinement, old transcripts are intentionally absent. Only the
         # template/edit directives and practitioner instructions can request a
         # different output language; transcript/notes cannot authorise that.
-        language_instructions = (refinement[1] if refinement else template_content)
-        language_instructions += '\n' + (generation_instructions or '')
+        if refinement:
+            standing_guidance = template_content.split('ORIGINAL DOCUMENT:', 1)[0] if is_web_refinement else ''
+            language_instructions = '\n'.join([
+                standing_guidance, directive_text(generation_instructions or ''), directive_text(refinement[1]),
+            ])
+        else:
+            language_instructions = '\n'.join([template_content, directive_text(generation_instructions or '')])
         generated_content = await check_document_language(
             generated_content, user_prompt + '\n' + (generation_instructions or ''),
-            language_instructions, messages, openai_client,
+            language_instructions, messages, openai_client, original_document=refinement[0] if refinement else None,
         )
         if word_limit is not None and len(generated_content.split()) > word_limit:
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
