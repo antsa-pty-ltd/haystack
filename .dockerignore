@@ -1,0 +1,19 @@
+# Local credentials and environment overrides must never enter image contexts.
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+**/*.env
+
+# Keep committed examples and the synthetic rollout's nonsecret defaults.
+!*.env.example
+!**/*.env.example
+!testing/llm-rollout/defaults.env
+
+# Source-control and interpreter artifacts are not runtime inputs.
+.git
+.git/**
+**/__pycache__
+**/__pycache__/**
+**/*.py[cod]
