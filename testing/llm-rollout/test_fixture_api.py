@@ -5,6 +5,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 os.environ["HAYSTACK_WEBHOOK_SECRET"] = "fixture-service-secret"
 os.environ["FIXTURE_BEARER_TOKEN"] = "fixture-token"
@@ -45,7 +46,31 @@ class FixtureApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["model"], "gpt-5.2")
         self.assertIn("Synthetic", body["name"])
-        self.assertEqual(body["toolNames"], ["navigate_to_page"])
+        self.assertEqual(body["toolNames"], ["navigate_to_page", "get_client_summary"])
+
+    def test_final_provider_defaults_use_gpt_5_4_tiers(self):
+        defaults = {}
+        for line in Path(__file__).with_name("defaults.env").read_text().splitlines():
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                defaults[key] = value
+        mini = {
+            "OPENAI_HAYSTACK_PREVIOUS_SESSION_SUMMARY_MODEL",
+            "OPENAI_HAYSTACK_CONVERSATION_SUMMARY_MODEL",
+            "OPENAI_HAYSTACK_DOCUMENT_LANGUAGE_MODEL",
+            "OPENAI_HAYSTACK_DOCUMENT_POLICY_MODEL",
+            "OPENAI_HAYSTACK_DOCUMENT_DRAFT_MODEL",
+        }
+        full = {
+            "OPENAI_HAYSTACK_DOCUMENT_AGENT_MODEL",
+            "OPENAI_HAYSTACK_CHAT_MODEL",
+            "OPENAI_HAYSTACK_WEB_ASSISTANT_MODEL",
+            "OPENAI_HAYSTACK_THERAPIST_MODEL",
+            "OPENAI_HAYSTACK_COMPANION_MODEL",
+            "OPENAI_HAYSTACK_TRANSCRIBER_MODEL",
+        }
+        self.assertTrue(all(defaults[key] == "openai/gpt-5.4-mini" for key in mini))
+        self.assertTrue(all(defaults[key] == "openai/gpt-5.4" for key in full))
 
     def test_exploration_requires_scoped_identity_and_returns_synthetic_segments(self):
         path = "/api/v1/ai/transcripts/segments-by-sessions"
