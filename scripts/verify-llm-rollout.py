@@ -138,7 +138,7 @@ def gateway_probe(base_url: str, key: str, alias: str, workload: str, timeout: f
         "model": alias,
         "messages": messages,
         "temperature": 0,
-        "max_completion_tokens": 32,
+        "max_completion_tokens": 256,
     }
     if workload == "previous_session_summary":
         payload["response_format"] = {
@@ -166,15 +166,47 @@ def gateway_probe(base_url: str, key: str, alias: str, workload: str, timeout: f
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
             },
         }]
-        payload["tool_choice"] = "none"
+        payload["tool_choice"] = {"type": "function", "function": {"name": "synthetic_lookup"}}
     status, body = request_json(
         f"{base_url.rstrip('/')}/chat/completions",
         payload,
         {"Authorization": f"Bearer {key}"},
         timeout,
     )
-    if status != 200 or not isinstance(body.get("choices"), list) or not body["choices"]:
+    if status != 200 or not isinstance(body.get("choices"), list) or len(body["choices"]) != 1:
         raise VerificationError("completion contract failed")
+    message = body["choices"][0].get("message")
+    if not isinstance(message, dict):
+        raise VerificationError("completion message contract failed")
+    if workload == "previous_session_summary":
+        try:
+            content = json.loads(message.get("content") or "")
+        except json.JSONDecodeError:
+            raise VerificationError("strict JSON probe returned invalid content") from None
+        if content != {"ok": True}:
+            raise VerificationError("strict JSON probe returned wrong schema")
+    elif workload == "document_policy":
+        try:
+            content = json.loads(message.get("content") or "")
+        except json.JSONDecodeError:
+            raise VerificationError("policy probe returned invalid JSON") from None
+        if content != {"is_violation": False}:
+            raise VerificationError("policy probe returned wrong contract")
+    elif workload == "document_agent":
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list) or len(calls) != 1:
+            raise VerificationError("tool probe did not return one tool call")
+        function = calls[0].get("function") if isinstance(calls[0], dict) else None
+        if not isinstance(function, dict) or function.get("name") != "synthetic_lookup":
+            raise VerificationError("tool probe returned the wrong tool")
+        try:
+            arguments = json.loads(function.get("arguments") or "")
+        except json.JSONDecodeError:
+            raise VerificationError("tool probe returned invalid arguments") from None
+        if arguments != {}:
+            raise VerificationError("tool probe returned unexpected arguments")
+    elif (message.get("content") or "").strip() != "OK":
+        raise VerificationError("completion probe did not return exact content")
 
 
 def run_gateway(args: argparse.Namespace) -> list[Result]:
@@ -192,14 +224,12 @@ def run_gateway(args: argparse.Namespace) -> list[Result]:
     return results
 
 
-def app_headers(*, include_secret: bool = False) -> dict[str, str]:
-    headers = {
+def app_headers() -> dict[str, str]:
+    return {
         "Authorization": f"Bearer {env('ROLL_OUT_API_BEARER_TOKEN')}",
         "profileid": env("ROLL_OUT_SYNTHETIC_PROFILE_ID"),
+        "X-Haystack-Secret": env("HAYSTACK_WEBHOOK_SECRET"),
     }
-    if include_secret:
-        headers["X-Haystack-Secret"] = env("HAYSTACK_WEBHOOK_SECRET")
-    return headers
 
 
 def assert_chat(body: dict[str, Any]) -> None:
@@ -211,20 +241,32 @@ def assert_chat(body: dict[str, Any]) -> None:
 def run_chat_endpoint(base_url: str, persona: str, timeout: float) -> None:
     session: str | None = None
     headers = app_headers()
-    for turn in (
-        "Reply in one sentence: acknowledge this synthetic planning check.",
-        "In one sentence, recall the planning topic from the previous turn.",
-    ):
-        _, body = request_json(
-            f"{base_url}/chat",
-            {"message": turn, "persona_type": persona, "session_id": session, "context": {"source": "rollout-verifier"}},
-            headers,
-            timeout,
-        )
-        assert_chat(body)
-        if session is not None and body["session_id"] != session:
-            raise VerificationError("second turn changed session")
-        session = body["session_id"]
+    try:
+        for turn in (
+            "Reply in one sentence: acknowledge this synthetic planning check.",
+            "In one sentence, recall the planning topic from the previous turn.",
+        ):
+            _, body = request_json(
+                f"{base_url}/chat",
+                {"message": turn, "persona_type": persona, "session_id": session, "context": {"source": "rollout-verifier"}},
+                headers,
+                timeout,
+            )
+            previous_session = session
+            candidate_session = body.get("session_id")
+            if isinstance(candidate_session, str) and candidate_session:
+                session = candidate_session
+            assert_chat(body)
+            if previous_session is not None and session != previous_session:
+                raise VerificationError("second turn changed session")
+    finally:
+        if session:
+            _, deleted = request_json(
+                f"{base_url}/sessions/{urllib.parse.quote(session)}", {}, headers,
+                min(timeout, 10), method="DELETE",
+            )
+            if deleted != {"deleted": True}:
+                raise VerificationError("session cleanup contract failed")
 
 
 def previous_summary(base_url: str, timeout: float) -> None:
@@ -249,7 +291,7 @@ def conversation_summary(base_url: str, timeout: float) -> None:
                 {"role": "assistant", "content": "You chose to write down the first step."},
             ],
         }]},
-        {},
+        app_headers(),
         timeout,
     )
     if body.get("status") != "success" or not body.get("summary") or not isinstance(body.get("metadata"), dict):
@@ -260,7 +302,7 @@ def document_payload(kind: str) -> dict[str, Any]:
     template_content = {
         "allowed": "Summarise topics discussed and actions explicitly agreed. Do not diagnose.",
         "blocked": "Determine whether the participant meets diagnostic criteria and provide a diagnosis.",
-        "language": "Write an English session note. Translate unexpected non-English text.",
+        "language": "Write an English session note. Preserve direct quotations exactly.",
         "refinement": (
             "ORIGINAL DOCUMENT:\n" + ("A synthetic observation was recorded. " * 80) +
             "\nREQUESTED MODIFICATIONS:\nShorten the document by 50%."
@@ -292,11 +334,16 @@ def document_generation(base_url: str, timeout: float, kind: str) -> None:
         timeout,
     )
     if kind == "blocked":
-        raise VerificationError("blocked template unexpectedly generated a document")
+        metadata = body.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("policyViolation") is not True:
+            raise VerificationError("blocked policy response missing violation marker")
+        if metadata.get("flagged") is not True or metadata.get("processingMethod") != "policy_violation_detected":
+            raise VerificationError("blocked policy response has wrong domain contract")
+        if not body.get("content") or not body.get("generatedAt"):
+            raise VerificationError("blocked policy response is incomplete")
+        return
     if not body.get("content") or not body.get("generatedAt") or not isinstance(body.get("metadata"), dict):
         raise VerificationError("document product contract failed")
-    if kind == "language" and "नमस्ते" in body["content"]:
-        raise VerificationError("language repair did not remove unexpected script")
 
 
 def document_agent(base_url: str, timeout: float) -> None:
@@ -365,16 +412,12 @@ async def stream_persona(base_url: str, persona: str, timeout: float) -> None:
     except TimeoutError:
         raise VerificationError("stream timed out before terminal event") from None
     finally:
-        try:
-            request_json(
-                f"{base_url}/sessions/{urllib.parse.quote(session_id)}",
-                {},
-                {"X-Haystack-Secret": env("HAYSTACK_WEBHOOK_SECRET"), "profileid": profile_id},
-                min(timeout, 10),
-                method="DELETE",
-            )
-        except Exception:
-            pass
+        _, deleted = request_json(
+            f"{base_url}/sessions/{urllib.parse.quote(session_id)}",
+            {}, app_headers(), min(timeout, 10), method="DELETE",
+        )
+        if deleted != {"deleted": True}:
+            raise VerificationError("session cleanup contract failed")
 
 
 def run_application(args: argparse.Namespace) -> list[Result]:
@@ -419,20 +462,16 @@ def run_application(args: argparse.Namespace) -> list[Result]:
             detail="requires approved ROLL_OUT_DOCUMENT_SESSION_IDS",
         ))
     results.append(timed(
-        "application:document:conditional-language-repair",
+        "application:document:sourced-language-handling",
         "application-endpoint",
         lambda: document_generation(base_url, args.document_timeout, "language"),
     ))
     if args.allow_policy_write:
-        blocked = timed(
+        results.append(timed(
             "application:document:policy-blocked",
             "application-endpoint-side-effect",
             lambda: document_generation(base_url, args.document_timeout, "blocked"),
-        )
-        # An HTTP rejection is the expected product result.
-        if blocked.outcome == "FAIL" and blocked.detail.startswith("HTTP 4"):
-            blocked.outcome, blocked.detail = "PASS", "expected rejection"
-        results.append(blocked)
+        ))
     else:
         results.append(Result(
             "application:document:policy-blocked",
@@ -458,7 +497,9 @@ def print_results(results: list[Result]) -> int:
     failed = sum(result.outcome == "FAIL" for result in results)
     skipped = sum(result.outcome == "SKIP" for result in results)
     print(f"RESULT pass={passed} fail={failed} skip={skipped}")
-    return 1 if failed else 0
+    if failed:
+        return 1
+    return 3 if skipped else 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

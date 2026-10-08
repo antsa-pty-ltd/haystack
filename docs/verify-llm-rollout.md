@@ -39,6 +39,9 @@ Application mode reads:
 
 Keep these in the worker's existing secret environment. Do not pass secrets on
 the command line or capture the process environment in evidence.
+The verifier sends the service secret on every protected HTTP route as required
+by Haystack's global service-auth middleware. HTTP 401/403 and validation 422
+responses always fail a check.
 
 ```bash
 python3 scripts/verify-llm-rollout.py --mode gateway --route openai --execute
@@ -57,14 +60,18 @@ approved disposable fixture with `--allow-policy-write`. Policy provider
 failure/malformed JSON fail-open must be tested with isolated fault injection,
 not by breaking a shared live provider.
 
+Exit status is `0` only when every selected check passed, `1` when any check
+failed, `2` for configuration errors, and `3` when one or more checks were
+skipped. A run containing SKIP is incomplete evidence.
+
 ## Coverage and remaining API proof
 
 | Workload | Gateway probe | Haystack application proof | Required authenticated API proof after shipment |
 | --- | --- | --- | --- |
 | `previous_session_summary` | strict JSON support | `/previous-session-summary`, exact six fields | Complete a disposable transcript, observe Bull retry behaviour, exactly one durable row and API readback |
 | `conversation_summary` | completion | `/summarize-ai-conversations`, content and metadata | `POST /api/v1/ai/summarize-ai-conversations-haystack` using approved conversation IDs |
-| `document_language` | completion | generated English fixture containing unexpected Devanagari | API document job: assert repair, quotes/tokens, 422 and no saved error document under injected empty/failure |
-| `document_policy` | JSON completion | allowed template; blocked template only with write flag | API document job for allowed/blocked disposable templates; correlate observable malformed/provider-failure fail-open |
+| `document_language` | exact completion contract | source-language handling only; a sourced Devanagari term cannot deterministically force repair | Local routed test proves an unsourced term invokes the language router; API fault injection must assert repair, quotes/tokens, 422 and no saved error document |
+| `document_policy` | parsed JSON contract | allowed template; blocked template requires exact `policyViolation`, `flagged` and processing-method markers | API document job for allowed/blocked disposable templates; correlate observable malformed/provider-failure fail-open |
 | `document_draft` | completion | initial draft plus explicit 50% shortening refinement | Verify exactly one saved result for each job and provider-failure cleanup |
 | `document_agent` | tools request contract | real exploration only when approved transcript IDs are supplied | API document job with synthetic transcript ownership, callback auth, bounded tools and no duplicate output |
 | `chat` | completion | every persona, two turns, response DTO | Authenticated public chat flow for every published persona, ownership rejection and persisted history |
@@ -84,6 +91,8 @@ clinical records are out of scope.
 python3 -m unittest -v tests.test_verify_llm_rollout
 ```
 
-The isolated tests cover all eleven gateway aliases, explicit live-call
-acknowledgement, secret/body redaction, deterministic synthetic document
-fixtures, stream completion, terminal failure and timeout.
+The isolated tests cover all eleven gateway aliases and their response
+contracts, explicit live-call acknowledgement, service authentication,
+FastAPI request-schema validation, exact blocked-policy semantics, cleanup,
+secret/body redaction, a routed language-repair call, deterministic synthetic
+document fixtures, stream completion, terminal failure and timeout.
