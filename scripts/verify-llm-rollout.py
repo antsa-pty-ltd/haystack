@@ -378,7 +378,11 @@ async def consume_stream(socket: Any, timeout: float) -> None:
 
 async def stream_persona(base_url: str, persona: str, timeout: float) -> None:
     try:
-        import websockets
+        # The legacy client keeps the ``extra_headers`` contract across
+        # websockets 13-16. The top-level client renamed it to
+        # ``additional_headers`` in websockets 14, which made the verifier fail
+        # before opening a socket on newer operator workstations.
+        from websockets.legacy.client import connect as websocket_connect
     except ImportError:
         raise VerificationError("websockets package is required") from None
     profile_id = env("ROLL_OUT_SYNTHETIC_PROFILE_ID")
@@ -400,7 +404,7 @@ async def stream_persona(base_url: str, persona: str, timeout: float) -> None:
     }
     try:
         async with asyncio.timeout(timeout):
-            async with websockets.connect(ws_url, extra_headers=headers, open_timeout=min(timeout, 15)) as socket:
+            async with websocket_connect(ws_url, extra_headers=headers, open_timeout=min(timeout, 15)) as socket:
                 first = json.loads(await socket.recv())
                 if first.get("type") != "connection_established":
                     raise VerificationError("stream connection terminal missing")
