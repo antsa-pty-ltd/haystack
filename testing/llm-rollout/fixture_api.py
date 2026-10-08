@@ -32,6 +32,11 @@ SEGMENTS = [
 def persona(name):
     temperatures = {"web_assistant": 0.7, "antsabot_therapist": 0.8, "antsabot_companion": 0.8}
     limits = {"web_assistant": 4096, "antsabot_therapist": 1024, "antsabot_companion": 1024}
+    tools = {
+        "web_assistant": ["navigate_to_page"],
+        "antsabot_therapist": ["breathing_exercise"],
+        "antsabot_companion": ["breathing_exercise"],
+    }
     return {
         "version": 1,
         "name": f"Synthetic {name}",
@@ -41,7 +46,7 @@ def persona(name):
         "temperature": temperatures[name],
         "maxCompletionTokens": limits[name],
         "hasDbAccess": False,
-        "toolNames": [],
+        "toolNames": tools[name],
     }
 
 

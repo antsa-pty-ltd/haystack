@@ -45,6 +45,7 @@ class FixtureApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["model"], "gpt-5.2")
         self.assertIn("Synthetic", body["name"])
+        self.assertEqual(body["toolNames"], ["navigate_to_page"])
 
     def test_exploration_requires_scoped_identity_and_returns_synthetic_segments(self):
         path = "/api/v1/ai/transcripts/segments-by-sessions"

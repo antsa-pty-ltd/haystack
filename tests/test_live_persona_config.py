@@ -82,6 +82,26 @@ def test_published_config_cannot_expand_a_client_persona_tool_scope():
         )
 
 
+@pytest.mark.parametrize(
+    "persona_type,create_pipeline",
+    [
+        (PersonaType.WEB_ASSISTANT, "_create_web_assistant_pipeline"),
+        (PersonaType.ANTSABOT_THERAPIST, "_create_antsabot_therapist_pipeline"),
+        (PersonaType.ANTSABOT_COMPANION, "_create_antsabot_companion_pipeline"),
+    ],
+)
+def test_published_persona_without_tools_builds_a_chat_only_pipeline(persona_type, create_pipeline):
+    provider = PersonaConfigProvider()
+    config = provider._build_config(persona_type, _published(toolNames=[]))
+    manager = HaystackPipelineManager()
+
+    getattr(manager, create_pipeline)(config)
+
+    pipeline = manager.pipelines[persona_type]
+    assert "tool_invoker" not in pipeline.graph.nodes
+    assert pipeline.get_component("generator").tools == []
+
+
 def test_routed_persona_hot_reload_keeps_server_alias_and_updates_other_settings():
     alias = "antsa-haystack-therapist-openai"
     router_registry.register(
