@@ -77,38 +77,59 @@ ws.send(JSON.stringify({
 Environment variables in `.env`:
 
 - `OPENAI_API_KEY` - OpenAI API key
-- `HAYSTACK_LLM_ROUTE_PREVIOUS_SESSION_SUMMARY` - Server-controlled route for
-  durable previous-session summaries: `direct_openai` (default),
-  `litellm_openai`, or `litellm_foundry`
-- `LLM_GATEWAY_BASE_URL` - OpenAI-compatible LiteLLM URL ending in `/v1`; only
-  required when the summary selects a LiteLLM route
+- `HAYSTACK_LLM_ROUTE_*` - Server-controlled route per workload (see the table
+  below): `direct_openai` (default), `litellm_openai`, or `litellm_foundry`
+- `LLM_GATEWAY_BASE_URL` - OpenAI-compatible LiteLLM URL ending in `/v1`;
+  required only when a workload selects a LiteLLM route
 - `HAYSTACK_LLM_GATEWAY_API_KEY` - Haystack-dedicated LiteLLM virtual key; never
   reuse the API service's gateway credential
-- `HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_OPENAI` and
-  `HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_FOUNDRY` - Stable gateway
-  aliases for the selected summary provider
+- `HAYSTACK_LITELLM_MODEL_<WORKLOAD>_OPENAI` and
+  `HAYSTACK_LITELLM_MODEL_<WORKLOAD>_FOUNDRY` - Stable gateway aliases for the
+  selected provider of each workload
 - `REDIS_URL` - Redis connection URL (optional)
 - `MAX_CONCURRENT_REQUESTS` - Max concurrent requests (default: 100)
 - `SESSION_TIMEOUT_MINUTES` - Session timeout (default: 30)
 
-### Previous-session summary rollout
+### LLM workload routing
 
-Only `POST /previous-session-summary` uses this route. Every chat, persona,
-document-agent and conversation-summary client remains on its existing direct
-OpenAI path.
+Every isolated LLM workload has its own route flag in `llm_routing.py`. All
+routers are built and registered at service startup, and each flag defaults to
+`direct_openai` when omitted, so an unset flag never changes call behaviour.
 
-1. Keep the route omitted or set it to `direct_openai` for the baseline.
-2. Configure the base URL, Haystack-only virtual key and OpenAI alias, then set
-   the route to `litellm_openai` and restart the service.
-3. After its canary and burn-in, configure the Foundry alias and set the route
-   to `litellm_foundry`.
-4. Roll back only this workload by restoring its last validated route. There is
-   no automatic cross-provider fallback or retry.
+| Workload | Route flag | Direct model |
+| --- | --- | --- |
+| Chat (`POST /chat`) | `HAYSTACK_LLM_ROUTE_CHAT` | Runtime persona model |
+| Web-assistant WebSocket pipeline | `HAYSTACK_LLM_ROUTE_WEB_ASSISTANT` | Runtime persona model |
+| Therapist WebSocket pipeline | `HAYSTACK_LLM_ROUTE_THERAPIST` | Runtime persona model |
+| Companion WebSocket pipeline | `HAYSTACK_LLM_ROUTE_COMPANION` | Runtime persona model |
+| Transcriber WebSocket pipeline | `HAYSTACK_LLM_ROUTE_TRANSCRIBER` | Runtime persona model |
+| Document exploration agent | `HAYSTACK_LLM_ROUTE_DOCUMENT_AGENT` | Caller-supplied (defaults to `gpt-5.2`) |
+| Final document draft | `HAYSTACK_LLM_ROUTE_DOCUMENT_DRAFT` | `gpt-5.4-mini` |
+| Document language repair | `HAYSTACK_LLM_ROUTE_DOCUMENT_LANGUAGE` | `gpt-5.4-mini` |
+| Document policy check | `HAYSTACK_LLM_ROUTE_DOCUMENT_POLICY` | `gpt-4o-mini` (fails open) |
+| Conversation summary | `HAYSTACK_LLM_ROUTE_CONVERSATION_SUMMARY` | `gpt-4o-mini` |
+| Durable previous-session summary | `HAYSTACK_LLM_ROUTE_PREVIOUS_SESSION_SUMMARY` | `gpt-5.4-mini` |
 
-Invalid routes and missing selected gateway settings stop service startup. Safe
-logs contain only workload, route, model alias, outcome and elapsed time; they
-must never contain prompts, responses, transcripts, session IDs, credentials or
-gateway URLs.
+Key behaviours:
+
+- **Fail-fast startup**: invalid route values, missing gateway settings for a
+  selected LiteLLM route, or malformed aliases stop service startup. A
+  misconfiguration never surfaces mid-request.
+- **No runtime fallback**: there is no automatic cross-provider retry or
+  fallback. Rollback is a single workload flag change back to its last
+  validated route, followed by a service restart.
+- **Changes take effect on restart**: routes resolve at startup, and the four
+  persona pipelines re-resolve again whenever a pipeline is rebuilt (for
+  example when the persona model configuration changes).
+- **Telemetry**: every workload emits payload-free `llm_workload_route_configured`
+  and `llm_workload_call_completed` events containing only workload, route,
+  model alias, outcome and elapsed time. Logs must never contain prompts,
+  responses, transcripts, session IDs, credentials or gateway URLs.
+
+Staged rollout guidance: move one workload at a time. Each workload first goes
+to `litellm_openai` (proving the gateway path, with a canary and a rollback
+window), and only after that burn-in completes does the same workload move to
+`litellm_foundry`. Never flip two workloads merely because they share a model.
 
 ## Architecture
 

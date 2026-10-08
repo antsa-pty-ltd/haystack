@@ -15,10 +15,31 @@ from typing import List, Dict, Any, Optional
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
 from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
+from llm_routing import DOCUMENT_DRAFT_DIRECT_MODEL, DOCUMENT_DRAFT_WORKLOAD, router_registry
 
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _draft_provider(openai_client):
+    """Prefer the startup-resolved document_draft target; without it (unit
+    tests injecting a client) keep the caller-supplied client and model."""
+    try:
+        router = router_registry.get(DOCUMENT_DRAFT_WORKLOAD)
+    except RuntimeError:
+        return openai_client, DOCUMENT_DRAFT_DIRECT_MODEL, None
+    if router.target.client is None:
+        return openai_client, DOCUMENT_DRAFT_DIRECT_MODEL, None
+    return router.target.client, router.target.model, router
+
+
+async def _create_with_outcome(router, create):
+    # Only registry-resolved calls emit router outcome telemetry; the
+    # injected-client fallback path (unit tests) stays without it.
+    if router is None:
+        return await create()
+    return await router.execute(lambda selected: create())
 
 
 async def generate_document_from_context(
@@ -324,11 +345,15 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         ]
         # Generate document using OpenAI
         try:
-            response = await openai_client.chat.completions.create(
-                model="gpt-5.4-mini",
-                messages=messages,
-                temperature=0.3,  # Lower temperature for consistent, deterministic outputs
-                seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
+            draft_client, draft_model, draft_router = _draft_provider(openai_client)
+            response = await _create_with_outcome(
+                draft_router,
+                lambda: draft_client.chat.completions.create(
+                    model=draft_model,
+                    messages=messages,
+                    temperature=0.3,  # Lower temperature for consistent, deterministic outputs
+                    seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
+                ),
             )
         except Exception as e:
             if refinement:
@@ -384,19 +409,22 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                 "Document refinement length retry: original_words=%s result_words=%s max_words=%s attempt=%s",
                 len(refinement[0].split()), len(generated_content.split()), word_limit, attempt + 1,
             )
-            response = await openai_client.chat.completions.create(
-                model="gpt-5.4-mini",
-                messages=messages + [
-                    {"role": "assistant", "content": generated_content},
-                    {"role": "user", "content": (
-                        f"This version has {len(generated_content.split())} words and exceeds the required "
-                        f"maximum of {word_limit}. Rewrite the complete document within that limit, "
-                        "preserving clinically relevant meaning and all requested naming changes. "
-                        "Return only the document."
-                    )},
-                ],
-                temperature=0.3,
-                seed=42,
+            response = await _create_with_outcome(
+                draft_router,
+                lambda: draft_client.chat.completions.create(
+                    model=draft_model,
+                    messages=messages + [
+                        {"role": "assistant", "content": generated_content},
+                        {"role": "user", "content": (
+                            f"This version has {len(generated_content.split())} words and exceeds the required "
+                            f"maximum of {word_limit}. Rewrite the complete document within that limit, "
+                            "preserving clinically relevant meaning and all requested naming changes. "
+                            "Return only the document."
+                        )},
+                    ],
+                    temperature=0.3,
+                    seed=42,
+                ),
             )
             generated_content = response.choices[0].message.content if response and response.choices else None
             if not generated_content or not generated_content.strip():

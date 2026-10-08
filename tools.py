@@ -10,7 +10,7 @@ import uuid
 from contextvars import ContextVar, copy_context
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timedelta, timezone
-from openai import OpenAI
+from llm_routing import CONVERSATION_SUMMARY_WORKLOAD, router_registry
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +50,6 @@ CLIENT_MOOD_ACTIVITIES = (
     "Biking",
     "Walking",
 )
-
-# OpenAI client will be initialized lazily when needed
-openai_client = None
-
-def get_openai_client():
-    """Get OpenAI client, initializing it lazily if needed"""
-    global openai_client
-    if openai_client is None:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            logger.error("OPENAI_API_KEY environment variable not set for tools.")
-            return None
-        openai_client = OpenAI(api_key=openai_api_key)
-    return openai_client
 
 class ToolManager:
     """Manages tools for different personas"""
@@ -5175,7 +5161,7 @@ Please refine the following document according to these instructions:
 
 
 
-def summarize_ai_conversations(conversations_data: List[Dict]) -> Dict:
+async def summarize_ai_conversations(conversations_data: List[Dict]) -> Dict:
     """
     Summarize multiple AI conversations between a client and assistant.
     
@@ -5257,22 +5243,28 @@ Please analyze these conversations and provide a comprehensive summary following
         ]
         
         logger.info("Sending conversation summary request to OpenAI")
-        
-        # Get OpenAI client (lazy initialization)
-        client = get_openai_client()
+
+        # Startup wires the conversation_summary router; its target may be a
+        # gateway client carrying a model alias. Never log route credentials.
+        router = router_registry.get(CONVERSATION_SUMMARY_WORKLOAD)
+        target = router.target
+        client = target.client
         if not client:
             logger.error("OpenAI client not available - API key not configured")
             return {
                 "error": "OpenAI service not available - API key not configured",
                 "status": "error"
             }
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=3000
-        )
+
+        async def call_conversation_summary(selected):
+            return await client.chat.completions.create(
+                model=target.model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=3000
+            )
+
+        response = await router.execute(call_conversation_summary)
         
         summary_content = response.choices[0].message.content
         
