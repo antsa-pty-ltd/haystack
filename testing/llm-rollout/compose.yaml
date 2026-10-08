@@ -71,5 +71,5 @@ services:
       - -ec
       - |
         export HAYSTACK_LLM_GATEWAY_API_KEY="$$HAYSTACK_GATEWAY_KEY"
-        exec uvicorn main:app --host 127.0.0.1 --port 8001
+        exec uvicorn main:app --host 0.0.0.0 --port 8001
     depends_on: [redis, api-fixture, edge]
