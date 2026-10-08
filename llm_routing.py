@@ -314,6 +314,10 @@ class LlmRouterRegistry:
                 f"No LLM router registered for workload: {workload}"
             ) from None
 
+    def clear(self) -> None:
+        """Drop every registered router (test isolation only)."""
+        self._routers.clear()
+
 
 router_registry = LlmRouterRegistry()
 

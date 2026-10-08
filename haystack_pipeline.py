@@ -122,7 +122,17 @@ class HaystackPipelineManager:
             "temperature": persona_config.temperature,
             "max_completion_tokens": persona_config.max_completion_tokens,
         }
-        target = router_registry.get(workload).target
+        try:
+            target = router_registry.get(workload).target
+        except RuntimeError:
+            # Non-main entrypoints (unit tests, deploy-minimal) build no
+            # registry; legacy construction keeps them byte-identical.
+            return OpenAIChatGenerator(
+                model=persona_config.model,
+                api_key=Secret.from_token(settings.openai_api_key),
+                tools=tools,  # Pass tools to the generator so it knows what's available
+                generation_kwargs=generation_kwargs,
+            )
         if target.route is LlmRoute.DIRECT_OPENAI:
             return OpenAIChatGenerator(
                 model=target.model or persona_config.model,
