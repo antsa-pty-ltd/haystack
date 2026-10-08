@@ -36,7 +36,55 @@ from previous_session_summary import (
     PreviousSessionSummaryResponse,
     generate_previous_session_summary,
 )
-from llm_routing import PreviousSessionSummaryRouter
+from llm_routing import (
+    PreviousSessionSummaryRouter,
+    LlmWorkloadRouter,
+    router_registry,
+    CHAT_WORKLOAD,
+    CHAT_ROUTE_ENV,
+    CHAT_OPENAI_ALIAS_ENV,
+    CHAT_FOUNDRY_ALIAS_ENV,
+    WEB_ASSISTANT_WORKLOAD,
+    WEB_ASSISTANT_ROUTE_ENV,
+    WEB_ASSISTANT_OPENAI_ALIAS_ENV,
+    WEB_ASSISTANT_FOUNDRY_ALIAS_ENV,
+    THERAPIST_WORKLOAD,
+    THERAPIST_ROUTE_ENV,
+    THERAPIST_OPENAI_ALIAS_ENV,
+    THERAPIST_FOUNDRY_ALIAS_ENV,
+    COMPANION_WORKLOAD,
+    COMPANION_ROUTE_ENV,
+    COMPANION_OPENAI_ALIAS_ENV,
+    COMPANION_FOUNDRY_ALIAS_ENV,
+    TRANSCRIBER_WORKLOAD,
+    TRANSCRIBER_ROUTE_ENV,
+    TRANSCRIBER_OPENAI_ALIAS_ENV,
+    TRANSCRIBER_FOUNDRY_ALIAS_ENV,
+    DOCUMENT_AGENT_WORKLOAD,
+    DOCUMENT_AGENT_ROUTE_ENV,
+    DOCUMENT_AGENT_OPENAI_ALIAS_ENV,
+    DOCUMENT_AGENT_FOUNDRY_ALIAS_ENV,
+    DOCUMENT_DRAFT_WORKLOAD,
+    DOCUMENT_DRAFT_DIRECT_MODEL,
+    DOCUMENT_DRAFT_ROUTE_ENV,
+    DOCUMENT_DRAFT_OPENAI_ALIAS_ENV,
+    DOCUMENT_DRAFT_FOUNDRY_ALIAS_ENV,
+    DOCUMENT_LANGUAGE_WORKLOAD,
+    DOCUMENT_LANGUAGE_DIRECT_MODEL,
+    DOCUMENT_LANGUAGE_ROUTE_ENV,
+    DOCUMENT_LANGUAGE_OPENAI_ALIAS_ENV,
+    DOCUMENT_LANGUAGE_FOUNDRY_ALIAS_ENV,
+    DOCUMENT_POLICY_WORKLOAD,
+    DOCUMENT_POLICY_DIRECT_MODEL,
+    DOCUMENT_POLICY_ROUTE_ENV,
+    DOCUMENT_POLICY_OPENAI_ALIAS_ENV,
+    DOCUMENT_POLICY_FOUNDRY_ALIAS_ENV,
+    CONVERSATION_SUMMARY_WORKLOAD,
+    CONVERSATION_SUMMARY_DIRECT_MODEL,
+    CONVERSATION_SUMMARY_ROUTE_ENV,
+    CONVERSATION_SUMMARY_OPENAI_ALIAS_ENV,
+    CONVERSATION_SUMMARY_FOUNDRY_ALIAS_ENV,
+)
 
 # Load environment variables
 load_dotenv()
@@ -58,8 +106,92 @@ if not openai_api_key:
 openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
 
 # This router is deliberately scoped to durable previous-session summaries.
-# All other Haystack model calls continue to use `openai_client` unchanged.
+# Every other routed workload resolves below (routes default to direct OpenAI
+# when unset, so a missing route env never changes call behaviour).
 previous_session_summary_router = PreviousSessionSummaryRouter(openai_client)
+
+for workload, direct_model, route_env, openai_alias_env, foundry_alias_env in (
+    (
+        CHAT_WORKLOAD,
+        None,
+        CHAT_ROUTE_ENV,
+        CHAT_OPENAI_ALIAS_ENV,
+        CHAT_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        WEB_ASSISTANT_WORKLOAD,
+        None,
+        WEB_ASSISTANT_ROUTE_ENV,
+        WEB_ASSISTANT_OPENAI_ALIAS_ENV,
+        WEB_ASSISTANT_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        THERAPIST_WORKLOAD,
+        None,
+        THERAPIST_ROUTE_ENV,
+        THERAPIST_OPENAI_ALIAS_ENV,
+        THERAPIST_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        COMPANION_WORKLOAD,
+        None,
+        COMPANION_ROUTE_ENV,
+        COMPANION_OPENAI_ALIAS_ENV,
+        COMPANION_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        TRANSCRIBER_WORKLOAD,
+        None,
+        TRANSCRIBER_ROUTE_ENV,
+        TRANSCRIBER_OPENAI_ALIAS_ENV,
+        TRANSCRIBER_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        DOCUMENT_AGENT_WORKLOAD,
+        None,
+        DOCUMENT_AGENT_ROUTE_ENV,
+        DOCUMENT_AGENT_OPENAI_ALIAS_ENV,
+        DOCUMENT_AGENT_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        DOCUMENT_DRAFT_WORKLOAD,
+        DOCUMENT_DRAFT_DIRECT_MODEL,
+        DOCUMENT_DRAFT_ROUTE_ENV,
+        DOCUMENT_DRAFT_OPENAI_ALIAS_ENV,
+        DOCUMENT_DRAFT_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        DOCUMENT_LANGUAGE_WORKLOAD,
+        DOCUMENT_LANGUAGE_DIRECT_MODEL,
+        DOCUMENT_LANGUAGE_ROUTE_ENV,
+        DOCUMENT_LANGUAGE_OPENAI_ALIAS_ENV,
+        DOCUMENT_LANGUAGE_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        DOCUMENT_POLICY_WORKLOAD,
+        DOCUMENT_POLICY_DIRECT_MODEL,
+        DOCUMENT_POLICY_ROUTE_ENV,
+        DOCUMENT_POLICY_OPENAI_ALIAS_ENV,
+        DOCUMENT_POLICY_FOUNDRY_ALIAS_ENV,
+    ),
+    (
+        CONVERSATION_SUMMARY_WORKLOAD,
+        CONVERSATION_SUMMARY_DIRECT_MODEL,
+        CONVERSATION_SUMMARY_ROUTE_ENV,
+        CONVERSATION_SUMMARY_OPENAI_ALIAS_ENV,
+        CONVERSATION_SUMMARY_FOUNDRY_ALIAS_ENV,
+    ),
+):
+    router_registry.register(
+        LlmWorkloadRouter(
+            workload=workload,
+            route_env=route_env,
+            openai_alias_env=openai_alias_env,
+            foundry_alias_env=foundry_alias_env,
+            direct_model=direct_model,
+            direct_client=openai_client,
+        )
+    )
 
 
 # Simple tool loading (graceful fallback)
@@ -209,7 +341,11 @@ async def on_startup():
     # Initialize document exploration agent
     if openai_api_key:
         try:
-            initialize_agent(openai_api_key, model="gpt-5.2")
+            initialize_agent(
+                openai_api_key,
+                model="gpt-5.2",
+                llm_target=router_registry.get(DOCUMENT_AGENT_WORKLOAD).target,
+            )
             logger.info("✅ Document Exploration Agent initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document Agent: {e}")
@@ -762,16 +898,23 @@ async def chat(
         for msg in history:
             messages.append({"role": msg.role, "content": msg.content})
         
-        # Generate response using OpenAI
-        if not openai_client:
-            raise HTTPException(status_code=500, detail="OpenAI client not configured")
-        
-        response = await openai_client.chat.completions.create(
-            model=runtime_config.model,
-            messages=messages,
-            temperature=runtime_config.temperature,
-            max_completion_tokens=runtime_config.max_completion_tokens
-        )
+        # Generate response using the resolved chat route
+        chat_router = router_registry.get(CHAT_WORKLOAD)
+        chat_target = chat_router.target
+        if not chat_target.client:
+            raise HTTPException(status_code=503, detail="Chat model client not configured")
+
+        async def call_chat_completions(selected):
+            return await selected.client.chat.completions.create(
+                # Direct routes carry no pinned model, so the persona's
+                # runtime model is preserved; gateway routes pin the alias.
+                model=selected.model or runtime_config.model,
+                messages=messages,
+                temperature=runtime_config.temperature,
+                max_completion_tokens=runtime_config.max_completion_tokens
+            )
+
+        response = await chat_router.execute(call_chat_completions)
         
         response_text = response.choices[0].message.content or ""
         
@@ -919,8 +1062,10 @@ async def detect_policy_violation(template_content: str) -> Dict[str, Any]:
     Returns: {"is_violation": bool, "violation_type": str, "reason": str}
     """
     try:
-        if not openai_client:
-            logger.warning("OpenAI client not available for policy check, allowing template")
+        policy_router = router_registry.get(DOCUMENT_POLICY_WORKLOAD)
+        policy_target = policy_router.target
+        if not policy_target.client:
+            logger.warning("Policy model client not available for policy check, allowing template")
             return {"is_violation": False, "violation_type": None, "reason": None}
         
         # Use LLM to analyze template for policy violations
@@ -963,16 +1108,20 @@ TEMPLATE CONTENT:
 
 Respond with JSON only."""
 
-        # Call LLM for analysis
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Fast and cost-effective for this task
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,  # Low temperature for consistent policy enforcement
-            max_completion_tokens=200
-        )
+        # Call LLM for analysis through the resolved document-policy route
+        async def call_policy_completions(selected):
+            # Fast and cost-effective model for this task on direct routes
+            return await selected.client.chat.completions.create(
+                model=selected.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,  # Low temperature for consistent policy enforcement
+                max_completion_tokens=200
+            )
+
+        response = await policy_router.execute(call_policy_completions)
         
         result_text = response.choices[0].message.content.strip()
         
@@ -1093,7 +1242,7 @@ async def summarize_ai_conversations_endpoint(request: dict):
         from tools import summarize_ai_conversations
         
         # Generate the summary
-        result = summarize_ai_conversations(conversations_data)
+        result = await summarize_ai_conversations(conversations_data)
         
         if result.get("status") == "error":
             logger.error(f"❌ Summarization failed: {result.get('error')}")

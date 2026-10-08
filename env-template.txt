@@ -3,13 +3,49 @@
 
 OPENAI_API_KEY=
 
-# Durable previous-session summary routing only. The gateway key must be a
-# Haystack-dedicated virtual key, not the API service's gateway credential.
+# LLM workload routing. Every HAYSTACK_LLM_ROUTE_* flag defaults to
+# direct_openai, so omitting them keeps today's direct OpenAI behaviour.
+# Any LiteLLM route also requires the gateway base URL and the
+# Haystack-dedicated virtual key below (not the API service's credential).
+# All routing is validated at service startup.
 HAYSTACK_LLM_ROUTE_PREVIOUS_SESSION_SUMMARY=direct_openai
 LLM_GATEWAY_BASE_URL=
 HAYSTACK_LLM_GATEWAY_API_KEY=
 HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_OPENAI=antsa-haystack-previous-session-summary-openai
 HAYSTACK_LITELLM_MODEL_PREVIOUS_SESSION_SUMMARY_FOUNDRY=antsa-haystack-previous-session-summary-foundry
+
+# Remaining routed workloads (provisioned gateway aliases are optional until a
+# flag selects a LiteLLM route; only the flagged workload's alias is required).
+HAYSTACK_LLM_ROUTE_CHAT=direct_openai
+HAYSTACK_LITELLM_MODEL_CHAT_OPENAI=antsa-haystack-chat-openai
+HAYSTACK_LITELLM_MODEL_CHAT_FOUNDRY=antsa-haystack-chat-foundry
+HAYSTACK_LLM_ROUTE_WEB_ASSISTANT=direct_openai
+HAYSTACK_LITELLM_MODEL_WEB_ASSISTANT_OPENAI=antsa-haystack-web-assistant-openai
+HAYSTACK_LITELLM_MODEL_WEB_ASSISTANT_FOUNDRY=antsa-haystack-web-assistant-foundry
+HAYSTACK_LLM_ROUTE_THERAPIST=direct_openai
+HAYSTACK_LITELLM_MODEL_THERAPIST_OPENAI=antsa-haystack-therapist-openai
+HAYSTACK_LITELLM_MODEL_THERAPIST_FOUNDRY=antsa-haystack-therapist-foundry
+HAYSTACK_LLM_ROUTE_COMPANION=direct_openai
+HAYSTACK_LITELLM_MODEL_COMPANION_OPENAI=antsa-haystack-companion-openai
+HAYSTACK_LITELLM_MODEL_COMPANION_FOUNDRY=antsa-haystack-companion-foundry
+HAYSTACK_LLM_ROUTE_TRANSCRIBER=direct_openai
+HAYSTACK_LITELLM_MODEL_TRANSCRIBER_OPENAI=antsa-haystack-transcriber-openai
+HAYSTACK_LITELLM_MODEL_TRANSCRIBER_FOUNDRY=antsa-haystack-transcriber-foundry
+HAYSTACK_LLM_ROUTE_DOCUMENT_AGENT=direct_openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_AGENT_OPENAI=antsa-haystack-document-agent-openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_AGENT_FOUNDRY=antsa-haystack-document-agent-foundry
+HAYSTACK_LLM_ROUTE_DOCUMENT_DRAFT=direct_openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_DRAFT_OPENAI=antsa-haystack-document-draft-openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_DRAFT_FOUNDRY=antsa-haystack-document-draft-foundry
+HAYSTACK_LLM_ROUTE_DOCUMENT_LANGUAGE=direct_openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_LANGUAGE_OPENAI=antsa-haystack-document-language-openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_LANGUAGE_FOUNDRY=antsa-haystack-document-language-foundry
+HAYSTACK_LLM_ROUTE_DOCUMENT_POLICY=direct_openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_POLICY_OPENAI=antsa-haystack-document-policy-openai
+HAYSTACK_LITELLM_MODEL_DOCUMENT_POLICY_FOUNDRY=antsa-haystack-document-policy-foundry
+HAYSTACK_LLM_ROUTE_CONVERSATION_SUMMARY=direct_openai
+HAYSTACK_LITELLM_MODEL_CONVERSATION_SUMMARY_OPENAI=antsa-haystack-conversation-summary-openai
+HAYSTACK_LITELLM_MODEL_CONVERSATION_SUMMARY_FOUNDRY=antsa-haystack-conversation-summary-foundry
 
 REDIS_URL=redis://localhost:6379
 LOG_LEVEL=INFO

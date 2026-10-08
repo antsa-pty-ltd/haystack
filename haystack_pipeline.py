@@ -17,6 +17,14 @@ from haystack.utils import Secret
 
 from config import settings
 from crisis_resources import build_crisis_resources_block
+from llm_routing import (
+    COMPANION_WORKLOAD,
+    LlmRoute,
+    THERAPIST_WORKLOAD,
+    TRANSCRIBER_WORKLOAD,
+    WEB_ASSISTANT_WORKLOAD,
+    router_registry,
+)
 from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
 from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
 from persona_config_provider import persona_config_provider
@@ -98,6 +106,43 @@ class HaystackPipelineManager:
             logger.error(f"❌ Failed to initialize Haystack pipelines: {e}")
             raise
     
+    def _create_persona_generator(
+        self,
+        workload: str,
+        persona_config: PersonaConfig,
+        tools: List[Any],
+    ) -> OpenAIChatGenerator:
+        """
+        Build the persona pipeline generator following the server-controlled
+        LLM route for the workload. Routed targets talk to the gateway with
+        the pinned alias; direct targets keep the persona-owned model (incl.
+        runtime persona overrides).
+        """
+        generation_kwargs = {
+            "temperature": persona_config.temperature,
+            "max_completion_tokens": persona_config.max_completion_tokens,
+        }
+        target = router_registry.get(workload).target
+        if target.route is LlmRoute.DIRECT_OPENAI:
+            return OpenAIChatGenerator(
+                model=target.model or persona_config.model,
+                api_key=Secret.from_token(settings.openai_api_key),
+                tools=tools,  # Pass tools to the generator so it knows what's available
+                generation_kwargs=generation_kwargs,
+            )
+        if not target.gateway_base_url or not target.gateway_api_key:
+            raise ValueError(
+                f"Route {target.route.value} is configured for workload "
+                f"'{workload}' but gateway connection details are missing"
+            )
+        return OpenAIChatGenerator(
+            model=target.model or persona_config.model,
+            api_base_url=target.gateway_base_url,
+            api_key=Secret.from_token(target.gateway_api_key),
+            tools=tools,  # Pass tools to the generator so it knows what's available
+            generation_kwargs=generation_kwargs,
+        )
+
     def _create_web_assistant_pipeline(self, persona_config: Optional[PersonaConfig] = None):
         """
         Create WEB_ASSISTANT pipeline with multi-tool support and UI actions.
@@ -136,15 +181,10 @@ class HaystackPipelineManager:
         
         # Add components
         pipeline.add_component("message_collector", MessageCollector())
-        pipeline.add_component("generator", OpenAIChatGenerator(
-            model=persona_config.model,
-            api_key=Secret.from_token(settings.openai_api_key),
-            tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs={
-                "temperature": persona_config.temperature,
-                "max_completion_tokens": persona_config.max_completion_tokens
-            }
-        ))
+        pipeline.add_component(
+            "generator",
+            self._create_persona_generator(WEB_ASSISTANT_WORKLOAD, persona_config, tools),
+        )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
         pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
         pipeline.add_component("ui_collector", UIActionCollector())
@@ -192,15 +232,10 @@ class HaystackPipelineManager:
         pipeline = Pipeline(max_runs_per_component=15)  # Fewer iterations needed
         
         pipeline.add_component("message_collector", MessageCollector())
-        pipeline.add_component("generator", OpenAIChatGenerator(
-            model=persona_config.model,
-            api_key=Secret.from_token(settings.openai_api_key),
-            tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs={
-                "temperature": persona_config.temperature,
-                "max_completion_tokens": persona_config.max_completion_tokens
-            }
-        ))
+        pipeline.add_component(
+            "generator",
+            self._create_persona_generator(THERAPIST_WORKLOAD, persona_config, tools),
+        )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
         pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
         
@@ -249,15 +284,10 @@ class HaystackPipelineManager:
         pipeline = Pipeline(max_runs_per_component=15)  # Fewer iterations needed
 
         pipeline.add_component("message_collector", MessageCollector())
-        pipeline.add_component("generator", OpenAIChatGenerator(
-            model=persona_config.model,
-            api_key=Secret.from_token(settings.openai_api_key),
-            tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs={
-                "temperature": persona_config.temperature,
-                "max_completion_tokens": persona_config.max_completion_tokens
-            }
-        ))
+        pipeline.add_component(
+            "generator",
+            self._create_persona_generator(COMPANION_WORKLOAD, persona_config, tools),
+        )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
         pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
 
@@ -348,15 +378,10 @@ class HaystackPipelineManager:
         pipeline = Pipeline(max_runs_per_component=10)
         
         pipeline.add_component("message_collector", MessageCollector())
-        pipeline.add_component("generator", OpenAIChatGenerator(
-            model=persona_config.model,
-            api_key=Secret.from_token(settings.openai_api_key),
-            tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs={
-                "temperature": persona_config.temperature,
-                "max_completion_tokens": persona_config.max_completion_tokens
-            }
-        ))
+        pipeline.add_component(
+            "generator",
+            self._create_persona_generator(TRANSCRIBER_WORKLOAD, persona_config, tools),
+        )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
         pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
         pipeline.add_component("ui_collector", UIActionCollector())
