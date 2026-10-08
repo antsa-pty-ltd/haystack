@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.utils import Secret
+from fastapi import HTTPException
 
 from agents.document_agent import DocumentExplorationAgent
 from llm_routing import ALL_LLM_WORKLOADS, LlmRoute, LlmRouterRegistry, LlmWorkloadRouter
@@ -113,6 +114,25 @@ print(json.dumps({
 
 def test_readiness_rejects_an_incomplete_router_registry():
     assert set(LlmRouterRegistry().unavailable_workloads()) == ALL_LLM_WORKLOADS
+
+
+def test_document_endpoint_rejects_incomplete_route_prerequisites():
+    from main import generate_document_from_template
+
+    try:
+        asyncio.run(
+            generate_document_from_template(
+                request=None,
+                http_request=None,
+                authorization=None,
+                profileid=None,
+            )
+        )
+    except HTTPException as error:
+        assert error.status_code == 503
+        assert error.detail == "Document generation models not configured"
+    else:
+        raise AssertionError("incomplete document routes were accepted")
 
 
 def test_routed_document_agent_initializes_without_direct_key():

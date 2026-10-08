@@ -1186,7 +1186,25 @@ async def generate_document_from_template(
     those agents - it's only used for document generation.
     """
     from document_generation.agentic_endpoint import generate_document_from_template_agentic
-    
+
+    required_workloads = (
+        DOCUMENT_AGENT_WORKLOAD,
+        DOCUMENT_DRAFT_WORKLOAD,
+        DOCUMENT_LANGUAGE_WORKLOAD,
+    )
+    try:
+        document_models_available = all(
+            router_registry.get(workload).is_available
+            for workload in required_workloads
+        )
+    except RuntimeError:
+        document_models_available = False
+    if not document_models_available or get_document_agent() is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Document generation models not configured",
+        )
+
     return await generate_document_from_template_agentic(
         request=request,
         http_request=http_request,
