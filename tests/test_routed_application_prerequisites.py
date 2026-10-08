@@ -13,7 +13,9 @@ from haystack.utils import Secret
 from fastapi import HTTPException
 
 from agents.document_agent import DocumentExplorationAgent
+from haystack_pipeline import HaystackPipelineManager
 from llm_routing import ALL_LLM_WORKLOADS, LlmRoute, LlmRouterRegistry, LlmWorkloadRouter
+from personas import PersonaType, persona_manager
 from release_identity import release_sha
 from routed_generator import RoutedOpenAIChatGenerator
 
@@ -33,16 +35,19 @@ WORKLOADS = (
 )
 
 
-def _router(logger=None):
+def _router(logger=None, workload="web_assistant"):
+    stem = workload.upper()
+    route_env = f"HAYSTACK_LLM_ROUTE_{stem}"
+    openai_alias_env = f"HAYSTACK_LITELLM_MODEL_{stem}_OPENAI"
     return LlmWorkloadRouter(
-        workload="web_assistant",
-        route_env="HAYSTACK_LLM_ROUTE_WEB_ASSISTANT",
-        openai_alias_env="HAYSTACK_LITELLM_MODEL_WEB_ASSISTANT_OPENAI",
-        foundry_alias_env="HAYSTACK_LITELLM_MODEL_WEB_ASSISTANT_FOUNDRY",
+        workload=workload,
+        route_env=route_env,
+        openai_alias_env=openai_alias_env,
+        foundry_alias_env=f"HAYSTACK_LITELLM_MODEL_{stem}_FOUNDRY",
         direct_client=None,
         environ={
-            "HAYSTACK_LLM_ROUTE_WEB_ASSISTANT": "litellm_openai",
-            "HAYSTACK_LITELLM_MODEL_WEB_ASSISTANT_OPENAI": "safe-web-alias",
+            route_env: "litellm_openai",
+            openai_alias_env: f"safe-{workload.replace('_', '-')}-alias",
             "LLM_GATEWAY_BASE_URL": "https://gateway.example/v1",
             "HAYSTACK_LLM_GATEWAY_API_KEY": "gateway-secret",
         },
@@ -150,7 +155,81 @@ def test_routed_document_agent_initializes_without_direct_key():
     assert generator.model == "safe-document-agent-alias"
 
 
+def test_document_agent_sync_generator_path_emits_completion_telemetry():
+    logger = Mock()
+    router = _router(logger, "document_agent")
+    target = SimpleNamespace(
+        route=LlmRoute.LITELLM_OPENAI,
+        workload="document_agent",
+        model="safe-document-agent-alias",
+        gateway_base_url="https://gateway.example/v1",
+        gateway_api_key="gateway-secret",
+    )
+    agent = DocumentExplorationAgent(None, llm_target=target, llm_router=router)
+    generator = agent._create_agent().chat_generator
+
+    with patch.object(
+        OpenAIChatGenerator,
+        "run",
+        return_value={"replies": []},
+    ):
+        assert generator.run(messages=[]) == {"replies": []}
+
+    event = json.loads(logger.info.call_args_list[-1].args[0])
+    assert event["outcome"] == "success"
+    assert event["workload"] == "document_agent"
+
+
 def test_persona_generator_emits_safe_completion_telemetry():
+    logger = Mock()
+    router = _router(logger)
+    from llm_routing import router_registry
+
+    router_registry.register(router)
+    manager = HaystackPipelineManager()
+    manager._create_web_assistant_pipeline(
+        persona_manager.get_persona(PersonaType.WEB_ASSISTANT)
+    )
+    generator = manager.pipelines[PersonaType.WEB_ASSISTANT].get_component("generator")
+    with patch.object(OpenAIChatGenerator, "run_async", new=AsyncMock(return_value={"replies": []})):
+        assert asyncio.run(generator.run_async(messages=[])) == {"replies": []}
+    event = json.loads(logger.info.call_args_list[-1].args[0])
+    assert event["workload"] == "web_assistant"
+    assert event["model"] == "safe-web-assistant-alias"
+    assert event["outcome"] == "success"
+    assert "gateway-secret" not in json.dumps(event)
+
+
+def test_persona_nontrusted_sync_path_emits_error_telemetry():
+    logger = Mock()
+    router = _router(logger)
+    from llm_routing import router_registry
+
+    router_registry.register(router)
+    manager = HaystackPipelineManager()
+    manager._create_web_assistant_pipeline(
+        persona_manager.get_persona(PersonaType.WEB_ASSISTANT)
+    )
+    generator = manager.pipelines[PersonaType.WEB_ASSISTANT].get_component("generator")
+
+    with patch.object(
+        OpenAIChatGenerator,
+        "run",
+        side_effect=RuntimeError("provider failed with sensitive content"),
+    ):
+        try:
+            generator.run(messages=[])
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("sync provider failure was swallowed")
+
+    event = json.loads(logger.info.call_args_list[-1].args[0])
+    assert event["outcome"] == "error"
+    assert "sensitive content" not in json.dumps(event)
+
+
+def test_persona_trusted_async_cancellation_emits_one_aborted_event():
     logger = Mock()
     router = _router(logger)
     generator = RoutedOpenAIChatGenerator(
@@ -159,13 +238,26 @@ def test_persona_generator_emits_safe_completion_telemetry():
         api_base_url="https://gateway.example/v1",
         api_key=Secret.from_token("gateway-secret"),
     )
-    with patch.object(OpenAIChatGenerator, "run_async", new=AsyncMock(return_value={"replies": []})):
-        assert asyncio.run(generator.run_async(messages=[])) == {"replies": []}
-    event = json.loads(logger.info.call_args_list[-1].args[0])
-    assert event["workload"] == "web_assistant"
-    assert event["model"] == "safe-web-alias"
-    assert event["outcome"] == "success"
-    assert "gateway-secret" not in json.dumps(event)
+
+    with patch.object(
+        OpenAIChatGenerator,
+        "run_async",
+        new=AsyncMock(side_effect=asyncio.CancelledError()),
+    ):
+        try:
+            asyncio.run(generator.run_async(messages=[]))
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("async cancellation was swallowed")
+
+    events = [
+        json.loads(call.args[0])
+        for call in logger.info.call_args_list
+        if "llm_workload_call_completed" in call.args[0]
+    ]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "aborted"
 
 
 def test_stream_telemetry_records_abort_without_provider_fallback():

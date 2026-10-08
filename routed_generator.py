@@ -18,6 +18,31 @@ class RoutedOpenAIChatGenerator(OpenAIChatGenerator):
         super().__init__(**kwargs)
 
     @component.output_types(replies=list[ChatMessage])
+    def run(
+        self,
+        messages: list[ChatMessage],
+        streaming_callback: Union[
+            Callable[[StreamingChunk], None],
+            Callable[[StreamingChunk], Awaitable[None]],
+            None,
+        ] = None,
+        generation_kwargs: Optional[dict[str, Any]] = None,
+        *,
+        tools: Union[list[Tool], Toolset, None] = None,
+        tools_strict: Optional[bool] = None,
+    ):
+        def generate(_target):
+            return super(RoutedOpenAIChatGenerator, self).run(
+                messages=messages,
+                streaming_callback=streaming_callback,
+                generation_kwargs=generation_kwargs,
+                tools=tools,
+                tools_strict=tools_strict,
+            )
+
+        return self._llm_router.execute_sync(generate)
+
+    @component.output_types(replies=list[ChatMessage])
     async def run_async(
         self,
         messages: list[ChatMessage],

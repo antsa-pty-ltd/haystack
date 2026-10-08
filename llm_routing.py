@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -140,6 +141,7 @@ class LlmTarget:
 
 GatewayClientFactory = Callable[..., Any]
 TargetOperation = Callable[[LlmTarget], Awaitable[Any]]
+SyncTargetOperation = Callable[[LlmTarget], Any]
 
 
 class LlmWorkloadRouter:
@@ -182,26 +184,44 @@ class LlmWorkloadRouter:
     async def execute(self, operation: TargetOperation) -> Any:
         """Run one selected call and emit payload-free outcome telemetry."""
         started_at = time.perf_counter()
+        outcome = "aborted"
         try:
             result = await operation(self._target)
+            outcome = "success"
+            return result
+        except asyncio.CancelledError:
+            raise
         except Exception:
+            outcome = "error"
+            raise
+        finally:
             self._emit_safe_event(
                 "llm_workload_call_completed",
                 route=self._target.route.value,
                 model=self._target.model,
-                outcome="error",
+                outcome=outcome,
                 latencyMs=_elapsed_milliseconds(started_at),
             )
-            raise
 
-        self._emit_safe_event(
-            "llm_workload_call_completed",
-            route=self._target.route.value,
-            model=self._target.model,
-            outcome="success",
-            latencyMs=_elapsed_milliseconds(started_at),
-        )
-        return result
+    def execute_sync(self, operation: SyncTargetOperation) -> Any:
+        """Run one synchronous selected call with the same safe telemetry."""
+        started_at = time.perf_counter()
+        outcome = "aborted"
+        try:
+            result = operation(self._target)
+            outcome = "success"
+            return result
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            self._emit_safe_event(
+                "llm_workload_call_completed",
+                route=self._target.route.value,
+                model=self._target.model,
+                outcome=outcome,
+                latencyMs=_elapsed_milliseconds(started_at),
+            )
 
     async def stream(self, operation: TargetOperation) -> AsyncIterator[Any]:
         """Run and observe a streaming call without retrying or switching routes."""
