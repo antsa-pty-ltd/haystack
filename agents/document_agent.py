@@ -14,7 +14,7 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import Tool
 from haystack.utils import Secret
-from llm_routing import LlmRoute, LlmTarget, LlmWorkloadRouter
+from llm_routing import LlmRoute, LlmTarget, LlmWorkloadRouter, gateway_chat_compatibility
 from routed_generator import RoutedOpenAIChatGenerator
 from agents.exploration_tools import (
     peek_session,
@@ -284,7 +284,10 @@ class DocumentExplorationAgent:
                 api_key=Secret.from_token(target.gateway_api_key),
                 model=target.model,
                 api_base_url=target.gateway_base_url,
-                generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
+                generation_kwargs={
+                    "temperature": 0.3,
+                    **gateway_chat_compatibility(target),
+                }
             )
         if not self.openai_api_key:
             raise ValueError("Direct document-agent route requires OPENAI_API_KEY")

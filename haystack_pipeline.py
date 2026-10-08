@@ -24,6 +24,7 @@ from llm_routing import (
     TRANSCRIBER_WORKLOAD,
     WEB_ASSISTANT_WORKLOAD,
     router_registry,
+    gateway_chat_compatibility,
 )
 from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
 from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
@@ -152,7 +153,7 @@ class HaystackPipelineManager:
             api_base_url=target.gateway_base_url,
             api_key=Secret.from_token(target.gateway_api_key),
             tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs=generation_kwargs,
+            generation_kwargs={**generation_kwargs, **gateway_chat_compatibility(target)},
         )
 
     def _create_web_assistant_pipeline(self, persona_config: Optional[PersonaConfig] = None):

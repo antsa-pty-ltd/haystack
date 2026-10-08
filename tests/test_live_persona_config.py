@@ -124,4 +124,5 @@ def test_routed_persona_hot_reload_keeps_server_alias_and_updates_other_settings
     assert changed_generator.generation_kwargs == {
         "temperature": 0.6,
         "max_completion_tokens": 900,
+        "reasoning_effort": "none",
     }

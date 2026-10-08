@@ -15,7 +15,12 @@ from typing import List, Dict, Any, Optional
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
 from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
-from llm_routing import DOCUMENT_DRAFT_DIRECT_MODEL, DOCUMENT_DRAFT_WORKLOAD, router_registry
+from llm_routing import (
+    DOCUMENT_DRAFT_DIRECT_MODEL,
+    DOCUMENT_DRAFT_WORKLOAD,
+    gateway_chat_compatibility,
+    router_registry,
+)
 
 from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logging
 
@@ -346,6 +351,10 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         # Generate document using OpenAI
         try:
             draft_client, draft_model, draft_router = _draft_provider(openai_client)
+            compatibility = (
+                gateway_chat_compatibility(draft_router.target)
+                if draft_router else {}
+            )
             response = await _create_with_outcome(
                 draft_router,
                 lambda: draft_client.chat.completions.create(
@@ -353,6 +362,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                     messages=messages,
                     temperature=0.3,  # Lower temperature for consistent, deterministic outputs
                     seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
+                    **compatibility,
                 ),
             )
         except Exception as e:
@@ -423,6 +433,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                         )},
                     ],
                     temperature=0.3,
+                    **compatibility,
                     seed=42,
                 ),
             )

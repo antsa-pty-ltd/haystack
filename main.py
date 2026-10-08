@@ -85,6 +85,7 @@ from llm_routing import (
     CONVERSATION_SUMMARY_ROUTE_ENV,
     CONVERSATION_SUMMARY_OPENAI_ALIAS_ENV,
     CONVERSATION_SUMMARY_FOUNDRY_ALIAS_ENV,
+    gateway_chat_compatibility,
 )
 
 # Load environment variables
@@ -928,7 +929,8 @@ async def chat(
                 model=selected.model or runtime_config.model,
                 messages=messages,
                 temperature=runtime_config.temperature,
-                max_completion_tokens=runtime_config.max_completion_tokens
+                max_completion_tokens=runtime_config.max_completion_tokens,
+                **gateway_chat_compatibility(selected),
             )
 
         response = await chat_router.execute(call_chat_completions)
@@ -1135,7 +1137,8 @@ Respond with JSON only."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,  # Low temperature for consistent policy enforcement
-                max_completion_tokens=200
+                max_completion_tokens=200,
+                **gateway_chat_compatibility(selected),
             )
 
         response = await policy_router.execute(call_policy_completions)
@@ -1235,6 +1238,7 @@ async def previous_session_summary(
                 request,
                 selected.client,
                 model=selected.model,
+                generation_kwargs=gateway_chat_compatibility(selected),
             )
         )
     except ValueError as error:
@@ -1672,6 +1676,7 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
                 stream=True,
                 max_completion_tokens=runtime_config.max_completion_tokens,
                 temperature=runtime_config.temperature,
+                **gateway_chat_compatibility(selected),
             )
 
         full_content = ""

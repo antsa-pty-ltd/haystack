@@ -30,8 +30,8 @@ services:
   litellm:
     <<: *shared-netns
     build:
-      context: ${GATEWAY_SOURCE:?set GATEWAY_SOURCE}
-      dockerfile: azure/litellm/litellm/Dockerfile
+      context: ${GATEWAY_SOURCE:?set GATEWAY_SOURCE}/azure/litellm
+      dockerfile: litellm/Dockerfile
       labels:
         ai.antsa.source-sha: ${GATEWAY_SHA:?set GATEWAY_SHA}
     command: ["--config", "/app/config.yaml", "--host", "127.0.0.1", "--port", "4001"]

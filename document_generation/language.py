@@ -7,7 +7,12 @@ numerals, punctuation and symbols alone. Never delete or translate source data.
 import re
 import unicodedata
 
-from llm_routing import DOCUMENT_LANGUAGE_DIRECT_MODEL, DOCUMENT_LANGUAGE_WORKLOAD, router_registry
+from llm_routing import (
+    DOCUMENT_LANGUAGE_DIRECT_MODEL,
+    DOCUMENT_LANGUAGE_WORKLOAD,
+    gateway_chat_compatibility,
+    router_registry,
+)
 
 
 class DocumentLanguageError(ValueError):
@@ -114,6 +119,10 @@ async def check_document_language(content, source_text, instructions, messages, 
         return content
 
     repair_client, repair_model, repair_router = _language_provider(openai_client)
+    compatibility = (
+        gateway_chat_compatibility(repair_router.target)
+        if repair_router else {}
+    )
 
     async def call_repair_completions(selected):
         return await repair_client.chat.completions.create(
@@ -130,6 +139,7 @@ async def check_document_language(content, source_text, instructions, messages, 
                 )},
             ],
             temperature=0.3, seed=42,
+            **compatibility,
         )
 
     try:
