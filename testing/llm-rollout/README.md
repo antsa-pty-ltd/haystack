@@ -20,6 +20,10 @@ the production URL validation is unchanged.
 The stack performs real OpenAI inference only when `probe.sh` is run. Building,
 starting and fixture tests do not call external models.
 
+The default OpenAI provider matrix mirrors the final gateway targets: GPT-5.4 mini
+for summaries, document language, policy and draft workloads; GPT-5.4 for the
+document agent, chat and persona workloads. Alias names remain stable.
+
 ## Run
 
 ```bash
@@ -47,7 +51,10 @@ session summary call through Haystack, edge, LiteLLM and OpenAI.
 The fixture accepts only `synthetic-profile` / `synthetic-scoped-token` for
 exploration endpoints and `HAYSTACK_WEBHOOK_SECRET` for persona configs and
 callbacks. Its two transcript segments are hardcoded synthetic statements.
-It has no database, cloud access or real client records.
+It has no database, cloud access or real client records. The synthetic web
+persona includes the built-in `get_client_summary` tool so its emitted JSON
+schema contains the nested `client_id` property exercised by the request edge.
+No tool call uses a real identifier.
 
 Run fixture contract tests without Docker:
 
