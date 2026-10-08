@@ -7,6 +7,8 @@ numerals, punctuation and symbols alone. Never delete or translate source data.
 import re
 import unicodedata
 
+from llm_routing import DOCUMENT_LANGUAGE_DIRECT_MODEL, DOCUMENT_LANGUAGE_WORKLOAD, router_registry
+
 
 class DocumentLanguageError(ValueError):
     """A language check failed; this result must not be saved as a document."""
@@ -90,6 +92,18 @@ def predominantly_devanagari(text):
     return bool(letters) and sum(bool(_DEVANAGARI.fullmatch(character)) for character in letters) > len(letters) / 2
 
 
+def _language_provider(openai_client):
+    """Prefer the startup-resolved document_language target; without it (unit
+    tests injecting a client) keep the caller-supplied client and model."""
+    try:
+        router = router_registry.get(DOCUMENT_LANGUAGE_WORKLOAD)
+    except RuntimeError:
+        return openai_client, DOCUMENT_LANGUAGE_DIRECT_MODEL, None
+    if router.target.client is None:
+        return openai_client, DOCUMENT_LANGUAGE_DIRECT_MODEL, None
+    return router.target.client, router.target.model, router
+
+
 async def check_document_language(content, source_text, instructions, messages, openai_client, original_document=None):
     """Repair once, then fail closed. Never log source text or provider details."""
     requested = output_language_directive(instructions)
@@ -99,9 +113,11 @@ async def check_document_language(content, source_text, instructions, messages, 
     if not devanagari_words(content) - allowed_words:
         return content
 
-    try:
-        response = await openai_client.chat.completions.create(
-            model='gpt-5.4-mini',
+    repair_client, repair_model, repair_router = _language_provider(openai_client)
+
+    async def call_repair_completions(selected):
+        return await repair_client.chat.completions.create(
+            model=repair_model,
             messages=messages + [
                 {'role': 'assistant', 'content': content},
                 {'role': 'user', 'content': (
@@ -115,6 +131,14 @@ async def check_document_language(content, source_text, instructions, messages, 
             ],
             temperature=0.3, seed=42,
         )
+
+    try:
+        # Registry-resolved calls emit router outcome telemetry; injected-client
+        # fallback (unit tests) does not.
+        if repair_router is None:
+            response = await call_repair_completions(None)
+        else:
+            response = await repair_router.execute(call_repair_completions)
         repaired = response.choices[0].message.content
     except Exception as error:
         raise DocumentLanguageError(LANGUAGE_ERROR) from error

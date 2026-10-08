@@ -14,6 +14,7 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import Tool
 from haystack.utils import Secret
+from llm_routing import LlmRoute, LlmTarget
 from agents.exploration_tools import (
     peek_session,
     search_session,
@@ -117,16 +118,20 @@ class DocumentExplorationAgent:
     Autonomous agent for exploring therapy sessions and generating clinical documents.
     """
     
-    def __init__(self, openai_api_key: str, model: str = "gpt-5.2"):
+    def __init__(self, openai_api_key: str, model: str = "gpt-5.2", llm_target: Optional[LlmTarget] = None):
         """
         Initialize the document exploration agent.
 
         Args:
             openai_api_key: OpenAI API key
             model: Model to use (default: gpt-5.2)
+            llm_target: Optional server-controlled LLM route target. When set
+                with a routed (gateway) target, the agent talks to the gateway
+                using target.model; direct targets keep the passed model.
         """
         self.openai_api_key = openai_api_key
         self.model = model
+        self.llm_target = llm_target
         
         # Create sync wrappers for async tools (Haystack Agent requires sync functions)
         def sync_peek_session(session_id: str, num_segments: int = 100) -> str:
@@ -252,17 +257,34 @@ class DocumentExplorationAgent:
         return tools
 
     def _create_agent(self, tools: Optional[List[Tool]] = None) -> Agent:
+        chat_generator = self._create_chat_generator()
         return Agent(
-            chat_generator=OpenAIChatGenerator(
-                api_key=Secret.from_token(self.openai_api_key),
-                model=self.model,
-                generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
-            ),
+            chat_generator=chat_generator,
             tools=tools or self.tools,
             system_prompt=AGENT_SYSTEM_PROMPT,
             exit_conditions=["generate_document"],  # Agent stops when it calls generate_document
             max_agent_steps=50,  # Safety limit
             raise_on_tool_invocation_failure=False  # Continue on tool errors
+        )
+
+    def _create_chat_generator(self) -> OpenAIChatGenerator:
+        target = self.llm_target
+        if target is not None and target.route is not LlmRoute.DIRECT_OPENAI:
+            if not target.gateway_base_url or not target.gateway_api_key:
+                raise ValueError(
+                    f"Route {target.route.value} is configured for workload "
+                    f"'{target.workload}' but gateway connection details are missing"
+                )
+            return OpenAIChatGenerator(
+                api_key=Secret.from_token(target.gateway_api_key),
+                model=target.model,
+                api_base_url=target.gateway_base_url,
+                generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
+            )
+        return OpenAIChatGenerator(
+            api_key=Secret.from_token(self.openai_api_key),
+            model=self.model,
+            generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
         )
     
     async def explore_and_decide(
@@ -446,10 +468,14 @@ Start exploring!"""
 _document_agent: Optional[DocumentExplorationAgent] = None
 
 
-def initialize_agent(openai_api_key: str, model: str = "gpt-5.2"):
+def initialize_agent(
+    openai_api_key: str,
+    model: str = "gpt-5.2",
+    llm_target: Optional[LlmTarget] = None,
+):
     """Initialize the global document agent instance."""
     global _document_agent
-    _document_agent = DocumentExplorationAgent(openai_api_key, model)
+    _document_agent = DocumentExplorationAgent(openai_api_key, model, llm_target=llm_target)
     logger.info("✅ Global DocumentExplorationAgent initialized")
 
 
