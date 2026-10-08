@@ -102,6 +102,7 @@ jobs:
           # files (conftest.py, test_integration.py) are inert in wwwroot.
           cp *.py requirements.txt startup.sh deploy/
           cp -r components agents document_generation utils deploy/
+          printf '{"gitSha":"%s"}\n' '${{ github.sha }}' > deploy/release.json
 
           # Verify main.py + every root module it transitively imports made it in.
           test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
@@ -155,6 +156,8 @@ jobs:
             --name "$APP_NAME"
 
       - name: Require bounded deployed readiness
+        env:
+          EXPECTED_RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           health_url="https://${APP_NAME}.azurewebsites.net/health"
@@ -166,7 +169,7 @@ jobs:
             body="$(curl --fail --silent --show-error --max-time 10 "$health_url")" || body=""
 
             if [ -n "$body" ] && \
-               printf '%s' "$body" | python -c 'import json,sys; body=json.load(sys.stdin); sys.exit(0 if body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" else 1)'; then
+               printf '%s' "$body" | python -c 'import json,os,sys; body=json.load(sys.stdin); expected=os.environ["EXPECTED_RELEASE_SHA"].lower(); healthy=body.get("status") == "healthy" and body.get("pipeline") == "ready" and body.get("redis") == "ready" and body.get("llmRoutes") == "ready" and body.get("documentAgent") == "ready" and body.get("releaseSha") == expected; sys.exit(0 if healthy else 1)'; then
               consecutive_successes=$((consecutive_successes + 1))
               if [ "$consecutive_successes" -ge 3 ]; then
                 ready=true

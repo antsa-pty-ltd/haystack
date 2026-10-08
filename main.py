@@ -31,6 +31,7 @@ from document_generation.generator import generate_document_from_context
 from utils.session_utils import fetch_session_metadata, estimate_tokens_from_segments
 from config import settings
 from service_auth import is_valid_service_secret
+from release_identity import release_sha
 from previous_session_summary import (
     PreviousSessionSummaryRequest,
     PreviousSessionSummaryResponse,
@@ -84,6 +85,7 @@ from llm_routing import (
     CONVERSATION_SUMMARY_ROUTE_ENV,
     CONVERSATION_SUMMARY_OPENAI_ALIAS_ENV,
     CONVERSATION_SUMMARY_FOUNDRY_ALIAS_ENV,
+    gateway_chat_compatibility,
 )
 
 # Load environment variables
@@ -109,6 +111,7 @@ openai_client = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
 # Every other routed workload resolves below (routes default to direct OpenAI
 # when unset, so a missing route env never changes call behaviour).
 previous_session_summary_router = PreviousSessionSummaryRouter(openai_client)
+router_registry.register(previous_session_summary_router)
 
 for workload, direct_model, route_env, openai_alias_env, foundry_alias_env in (
     (
@@ -339,16 +342,19 @@ async def on_startup():
             raise
     
     # Initialize document exploration agent
-    if openai_api_key:
-        try:
-            initialize_agent(
-                openai_api_key,
-                model="gpt-5.2",
-                llm_target=router_registry.get(DOCUMENT_AGENT_WORKLOAD).target,
-            )
-            logger.info("✅ Document Exploration Agent initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Document Agent: {e}")
+    try:
+        document_agent_router = router_registry.get(DOCUMENT_AGENT_WORKLOAD)
+        if not document_agent_router.is_available:
+            raise RuntimeError("selected document-agent route is unavailable")
+        initialize_agent(
+            openai_api_key,
+            model="gpt-5.2",
+            llm_target=document_agent_router.target,
+            llm_router=document_agent_router,
+        )
+        logger.info("✅ Document Exploration Agent initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Document Agent: {e}")
     try:
         await pipeline_manager.initialize()
     except Exception as e:
@@ -713,6 +719,7 @@ async def root():
         "service": "Haystack AU Service", 
         "status": "running",
         "version": "3.0.0",
+        "releaseSha": release_sha(),
         "streaming": "openai",
         "tools_available": bool(tool_manager),
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -729,12 +736,23 @@ async def health_check():
     except Exception:
         redis_healthy = False
 
-    ready = bool(openai_client and tool_manager and pipeline_manager._initialized and redis_healthy)
+    unavailable_routes = router_registry.unavailable_workloads()
+    document_agent_ready = get_document_agent() is not None
+    ready = bool(
+        not unavailable_routes
+        and document_agent_ready
+        and tool_manager
+        and pipeline_manager._initialized
+        and redis_healthy
+    )
     payload = {
         "status": "healthy" if ready else "degraded",
         "service": "haystack-au-service",
         "version": "3.0.0",
+        "releaseSha": release_sha(),
         "openai": "enabled" if openai_api_key else "disabled",
+        "llmRoutes": "ready" if not unavailable_routes else "unavailable",
+        "documentAgent": "ready" if document_agent_ready else "unavailable",
         "streaming": "active",
         "tools": "available" if tool_manager else "unavailable",
         "pipeline": "ready" if pipeline_manager._initialized else "unavailable",
@@ -911,7 +929,8 @@ async def chat(
                 model=selected.model or runtime_config.model,
                 messages=messages,
                 temperature=runtime_config.temperature,
-                max_completion_tokens=runtime_config.max_completion_tokens
+                max_completion_tokens=runtime_config.max_completion_tokens,
+                **gateway_chat_compatibility(selected),
             )
 
         response = await chat_router.execute(call_chat_completions)
@@ -1118,7 +1137,8 @@ Respond with JSON only."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,  # Low temperature for consistent policy enforcement
-                max_completion_tokens=200
+                max_completion_tokens=200,
+                **gateway_chat_compatibility(selected),
             )
 
         response = await policy_router.execute(call_policy_completions)
@@ -1169,13 +1189,31 @@ async def generate_document_from_template(
     those agents - it's only used for document generation.
     """
     from document_generation.agentic_endpoint import generate_document_from_template_agentic
-    
+
+    required_workloads = (
+        DOCUMENT_AGENT_WORKLOAD,
+        DOCUMENT_DRAFT_WORKLOAD,
+        DOCUMENT_LANGUAGE_WORKLOAD,
+    )
+    try:
+        document_models_available = all(
+            router_registry.get(workload).is_available
+            for workload in required_workloads
+        )
+    except RuntimeError:
+        document_models_available = False
+    if not document_models_available or get_document_agent() is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Document generation models not configured",
+        )
+
     return await generate_document_from_template_agentic(
         request=request,
         http_request=http_request,
         authorization=authorization,
         profileid=profileid,
-        openai_client=openai_client,
+        openai_client=router_registry.get(DOCUMENT_DRAFT_WORKLOAD).target.client,
         emit_progress_func=emit_progress,
         detect_policy_violation_func=detect_policy_violation,
         log_violation_func=log_violation_to_api
@@ -1200,6 +1238,7 @@ async def previous_session_summary(
                 request,
                 selected.client,
                 model=selected.model,
+                generation_kwargs=gateway_chat_compatibility(selected),
             )
         )
     except ValueError as error:
@@ -1626,18 +1665,23 @@ async def handle_openai_chat(websocket: WebSocket, session_id: str, message: str
             {"role": "user", "content": message}
         ]
         
-        # OpenAI streaming
-        response = await openai_client.chat.completions.create(
-            model=runtime_config.model,
-            messages=messages,
-            stream=True,
-            max_completion_tokens=runtime_config.max_completion_tokens,
-            temperature=runtime_config.temperature
-        )
-        
+        chat_router = router_registry.get(CHAT_WORKLOAD)
+        if not chat_router.is_available:
+            raise RuntimeError("Chat model client not configured")
+
+        async def start_stream(selected):
+            return await selected.client.chat.completions.create(
+                model=selected.model or runtime_config.model,
+                messages=messages,
+                stream=True,
+                max_completion_tokens=runtime_config.max_completion_tokens,
+                temperature=runtime_config.temperature,
+                **gateway_chat_compatibility(selected),
+            )
+
         full_content = ""
         
-        async for chunk in response:
+        async for chunk in chat_router.stream(start_stream):
             if hasattr(chunk, 'choices') and chunk.choices:
                 delta = chunk.choices[0].delta
                 if hasattr(delta, 'content') and delta.content:

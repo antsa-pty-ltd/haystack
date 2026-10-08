@@ -57,7 +57,7 @@ async def generate_document_from_template_agentic(
         logger.info(f"🎨 [AGENTIC] Generating document from template: {request.template.get('name', 'Unknown')}")
         
         if not openai_client:
-            raise HTTPException(status_code=500, detail="OpenAI client not configured")
+            raise HTTPException(status_code=503, detail="Document model client not configured")
         
         # Extract data from request
         template = request.template

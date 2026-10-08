@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 from urllib.parse import urlsplit
 
 from openai import AsyncOpenAI
@@ -94,6 +95,22 @@ CHAT_ROUTE_ENV = "HAYSTACK_LLM_ROUTE_CHAT"
 CHAT_OPENAI_ALIAS_ENV = "HAYSTACK_LITELLM_MODEL_CHAT_OPENAI"
 CHAT_FOUNDRY_ALIAS_ENV = "HAYSTACK_LITELLM_MODEL_CHAT_FOUNDRY"
 
+ALL_LLM_WORKLOADS = frozenset(
+    {
+        PREVIOUS_SESSION_SUMMARY_WORKLOAD,
+        CONVERSATION_SUMMARY_WORKLOAD,
+        DOCUMENT_LANGUAGE_WORKLOAD,
+        DOCUMENT_POLICY_WORKLOAD,
+        DOCUMENT_DRAFT_WORKLOAD,
+        DOCUMENT_AGENT_WORKLOAD,
+        CHAT_WORKLOAD,
+        WEB_ASSISTANT_WORKLOAD,
+        THERAPIST_WORKLOAD,
+        COMPANION_WORKLOAD,
+        TRANSCRIBER_WORKLOAD,
+    }
+)
+
 
 class LlmRoute(str, Enum):
     DIRECT_OPENAI = "direct_openai"
@@ -124,6 +141,7 @@ class LlmTarget:
 
 GatewayClientFactory = Callable[..., Any]
 TargetOperation = Callable[[LlmTarget], Awaitable[Any]]
+SyncTargetOperation = Callable[[LlmTarget], Any]
 
 
 class LlmWorkloadRouter:
@@ -166,26 +184,70 @@ class LlmWorkloadRouter:
     async def execute(self, operation: TargetOperation) -> Any:
         """Run one selected call and emit payload-free outcome telemetry."""
         started_at = time.perf_counter()
+        outcome = "aborted"
         try:
             result = await operation(self._target)
+            outcome = "success"
+            return result
+        except asyncio.CancelledError:
+            raise
         except Exception:
+            outcome = "error"
+            raise
+        finally:
             self._emit_safe_event(
                 "llm_workload_call_completed",
                 route=self._target.route.value,
                 model=self._target.model,
-                outcome="error",
+                outcome=outcome,
                 latencyMs=_elapsed_milliseconds(started_at),
             )
-            raise
 
-        self._emit_safe_event(
-            "llm_workload_call_completed",
-            route=self._target.route.value,
-            model=self._target.model,
-            outcome="success",
-            latencyMs=_elapsed_milliseconds(started_at),
-        )
-        return result
+    def execute_sync(self, operation: SyncTargetOperation) -> Any:
+        """Run one synchronous selected call with the same safe telemetry."""
+        started_at = time.perf_counter()
+        outcome = "aborted"
+        try:
+            result = operation(self._target)
+            outcome = "success"
+            return result
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            self._emit_safe_event(
+                "llm_workload_call_completed",
+                route=self._target.route.value,
+                model=self._target.model,
+                outcome=outcome,
+                latencyMs=_elapsed_milliseconds(started_at),
+            )
+
+    async def stream(self, operation: TargetOperation) -> AsyncIterator[Any]:
+        """Run and observe a streaming call without retrying or switching routes."""
+        started_at = time.perf_counter()
+        outcome = "aborted"
+        try:
+            response = await operation(self._target)
+            async for item in response:
+                yield item
+            outcome = "success"
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            self._emit_safe_event(
+                "llm_workload_call_completed",
+                route=self._target.route.value,
+                model=self._target.model,
+                outcome=outcome,
+                latencyMs=_elapsed_milliseconds(started_at),
+            )
+
+    @property
+    def is_available(self) -> bool:
+        """Whether the selected route has a usable client in this process."""
+        return self._target.client is not None
 
     def _resolve_target(
         self,
@@ -318,8 +380,28 @@ class LlmRouterRegistry:
         """Drop every registered router (test isolation only)."""
         self._routers.clear()
 
+    def unavailable_workloads(self) -> list[str]:
+        """Return missing or unusable production workloads, without secrets."""
+        missing = ALL_LLM_WORKLOADS.difference(self._routers)
+        unavailable = {
+            workload
+            for workload, router in self._routers.items()
+            if workload in ALL_LLM_WORKLOADS and not router.is_available
+        }
+        return sorted(missing | unavailable)
+
+    def workloads(self) -> tuple[str, ...]:
+        return tuple(sorted(self._routers))
+
 
 router_registry = LlmRouterRegistry()
+
+
+def gateway_chat_compatibility(target: LlmTarget) -> dict[str, str]:
+    """Chat Completions parameters required by server-selected gateway models."""
+    if target.route is LlmRoute.LITELLM_OPENAI:
+        return {"reasoning_effort": "none"}
+    return {}
 
 
 def _validate_gateway_base_url(value: str) -> str:
