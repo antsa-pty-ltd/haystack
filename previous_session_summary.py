@@ -69,6 +69,7 @@ async def generate_previous_session_summary(
     openai_client,
     *,
     model: str = "gpt-5.4-mini",
+    generation_kwargs: Optional[dict] = None,
 ) -> PreviousSessionSummaryResponse:
     """Generate the strict continuity-of-care payload consumed by the API."""
     transcript = request.transcript.strip()
@@ -98,6 +99,7 @@ Return only the requested JSON object."""
                 ),
             },
         ],
+        **(generation_kwargs or {}),
         response_format={"type": "json_schema", "json_schema": SUMMARY_JSON_SCHEMA},
         temperature=0.1,
     )

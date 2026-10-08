@@ -24,6 +24,7 @@ from llm_routing import (
     TRANSCRIBER_WORKLOAD,
     WEB_ASSISTANT_WORKLOAD,
     router_registry,
+    gateway_chat_compatibility,
 )
 from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
 from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
@@ -31,6 +32,7 @@ from persona_config_provider import persona_config_provider
 from session_manager import session_manager
 from tools import tool_manager
 from components.ui_actions import UIActionCollector, MessageCollector
+from routed_generator import RoutedOpenAIChatGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -145,12 +147,13 @@ class HaystackPipelineManager:
                 f"Route {target.route.value} is configured for workload "
                 f"'{workload}' but gateway connection details are missing"
             )
-        return OpenAIChatGenerator(
+        return RoutedOpenAIChatGenerator(
+            llm_router=router_registry.get(workload),
             model=target.model or persona_config.model,
             api_base_url=target.gateway_base_url,
             api_key=Secret.from_token(target.gateway_api_key),
             tools=tools,  # Pass tools to the generator so it knows what's available
-            generation_kwargs=generation_kwargs,
+            generation_kwargs={**generation_kwargs, **gateway_chat_compatibility(target)},
         )
 
     def _create_web_assistant_pipeline(self, persona_config: Optional[PersonaConfig] = None):
@@ -196,15 +199,17 @@ class HaystackPipelineManager:
             self._create_persona_generator(WEB_ASSISTANT_WORKLOAD, persona_config, tools),
         )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
-        pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
-        pipeline.add_component("ui_collector", UIActionCollector())
+        if tools:
+            pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
+            pipeline.add_component("ui_collector", UIActionCollector())
         
         # Connect components - Haystack automatically loops
         pipeline.connect("generator.replies", "router")
-        pipeline.connect("router.has_tool_calls", "tool_invoker")
-        pipeline.connect("tool_invoker.tool_messages", "ui_collector")
-        pipeline.connect("ui_collector.messages", "message_collector")
-        pipeline.connect("message_collector", "generator.messages")
+        if tools:
+            pipeline.connect("router.has_tool_calls", "tool_invoker")
+            pipeline.connect("tool_invoker.tool_messages", "ui_collector")
+            pipeline.connect("ui_collector.messages", "message_collector")
+            pipeline.connect("message_collector", "generator.messages")
         
         self.pipelines[PersonaType.WEB_ASSISTANT] = pipeline
         self._pipeline_signatures[PersonaType.WEB_ASSISTANT] = self._config_signature(persona_config)
@@ -247,13 +252,15 @@ class HaystackPipelineManager:
             self._create_persona_generator(THERAPIST_WORKLOAD, persona_config, tools),
         )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
-        pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
+        if tools:
+            pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
         
         # Connections - simpler than web_assistant (no UI collector)
         pipeline.connect("generator.replies", "router")
-        pipeline.connect("router.has_tool_calls", "tool_invoker")
-        pipeline.connect("tool_invoker.tool_messages", "message_collector")
-        pipeline.connect("message_collector", "generator.messages")
+        if tools:
+            pipeline.connect("router.has_tool_calls", "tool_invoker")
+            pipeline.connect("tool_invoker.tool_messages", "message_collector")
+            pipeline.connect("message_collector", "generator.messages")
         
         self.pipelines[PersonaType.ANTSABOT_THERAPIST] = pipeline
         # Backward compatibility: jaimee_therapist resolves to the same pipeline
@@ -299,13 +306,15 @@ class HaystackPipelineManager:
             self._create_persona_generator(COMPANION_WORKLOAD, persona_config, tools),
         )
         pipeline.add_component("router", ConditionalRouter(routes, unsafe=True))
-        pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
+        if tools:
+            pipeline.add_component("tool_invoker", ToolInvoker(tools=tools, raise_on_failure=False))
 
         # Connections - simpler than web_assistant (no UI collector)
         pipeline.connect("generator.replies", "router")
-        pipeline.connect("router.has_tool_calls", "tool_invoker")
-        pipeline.connect("tool_invoker.tool_messages", "message_collector")
-        pipeline.connect("message_collector", "generator.messages")
+        if tools:
+            pipeline.connect("router.has_tool_calls", "tool_invoker")
+            pipeline.connect("tool_invoker.tool_messages", "message_collector")
+            pipeline.connect("message_collector", "generator.messages")
 
         self.pipelines[PersonaType.ANTSABOT_COMPANION] = pipeline
         self._pipeline_signatures[PersonaType.ANTSABOT_COMPANION] = self._config_signature(persona_config)
@@ -705,7 +714,11 @@ class HaystackPipelineManager:
             current_messages = haystack_messages.copy()
             generator = pipeline.get_component("generator")
             router = pipeline.get_component("router")
-            tool_invoker = pipeline.get_component("tool_invoker")
+            tool_invoker = (
+                pipeline.get_component("tool_invoker")
+                if "tool_invoker" in pipeline.graph.nodes
+                else None
+            )
             ui_collector = pipeline.get_component("ui_collector") if "ui_collector" in pipeline.graph.nodes else None
             
             # The trusted mobile bridge has a 15-second HTTP compatibility
@@ -774,6 +787,10 @@ class HaystackPipelineManager:
                 
                 # Check if we have tool calls
                 if "has_tool_calls" in router_result:
+                    if tool_invoker is None:
+                        raise RuntimeError(
+                            f"Persona {persona_type.value} requested a tool but its published configuration has no tools"
+                        )
                     # Extract tool call info for progress reporting
                     tool_calls = replies[0].tool_calls if replies else []
                     tool_info = []

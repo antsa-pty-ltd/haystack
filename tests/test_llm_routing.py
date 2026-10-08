@@ -585,6 +585,38 @@ def test_registry_module_level_instance_is_available():
     assert isinstance(router_registry, LlmRouterRegistry)
 
 
+def test_gateway_compatibility_is_explicit_without_changing_direct_calls():
+    from dataclasses import replace
+    from llm_routing import gateway_chat_compatibility
+
+    direct = _make_general_router(
+        CHAT_WORKLOAD,
+        CHAT_ROUTE_ENV,
+        CHAT_OPENAI_ALIAS_ENV,
+        "HAYSTACK_LITELLM_MODEL_CHAT_FOUNDRY",
+        direct_client=object(),
+        environ={},
+    )
+    gateway = _make_general_router(
+        CHAT_WORKLOAD,
+        CHAT_ROUTE_ENV,
+        CHAT_OPENAI_ALIAS_ENV,
+        "HAYSTACK_LITELLM_MODEL_CHAT_FOUNDRY",
+        direct_client=None,
+        environ={
+            CHAT_ROUTE_ENV: "litellm_openai",
+            CHAT_OPENAI_ALIAS_ENV: "antsa-haystack-chat-openai",
+            GATEWAY_BASE_URL_ENV: "https://gateway.example/v1",
+            HAYSTACK_GATEWAY_API_KEY_ENV: "scoped-key",
+        },
+        gateway_client_factory=Mock(return_value=object()),
+    )
+
+    assert gateway_chat_compatibility(direct.target) == {}
+    assert gateway_chat_compatibility(gateway.target) == {"reasoning_effort": "none"}
+    assert gateway_chat_compatibility(replace(gateway.target, route=LlmRoute.LITELLM_FOUNDRY)) == {}
+
+
 def test_general_router_telemetry_never_contains_gateway_secrets_or_payloads():
     logger = Mock()
     gateway_factory = Mock(return_value=object())

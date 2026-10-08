@@ -10,7 +10,12 @@ import uuid
 from contextvars import ContextVar, copy_context
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timedelta, timezone
-from llm_routing import CONVERSATION_SUMMARY_WORKLOAD, router_registry
+from llm_routing import (
+    CONVERSATION_SUMMARY_WORKLOAD,
+    LlmRoute,
+    gateway_chat_compatibility,
+    router_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5257,11 +5262,17 @@ Please analyze these conversations and provide a comprehensive summary following
             }
 
         async def call_conversation_summary(selected):
+            token_limit = (
+                {"max_tokens": 3000}
+                if selected.route is LlmRoute.DIRECT_OPENAI
+                else {"max_completion_tokens": 3000}
+            )
             return await client.chat.completions.create(
                 model=target.model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=3000
+                **token_limit,
+                **gateway_chat_compatibility(selected),
             )
 
         response = await router.execute(call_conversation_summary)

@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+ARG RELEASE_SHA=""
+ENV RELEASE_SHA=${RELEASE_SHA}
+
 WORKDIR /app
 
 # Install system dependencies
