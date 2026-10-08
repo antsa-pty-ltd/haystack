@@ -31,6 +31,7 @@ from persona_config_provider import persona_config_provider
 from session_manager import session_manager
 from tools import tool_manager
 from components.ui_actions import UIActionCollector, MessageCollector
+from routed_generator import RoutedOpenAIChatGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,8 @@ class HaystackPipelineManager:
                 f"Route {target.route.value} is configured for workload "
                 f"'{workload}' but gateway connection details are missing"
             )
-        return OpenAIChatGenerator(
+        return RoutedOpenAIChatGenerator(
+            llm_router=router_registry.get(workload),
             model=target.model or persona_config.model,
             api_base_url=target.gateway_base_url,
             api_key=Secret.from_token(target.gateway_api_key),

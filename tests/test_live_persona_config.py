@@ -13,6 +13,14 @@ if not os.environ.get("OPENAI_API_KEY"):
 from haystack_pipeline import HaystackPipelineManager  # noqa: E402
 from persona_config_provider import PersonaConfigProvider, PublishedPersonaConfig  # noqa: E402
 from personas import PersonaType, persona_manager  # noqa: E402
+from llm_routing import (  # noqa: E402
+    LlmWorkloadRouter,
+    THERAPIST_FOUNDRY_ALIAS_ENV,
+    THERAPIST_OPENAI_ALIAS_ENV,
+    THERAPIST_ROUTE_ENV,
+    THERAPIST_WORKLOAD,
+    router_registry,
+)
 
 
 def _published(**overrides) -> PublishedPersonaConfig:
@@ -72,3 +80,48 @@ def test_published_config_cannot_expand_a_client_persona_tool_scope():
             PersonaType.ANTSABOT_THERAPIST,
             _published(toolNames=["search_clients"]),
         )
+
+
+def test_routed_persona_hot_reload_keeps_server_alias_and_updates_other_settings():
+    alias = "antsa-haystack-therapist-openai"
+    router_registry.register(
+        LlmWorkloadRouter(
+            workload=THERAPIST_WORKLOAD,
+            route_env=THERAPIST_ROUTE_ENV,
+            openai_alias_env=THERAPIST_OPENAI_ALIAS_ENV,
+            foundry_alias_env=THERAPIST_FOUNDRY_ALIAS_ENV,
+            environ={
+                THERAPIST_ROUTE_ENV: "litellm_openai",
+                THERAPIST_OPENAI_ALIAS_ENV: alias,
+                "LLM_GATEWAY_BASE_URL": "https://gateway.example/v1",
+                "HAYSTACK_LLM_GATEWAY_API_KEY": "scoped-test-key",
+            },
+        )
+    )
+    provider = PersonaConfigProvider()
+    manager = HaystackPipelineManager()
+    first = provider._build_config(
+        PersonaType.ANTSABOT_THERAPIST,
+        _published(model="gpt-5.2", temperature=0.2, maxCompletionTokens=500),
+    )
+    changed = provider._build_config(
+        PersonaType.ANTSABOT_THERAPIST,
+        _published(
+            version=8,
+            model="gpt-5.4-mini",
+            temperature=0.6,
+            maxCompletionTokens=900,
+        ),
+    )
+
+    manager._create_antsabot_therapist_pipeline(first)
+    first_generator = manager.pipelines[PersonaType.ANTSABOT_THERAPIST].get_component("generator")
+    manager._create_antsabot_therapist_pipeline(changed)
+    changed_generator = manager.pipelines[PersonaType.ANTSABOT_THERAPIST].get_component("generator")
+
+    assert first_generator.model == alias
+    assert changed_generator.model == alias
+    assert changed_generator.generation_kwargs == {
+        "temperature": 0.6,
+        "max_completion_tokens": 900,
+    }

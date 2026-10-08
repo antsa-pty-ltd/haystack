@@ -14,7 +14,8 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import Tool
 from haystack.utils import Secret
-from llm_routing import LlmRoute, LlmTarget
+from llm_routing import LlmRoute, LlmTarget, LlmWorkloadRouter
+from routed_generator import RoutedOpenAIChatGenerator
 from agents.exploration_tools import (
     peek_session,
     search_session,
@@ -118,7 +119,7 @@ class DocumentExplorationAgent:
     Autonomous agent for exploring therapy sessions and generating clinical documents.
     """
     
-    def __init__(self, openai_api_key: str, model: str = "gpt-5.2", llm_target: Optional[LlmTarget] = None):
+    def __init__(self, openai_api_key: Optional[str], model: str = "gpt-5.2", llm_target: Optional[LlmTarget] = None, llm_router: Optional[LlmWorkloadRouter] = None):
         """
         Initialize the document exploration agent.
 
@@ -132,6 +133,7 @@ class DocumentExplorationAgent:
         self.openai_api_key = openai_api_key
         self.model = model
         self.llm_target = llm_target
+        self.llm_router = llm_router
         
         # Create sync wrappers for async tools (Haystack Agent requires sync functions)
         def sync_peek_session(session_id: str, num_segments: int = 100) -> str:
@@ -275,12 +277,17 @@ class DocumentExplorationAgent:
                     f"Route {target.route.value} is configured for workload "
                     f"'{target.workload}' but gateway connection details are missing"
                 )
-            return OpenAIChatGenerator(
+            generator_type = RoutedOpenAIChatGenerator if self.llm_router else OpenAIChatGenerator
+            kwargs = {"llm_router": self.llm_router} if self.llm_router else {}
+            return generator_type(
+                **kwargs,
                 api_key=Secret.from_token(target.gateway_api_key),
                 model=target.model,
                 api_base_url=target.gateway_base_url,
                 generation_kwargs={"temperature": 0.3}  # Lower temp for more consistent reasoning
             )
+        if not self.openai_api_key:
+            raise ValueError("Direct document-agent route requires OPENAI_API_KEY")
         return OpenAIChatGenerator(
             api_key=Secret.from_token(self.openai_api_key),
             model=self.model,
@@ -469,13 +476,16 @@ _document_agent: Optional[DocumentExplorationAgent] = None
 
 
 def initialize_agent(
-    openai_api_key: str,
+    openai_api_key: Optional[str],
     model: str = "gpt-5.2",
     llm_target: Optional[LlmTarget] = None,
+    llm_router: Optional[LlmWorkloadRouter] = None,
 ):
     """Initialize the global document agent instance."""
     global _document_agent
-    _document_agent = DocumentExplorationAgent(openai_api_key, model, llm_target=llm_target)
+    _document_agent = DocumentExplorationAgent(
+        openai_api_key, model, llm_target=llm_target, llm_router=llm_router
+    )
     logger.info("✅ Global DocumentExplorationAgent initialized")
 
 

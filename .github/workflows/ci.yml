@@ -102,6 +102,7 @@ jobs:
           # files (conftest.py, test_integration.py) are inert in wwwroot.
           cp *.py requirements.txt startup.sh deploy/
           cp -r components agents document_generation utils deploy/
+          printf '{"gitSha":"%s"}\n' '${{ github.sha }}' > deploy/release.json
 
           # Verify main.py + every root module it transitively imports made it in.
           test -f deploy/main.py || { echo "ERROR: main.py not found!"; exit 1; }
