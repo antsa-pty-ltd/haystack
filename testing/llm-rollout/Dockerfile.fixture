@@ -1,0 +1,6 @@
+FROM python:3.11-alpine
+WORKDIR /fixture
+COPY fixture_api.py /fixture/fixture_api.py
+USER nobody
+CMD ["python", "/fixture/fixture_api.py"]
+

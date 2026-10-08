@@ -1,0 +1,75 @@
+name: antsa-llm-rollout
+
+x-shared-netns: &shared-netns
+  network_mode: service:netns
+  restart: "no"
+
+services:
+  netns:
+    image: alpine:3.21
+    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done"]
+    ports:
+      - "127.0.0.1:18001:8001"
+      - "127.0.0.1:14000:4000"
+      - "127.0.0.1:18080:8080"
+
+  redis:
+    <<: *shared-netns
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--bind", "127.0.0.1"]
+    depends_on: [netns]
+
+  api-fixture:
+    <<: *shared-netns
+    build:
+      context: .
+      dockerfile: Dockerfile.fixture
+    env_file: [defaults.env, credentials.env]
+    depends_on: [netns]
+
+  litellm:
+    <<: *shared-netns
+    build:
+      context: ${GATEWAY_SOURCE:?set GATEWAY_SOURCE}
+      dockerfile: azure/litellm/litellm/Dockerfile
+      labels:
+        ai.antsa.source-sha: ${GATEWAY_SHA:?set GATEWAY_SHA}
+    command: ["--config", "/app/config.yaml", "--host", "127.0.0.1", "--port", "4001"]
+    env_file: [defaults.env, credentials.env]
+    depends_on: [netns]
+
+  edge:
+    <<: *shared-netns
+    build:
+      context: ${GATEWAY_SOURCE:?set GATEWAY_SOURCE}/azure/litellm
+      dockerfile: edge/Dockerfile
+      labels:
+        ai.antsa.source-sha: ${GATEWAY_SHA:?set GATEWAY_SHA}
+    env_file: [defaults.env, credentials.env]
+    environment:
+      PORT: "4000"
+      UPSTREAM_URL: http://127.0.0.1:4001
+      UPSTREAM_MASTER_KEY: ${LITELLM_MASTER_KEY:?load credentials.env through run.sh}
+    depends_on: [litellm]
+
+  haystack:
+    <<: *shared-netns
+    build:
+      context: ${HAYSTACK_SOURCE:?set HAYSTACK_SOURCE}
+      dockerfile: Dockerfile
+      args:
+        RELEASE_SHA: ${HAYSTACK_SHA:?set HAYSTACK_SHA}
+      labels:
+        ai.antsa.source-sha: ${HAYSTACK_SHA}
+    env_file: [defaults.env, credentials.env]
+    environment:
+      PORT: "8001"
+      OPENAI_API_KEY: ""
+      RELEASE_SHA: ${HAYSTACK_SHA}
+    command:
+      - sh
+      - -ec
+      - |
+        export HAYSTACK_LLM_GATEWAY_API_KEY="$$HAYSTACK_GATEWAY_KEY"
+        exec uvicorn main:app --host 127.0.0.1 --port 8001
+    depends_on: [redis, api-fixture, edge]
