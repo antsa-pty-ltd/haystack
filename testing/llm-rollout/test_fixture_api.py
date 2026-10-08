@@ -71,6 +71,11 @@ class FixtureApiTest(unittest.TestCase):
         }
         self.assertTrue(all(defaults[key] == "openai/gpt-5.4-mini" for key in mini))
         self.assertTrue(all(defaults[key] == "openai/gpt-5.4" for key in full))
+        foundry_mini = {key.replace("OPENAI_", "FOUNDRY_"): "azure/gpt-5-4-mini-2026-03-17" for key in mini}
+        foundry_full = {key.replace("OPENAI_", "FOUNDRY_"): "azure/gpt-5-4-2026-03-05" for key in full}
+        self.assertTrue(all(defaults[key] == value for key, value in (foundry_mini | foundry_full).items()))
+        stems = {key.removeprefix("OPENAI_HAYSTACK_").removesuffix("_MODEL") for key in mini | full}
+        self.assertTrue(all(defaults[f"HAYSTACK_LITELLM_MODEL_{stem}_FOUNDRY"] == f"antsa-haystack-{stem.lower().replace('_', '-')}-foundry" for stem in stems))
 
     def test_exploration_requires_scoped_identity_and_returns_synthetic_segments(self):
         path = "/api/v1/ai/transcripts/segments-by-sessions"
