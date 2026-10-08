@@ -586,6 +586,7 @@ def test_registry_module_level_instance_is_available():
 
 
 def test_gateway_compatibility_is_explicit_without_changing_direct_calls():
+    from dataclasses import replace
     from llm_routing import gateway_chat_compatibility
 
     direct = _make_general_router(
@@ -613,6 +614,7 @@ def test_gateway_compatibility_is_explicit_without_changing_direct_calls():
 
     assert gateway_chat_compatibility(direct.target) == {}
     assert gateway_chat_compatibility(gateway.target) == {"reasoning_effort": "none"}
+    assert gateway_chat_compatibility(replace(gateway.target, route=LlmRoute.LITELLM_FOUNDRY)) == {}
 
 
 def test_general_router_telemetry_never_contains_gateway_secrets_or_payloads():

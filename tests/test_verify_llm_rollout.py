@@ -216,7 +216,7 @@ class VerifyRolloutTests(unittest.TestCase):
     def test_harness_payloads_match_real_fastapi_schemas_and_service_auth(self):
         source_root = Path(os.getenv(
             "HAYSTACK_CONTRACT_SOURCE",
-            "/Users/alec/Projects/antsa/.worktrees/haystack-route-prereqs-20261008",
+            str(Path(__file__).resolve().parents[1]),
         ))
         source = (source_root / "main.py").read_text()
         tree = ast.parse(source)

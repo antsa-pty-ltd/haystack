@@ -399,9 +399,9 @@ router_registry = LlmRouterRegistry()
 
 def gateway_chat_compatibility(target: LlmTarget) -> dict[str, str]:
     """Chat Completions parameters required by server-selected gateway models."""
-    if target.route is LlmRoute.DIRECT_OPENAI:
-        return {}
-    return {"reasoning_effort": "none"}
+    if target.route is LlmRoute.LITELLM_OPENAI:
+        return {"reasoning_effort": "none"}
+    return {}
 
 
 def _validate_gateway_base_url(value: str) -> str:
