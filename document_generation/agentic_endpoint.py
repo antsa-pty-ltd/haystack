@@ -17,6 +17,12 @@ from agents.document_agent import get_document_agent
 from document_generation.refinement import RefinementValidationError, refinement_parts
 from document_generation.language import DocumentLanguageError
 from document_generation.generator import generate_document_from_context
+from document_generation.large_context import (
+    estimate_session_data_tokens,
+    normalise_session_segments,
+    prepare_large_document_context,
+)
+from agents.exploration_tools import DOCUMENT_CONTEXT_TOKEN_BUDGET
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +243,118 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 generatedAt=result['generated_at'],
                 metadata=result['metadata']
             )
+
+        # ===== COMPLETE SOURCE PATH: Session data supplied by the API =====
+        #
+        # The Nest API has already performed the ownership check and loaded the
+        # selected transcripts.  Re-querying them through an exploration agent
+        # used to discard that complete payload and sample only a subset of a
+        # large history.  Use every supplied segment deterministically instead:
+        # direct drafting while it fits, or bounded hierarchical summaries when
+        # it does not.
+        if has_sessions and has_session_data:
+            if len(session_data) != len(session_ids):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Some selected sessions are no longer available. Reload the session list "
+                        "and generate the report again."
+                    ),
+                )
+
+            source_segments = normalise_session_segments(session_data)
+            if not source_segments:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected sessions do not contain transcript text yet.",
+                )
+            estimated_source_tokens = estimate_session_data_tokens(session_data)
+
+            if estimated_source_tokens <= DOCUMENT_CONTEXT_TOKEN_BUDGET:
+                await emit_progress_func(generation_id, {
+                    "type": "progress_update",
+                    "stage": "analysing_sessions",
+                    "message": f"Processing all {len(session_data)} selected session(s)...",
+                    "progress": {"current": len(session_data), "total": len(session_data)},
+                    "details": {
+                        "sessionCurrent": len(session_data),
+                        "sessionTotal": len(session_data),
+                        "sourceSegments": len(source_segments),
+                        "allSourcesProcessed": True,
+                    },
+                }, authorization)
+                result = await generate_document_from_context(
+                    segments=source_segments,
+                    template=template,
+                    client_info=client_info,
+                    practitioner_info=practitioner_info,
+                    generation_instructions=generation_instructions,
+                    openai_client=openai_client,
+                    dictated_notes=dictated_notes,
+                )
+                result["metadata"].update({
+                    "processingMethod": "complete_source_direct",
+                    "sourceCoverage": {
+                        "requestedSessions": len(session_ids),
+                        "processedSessions": len(session_data),
+                        "processedSegments": len(source_segments),
+                        "processedSections": 0,
+                        "reductionLevels": 0,
+                        "allSourcesProcessed": True,
+                    },
+                })
+            else:
+                async def emit_large_context_progress(progress):
+                    await emit_progress_func(generation_id, progress, authorization)
+
+                prepared = await prepare_large_document_context(
+                    session_data=session_data,
+                    template=template,
+                    openai_client=openai_client,
+                    emit_progress=emit_large_context_progress,
+                )
+                await emit_progress_func(generation_id, {
+                    "type": "stage_started",
+                    "stage": "generating_document",
+                    "message": "Writing the report from all processed sessions...",
+                    "details": {
+                        "sessionTotal": prepared.source_sessions,
+                        "sectionTotal": prepared.source_sections,
+                        "allSourcesProcessed": True,
+                    },
+                }, authorization)
+                result = await generate_document_from_context(
+                    segments=prepared.segments,
+                    template=template,
+                    client_info=client_info,
+                    practitioner_info=practitioner_info,
+                    generation_instructions=generation_instructions,
+                    openai_client=openai_client,
+                    dictated_notes=dictated_notes,
+                )
+                result["metadata"].update({
+                    "processingMethod": "hierarchical_full_source",
+                    "sourceCoverage": {
+                        "requestedSessions": len(session_ids),
+                        "processedSessions": prepared.source_sessions,
+                        "processedSegments": prepared.source_segments,
+                        "processedSections": prepared.source_sections,
+                        "reductionLevels": prepared.reduction_levels,
+                        "allSourcesProcessed": True,
+                    },
+                })
+
+            await emit_progress_func(generation_id, {
+                "type": "stage_completed",
+                "stage": "document_ready",
+                "message": "Document generated successfully from all selected sessions!",
+                "details": result["metadata"]["sourceCoverage"],
+            }, authorization)
+            return {
+                "content": result["content"],
+                "generatedAt": result["generated_at"],
+                "metadata": result["metadata"],
+            }
         
         # ===== FAST PATH: Single Small Session =====
         if len(session_ids) == 1:
@@ -448,32 +566,21 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
                 status_code=503,
                 detail="The document could not be refined right now. Please try again. Your original document has not been changed.",
             ) from e
-        logger.error(f"❌ [AGENTIC] Error: {e}")
-        
-        # User-friendly error
-        error_content = f"""# Generation Error
-
-An error occurred while generating your document.
-
-**What you can do:**
-- Click the Generate button again to retry
-- Contact support if the problem persists
-
-**Error details:** {str(e)[:200]}"""
-        
-        from pydantic import BaseModel
-        class GenerateDocumentResponse(BaseModel):
-            content: str
-            generatedAt: str
-            metadata: dict
-        
-        return GenerateDocumentResponse(
-            content=error_content,
-            generatedAt=datetime.now(timezone.utc).isoformat(),
-            metadata={
-                "error": True,
-                "errorType": type(e).__name__,
-                "errorMessage": str(e)[:500],
-                "processingMethod": "error_handling"
-            }
-        )
+        logger.error("Document generation failed: %s", type(e).__name__)
+        status = getattr(e, "status_code", None)
+        if not isinstance(status, int):
+            status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="AI capacity is busy. Your report can be retried safely in a moment.",
+            ) from e
+        if isinstance(e, (asyncio.TimeoutError, TimeoutError)) or status in {408, 499, 504}:
+            raise HTTPException(
+                status_code=504,
+                detail="Document generation did not finish in time. Your source material is unchanged.",
+            ) from e
+        raise HTTPException(
+            status_code=503,
+            detail="The document service could not finish this report. Please try again.",
+        ) from e
