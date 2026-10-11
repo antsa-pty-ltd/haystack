@@ -5,23 +5,39 @@ These tools allow the agent to explore therapy sessions iteratively,
 making decisions about how to retrieve and analyze content.
 """
 
-import os
-import httpx
 import logging
+import math
+import os
 import threading
+
+import httpx
 from contextvars import ContextVar
 from typing import Dict, Any, List, Optional, Annotated
 from utils.session_utils import estimate_tokens_from_segments
 
 logger = logging.getLogger(__name__)
 
+DOCUMENT_CONTEXT_TOKEN_BUDGET = 45_000
+
+
+def _estimate_segment_tokens(segment: Dict[str, Any]) -> int:
+    """Conservatively estimate rendered transcript tokens from its text."""
+    rendered = f'{segment.get("speaker", "")}: {segment.get("text", "")}'
+    return max(1, math.ceil((len(rendered.encode("utf-8")) + 32) / 4))
+
 
 class ExplorationContext:
     """Shared context for exploration tools"""
-    def __init__(self):
+    def __init__(self, target_session_count: int = 1):
         self.accumulated_segments: List[Dict[str, Any]] = []
         self.tokens_used: int = 0
-        self.token_budget: int = 150000  # Increased to handle 10+ sessions comfortably
+        # The Foundry draft deployment has a 100k TPM allocation. Leave more
+        # than half of that capacity for the template, notes, instructions,
+        # output, and concurrent document-policy/language calls. A production
+        # request with 1,313 segments previously reached ~98k input tokens,
+        # retried until Azure closed the request, and surfaced as HTTP 499.
+        self.token_budget: int = DOCUMENT_CONTEXT_TOKEN_BUDGET
+        self.target_session_count = max(1, target_session_count)
         self.sessions_explored: List[str] = []
         self.authorization: Optional[str] = None
         # The caller's `profileid` HTTP header. Required when calling back to
@@ -35,31 +51,43 @@ class ExplorationContext:
         self._segment_ids: set = set()  # Track segment IDs for deduplication
         self._lock = threading.Lock()
         
-    def add_segments(self, segments: List[Dict[str, Any]]):
-        """Add segments with deduplication and update token count"""
+    def add_segments(self, segments: List[Dict[str, Any]]) -> int:
+        """Add deduplicated segments without exceeding the draft budget."""
         with self._lock:
             initial_count = len(self.accumulated_segments)
             duplicates_found = 0
+            budget_limited = 0
 
             for segment in segments:
                 # Create a unique identifier for each segment
                 # Use combination of session_id, start_time, and text to identify duplicates
                 segment_id = self._create_segment_id(segment)
 
-                if segment_id not in self._segment_ids:
-                    self._segment_ids.add(segment_id)
-                    self.accumulated_segments.append(segment)
-                else:
+                if segment_id in self._segment_ids:
                     duplicates_found += 1
+                    continue
 
-            # Calculate tokens only for newly added segments
+                estimated_tokens = _estimate_segment_tokens(segment)
+                if self.tokens_used + estimated_tokens > self.token_budget:
+                    budget_limited += 1
+                    continue
+
+                self._segment_ids.add(segment_id)
+                self.accumulated_segments.append(segment)
+                self.tokens_used += estimated_tokens
+
             new_segments_added = len(self.accumulated_segments) - initial_count
-            # Rough estimate: 1 segment ≈ 75 tokens
-            self.tokens_used += new_segments_added * 75
-        
+
         # Log deduplication stats if duplicates were found
         if duplicates_found > 0:
             logger.info(f"🔍 Deduplication: Filtered {duplicates_found} duplicate segments, added {new_segments_added} new segments")
+        if budget_limited > 0:
+            logger.info(
+                "Document context budget reached: retained %s estimated tokens and skipped %s additional segments",
+                self.tokens_used,
+                budget_limited,
+            )
+        return new_segments_added
     
     def _create_segment_id(self, segment: Dict[str, Any]) -> str:
         """Create a unique identifier for a segment to enable deduplication"""
@@ -76,6 +104,19 @@ class ExplorationContext:
     def has_budget(self, estimated_tokens: int) -> bool:
         """Check if there's budget for more tokens"""
         return (self.tokens_used + estimated_tokens) <= self.token_budget
+
+    def remaining_token_capacity(self) -> int:
+        return max(0, self.token_budget - self.tokens_used)
+
+    def full_session_token_limit(self) -> int:
+        """Reserve room for representative sessions across the therapy arc."""
+        if self.target_session_count <= 3:
+            planned_full_sessions = self.target_session_count
+        elif self.target_session_count <= 10:
+            planned_full_sessions = 4
+        else:
+            planned_full_sessions = 5
+        return max(1, self.token_budget // planned_full_sessions)
 
 
 # The service handles document generations concurrently. A module-global
@@ -95,13 +136,53 @@ def get_exploration_context() -> ExplorationContext:
     return context
 
 
-def reset_exploration_context(authorization: str = None, generation_id: str = None, profileid: str = None):
+def reset_exploration_context(
+    authorization: str = None,
+    generation_id: str = None,
+    profileid: str = None,
+    target_session_count: int = 1,
+):
     """Reset exploration context for a new document generation"""
-    context = ExplorationContext()
+    context = ExplorationContext(target_session_count=target_session_count)
     context.authorization = authorization
     context.profileid = profileid
     context.generation_id = generation_id
     _exploration_context.set(context)
+
+
+def _evenly_sample_segments(segments: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Retain beginning, middle, and end when a session exceeds its share."""
+    if limit <= 0:
+        return []
+    if len(segments) <= limit:
+        return segments
+    if limit == 1:
+        return [segments[0]]
+    last_index = len(segments) - 1
+    return [segments[round(position * last_index / (limit - 1))] for position in range(limit)]
+
+
+def _sample_segments_within_token_budget(
+    segments: List[Dict[str, Any]],
+    token_budget: int,
+) -> List[Dict[str, Any]]:
+    """Evenly sample a session, then enforce its actual estimated token share."""
+    if token_budget <= 0 or not segments:
+        return []
+    total_tokens = sum(_estimate_segment_tokens(segment) for segment in segments)
+    if total_tokens <= token_budget:
+        return segments
+    average_tokens = max(1, math.ceil(total_tokens / len(segments)))
+    target_count = max(1, min(len(segments), token_budget // average_tokens))
+    sampled = _evenly_sample_segments(segments, target_count)
+    retained: List[Dict[str, Any]] = []
+    used_tokens = 0
+    for segment in sampled:
+        segment_tokens = _estimate_segment_tokens(segment)
+        if used_tokens + segment_tokens <= token_budget:
+            retained.append(segment)
+            used_tokens += segment_tokens
+    return retained
 
 
 def _api_headers(context: "ExplorationContext") -> Dict[str, str]:
@@ -301,28 +382,42 @@ async def pull_full_session(
             segments = response_data.get('segments', []) if isinstance(response_data, dict) else response_data
             
             estimated_tokens = estimate_tokens_from_segments(len(segments))
-            
-            # Check budget
-            if not context.has_budget(estimated_tokens):
+            remaining_tokens = context.remaining_token_capacity()
+            if remaining_tokens <= 0:
                 return {
                     "success": False,
                     "error": "Token budget exceeded",
-                    "message": f"Pulling full session would exceed token budget ({context.tokens_used + estimated_tokens} > {context.token_budget})"
+                    "message": "The document context budget is full; use the collected context and generate the document",
                 }
-            
+
+            retained_segments = _sample_segments_within_token_budget(
+                segments,
+                min(context.full_session_token_limit(), remaining_tokens),
+            )
+
             # Add to context
-            context.add_segments(segments)
-            if session_id not in context.sessions_explored:
+            segments_added = context.add_segments(retained_segments)
+            if segments_added and session_id not in context.sessions_explored:
                 context.sessions_explored.append(session_id)
             
-            logger.info(f"Agent pulled full session {session_id}: {len(segments)} segments, ~{estimated_tokens} tokens")
+            logger.info(
+                "Agent pulled session %s: retained %s/%s segments within document context budget",
+                session_id,
+                segments_added,
+                len(segments),
+            )
             
             return {
                 "success": True,
                 "session_id": session_id,
                 "total_segments": len(segments),
-                "estimated_tokens": estimated_tokens,
-                "message": f"Successfully retrieved all {len(segments)} segments from session"
+                "segments_retained": segments_added,
+                "estimated_source_tokens": estimated_tokens,
+                "budget_limited": segments_added < len(segments),
+                "message": (
+                    f"Retrieved {len(segments)} segments and retained {segments_added} representative segments "
+                    "for document generation"
+                ),
             }
             
     except Exception as e:
