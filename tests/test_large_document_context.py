@@ -100,6 +100,42 @@ def test_large_context_processes_every_section_and_reports_real_progress():
     assert "Synthetic transcript evidence 319" in prompts
 
 
+def test_large_context_summarises_sections_with_bounded_parallelism_and_preserves_order():
+    async def run_scenario():
+        in_flight = 0
+        peak_in_flight = 0
+
+        async def create(**kwargs):
+            nonlocal in_flight, peak_in_flight
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                source_line = kwargs["messages"][1]["content"].splitlines()[0]
+                return _response(source_line)
+            finally:
+                in_flight -= 1
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        result = await prepare_large_document_context(
+            session_data=_sessions(session_count=6, segment_count=6),
+            template={"name": "Progress report", "content": "Summarise progress."},
+            openai_client=client,
+            sleep=AsyncMock(),
+        )
+        return result, peak_in_flight
+
+    with patch.dict("os.environ", {"DOCUMENT_SECTION_CONCURRENCY": "3"}):
+        result, peak_in_flight = asyncio.run(run_scenario())
+
+    assert peak_in_flight == 3
+    assert [segment["transcript_id"] for segment in result.segments] == [
+        f"session-{index}" for index in range(1, 7)
+    ]
+
+
 def test_section_summary_retries_a_rate_limit_and_keeps_the_user_informed():
     rate_limit = RuntimeError("busy")
     rate_limit.status_code = 429
