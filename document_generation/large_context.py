@@ -43,6 +43,10 @@ def summary_max_completion_tokens() -> int:
     return _bounded_int("DOCUMENT_SECTION_SUMMARY_MAX_TOKENS", 1_000, 300, 2_000)
 
 
+def section_summary_concurrency() -> int:
+    return _bounded_int("DOCUMENT_SECTION_CONCURRENCY", 3, 1, 6)
+
+
 def estimate_text_tokens(value: str) -> int:
     """Conservative token estimate without adding a tokenizer dependency."""
     return max(1, math.ceil((len(value.encode("utf-8")) + 32) / 4))
@@ -317,6 +321,31 @@ class LargeContextResult:
     reduction_levels: int
 
 
+async def _bounded_map(
+    items: List[Any],
+    worker: Callable[[int, Any], Awaitable[Any]],
+) -> List[Any]:
+    """Run independent model calls concurrently without exceeding capacity."""
+    semaphore = asyncio.Semaphore(section_summary_concurrency())
+
+    async def run(index: int, item: Any) -> Any:
+        async with semaphore:
+            return await worker(index, item)
+
+    tasks = [asyncio.create_task(run(index, item)) for index, item in enumerate(items)]
+    try:
+        # gather returns values in input order even when calls finish out of
+        # order, preserving the source chronology used by the final draft.
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        # Do not leave provider calls running after one section fails or the
+        # request is cancelled.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def prepare_large_document_context(
     *,
     session_data: Iterable[Dict[str, Any]],
@@ -332,8 +361,11 @@ async def prepare_large_document_context(
     if not chunks:
         return LargeContextResult([], len(sessions), 0, 0, 0)
 
-    summaries: List[Dict[str, Any]] = []
-    for index, chunk in enumerate(chunks):
+    processed_sections = 0
+    progress_lock = asyncio.Lock()
+
+    async def summarise_chunk(index: int, chunk: SourceChunk) -> Dict[str, Any]:
+        nonlocal processed_sections
         if emit_progress:
             await emit_progress(
                 {
@@ -343,7 +375,7 @@ async def prepare_large_document_context(
                         f"Analysing session {chunk.session_number} of {chunk.session_count} "
                         f"(section {index + 1} of {len(chunks)})..."
                     ),
-                    "progress": {"current": index, "total": len(chunks)},
+                    "progress": {"current": processed_sections, "total": len(chunks)},
                     "details": {
                         "sessionCurrent": chunk.session_number,
                         "sessionTotal": chunk.session_count,
@@ -362,31 +394,34 @@ async def prepare_large_document_context(
             emit_progress=emit_progress,
             sleep=sleep,
         )
-        summaries.append(
-            {
-                "transcript_id": chunk.session_id,
-                "start_time": chunk.part_number,
-                "speaker": "Source summary",
-                "text": f"[{chunk.label}]\n{summary}",
-                "_search_purpose": "Full-history section summaries",
-            }
-        )
+        async with progress_lock:
+            processed_sections += 1
+            completed = processed_sections
         if emit_progress:
             await emit_progress(
                 {
                     "type": "progress_update",
                     "stage": "analysing_sessions",
-                    "message": f"Processed {index + 1} of {len(chunks)} report sections",
-                    "progress": {"current": index + 1, "total": len(chunks)},
+                    "message": f"Processed {completed} of {len(chunks)} report sections",
+                    "progress": {"current": completed, "total": len(chunks)},
                     "details": {
                         "sessionCurrent": chunk.session_number,
                         "sessionTotal": chunk.session_count,
                         "sectionCurrent": index + 1,
                         "sectionTotal": len(chunks),
-                        "allSourcesProcessed": index + 1 == len(chunks),
+                        "allSourcesProcessed": completed == len(chunks),
                     },
                 }
             )
+        return {
+            "transcript_id": chunk.session_id,
+            "start_time": chunk.part_number,
+            "speaker": "Source summary",
+            "text": f"[{chunk.label}]\n{summary}",
+            "_search_purpose": "Full-history section summaries",
+        }
+
+    summaries: List[Dict[str, Any]] = await _bounded_map(chunks, summarise_chunk)
 
     reduction_levels = 0
     final_budget = reduced_context_token_budget()
@@ -410,8 +445,7 @@ async def prepare_large_document_context(
             # budget. The next summarisation call still reduces each item.
             grouped = [[item] for item in summaries]
 
-        reduced: List[Dict[str, Any]] = []
-        for index, group in enumerate(grouped):
+        async def summarise_group(index: int, group: List[Dict[str, Any]]) -> Dict[str, Any]:
             if emit_progress:
                 await emit_progress(
                     {
@@ -432,16 +466,15 @@ async def prepare_large_document_context(
                 emit_progress=emit_progress,
                 sleep=sleep,
             )
-            reduced.append(
-                {
-                    "transcript_id": f"reduction-{reduction_levels}-{index + 1}",
-                    "start_time": index,
-                    "speaker": "Consolidated source summary",
-                    "text": reduced_text,
-                    "_search_purpose": "Full-history consolidated evidence",
-                }
-            )
-        summaries = reduced
+            return {
+                "transcript_id": f"reduction-{reduction_levels}-{index + 1}",
+                "start_time": index,
+                "speaker": "Consolidated source summary",
+                "text": reduced_text,
+                "_search_purpose": "Full-history consolidated evidence",
+            }
+
+        summaries = await _bounded_map(grouped, summarise_group)
 
     return LargeContextResult(
         segments=summaries,
