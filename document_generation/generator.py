@@ -10,8 +10,10 @@ It doesn't interfere with other agents (web_assistant, jaimee_therapist).
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+from openai import AsyncOpenAI
 
 from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
 from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
@@ -26,6 +28,47 @@ from pii_utils import is_tokenized, sanitize_for_logging, sanitize_dict_for_logg
 
 logger = logging.getLogger(__name__)
 
+DOCUMENT_DRAFT_REQUEST_TIMEOUT_SECONDS = 180.0
+DOCUMENT_DRAFT_MAX_COMPLETION_TOKENS = 8_000
+DOCUMENT_NOTES_MAX_CHARS = 40_000
+
+
+def _truncate_preserving_edges(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    marker = "\n[... source shortened to fit the document generation budget ...]\n"
+    if limit <= len(marker):
+        return value[:limit]
+    available = limit - len(marker)
+    head = math.ceil(available / 2)
+    tail = available - head
+    suffix = value[-tail:] if tail else ""
+    return f"{value[:head]}{marker}{suffix}"
+
+
+def _bounded_notes_text(dictated_notes: Optional[List[Dict[str, Any]]]) -> str:
+    """Render notes within a shared cap while retaining every note's edges."""
+    if not dictated_notes:
+        return ""
+    header = "\n--- Practitioner Notes ---\n"
+    remaining = max(0, DOCUMENT_NOTES_MAX_CHARS - len(header))
+    per_note_limit = max(1, remaining // len(dictated_notes))
+    rendered_notes = []
+    for note in dictated_notes:
+        if hasattr(note, 'title'):
+            note_title = note.title or 'Untitled Note'
+            note_content = note.content or ''
+            note_date = note.createdAt or 'Unknown date'
+        else:
+            note_title = note.get('title', 'Untitled Note')
+            note_content = note.get('content', '')
+            note_date = note.get('createdAt', 'Unknown date')
+        if isinstance(note_date, str) and 'T' in note_date:
+            note_date = note_date.split('T')[0]
+        rendered = f"\n[{note_date}] {note_title}:\n{note_content}\n"
+        rendered_notes.append(_truncate_preserving_edges(rendered, per_note_limit))
+    return header + "".join(rendered_notes)
+
 
 def _draft_provider(openai_client):
     """Prefer the startup-resolved document_draft target; without it (unit
@@ -37,6 +80,26 @@ def _draft_provider(openai_client):
     if router.target.client is None:
         return openai_client, DOCUMENT_DRAFT_DIRECT_MODEL, None
     return router.target.client, router.target.model, router
+
+
+def _bounded_draft_client(client):
+    """Keep one rate-limited draft attempt inside Azure's request window.
+
+    The OpenAI SDK retries 429s by default. For a large clinical document each
+    retry consumes the same large token reservation and can keep the HTTP
+    request open beyond Azure App Service's front-end timeout, which surfaced
+    as the 499 in ADO #419. The browser already provides an explicit retry;
+    this call must fail promptly instead of duplicating provider work.
+    """
+    # Unit tests and legacy injectors use lightweight client doubles whose
+    # dynamic ``with_options`` attribute may be a MagicMock. Only clone the
+    # real SDK client used by direct and gateway routes.
+    if not isinstance(client, AsyncOpenAI):
+        return client
+    return client.with_options(
+        max_retries=0,
+        timeout=DOCUMENT_DRAFT_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 async def _create_with_outcome(router, create):
@@ -156,25 +219,8 @@ async def generate_document_from_context(
             transcript_text += "\n"
         
         # Build notes context if notes are provided
-        notes_text = ""
-        if dictated_notes and len(dictated_notes) > 0:
-            notes_text = "\n--- Practitioner Notes ---\n"
-            for note in dictated_notes:
-                # Handle both dict and Pydantic model objects
-                if hasattr(note, 'title'):
-                    # Pydantic model
-                    note_title = note.title or 'Untitled Note'
-                    note_content = note.content or ''
-                    note_date = note.createdAt or 'Unknown date'
-                else:
-                    # Dict
-                    note_title = note.get('title', 'Untitled Note')
-                    note_content = note.get('content', '')
-                    note_date = note.get('createdAt', 'Unknown date')
-                
-                if isinstance(note_date, str) and 'T' in note_date:
-                    note_date = note_date.split('T')[0]  # Get just the date part
-                notes_text += f"\n[{note_date}] {note_title}:\n{note_content}\n"
+        notes_text = _bounded_notes_text(dictated_notes)
+        if dictated_notes:
             logger.info(f"📝 Added {len(dictated_notes)} practitioner notes to context")
         
         # Log more detailed context information
@@ -351,6 +397,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         # Generate document using OpenAI
         try:
             draft_client, draft_model, draft_router = _draft_provider(openai_client)
+            draft_client = _bounded_draft_client(draft_client)
             compatibility = (
                 gateway_chat_compatibility(draft_router.target)
                 if draft_router else {}
@@ -362,6 +409,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                     messages=messages,
                     temperature=0.3,  # Lower temperature for consistent, deterministic outputs
                     seed=42,  # Use seed for additional consistency (available in newer OpenAI models)
+                    max_completion_tokens=DOCUMENT_DRAFT_MAX_COMPLETION_TOKENS,
                     **compatibility,
                 ),
             )
@@ -433,6 +481,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                         )},
                     ],
                     temperature=0.3,
+                    max_completion_tokens=DOCUMENT_DRAFT_MAX_COMPLETION_TOKENS,
                     **compatibility,
                     seed=42,
                 ),
