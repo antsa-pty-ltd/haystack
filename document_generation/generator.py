@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
 
-from document_generation.refinement import RefinementValidationError, refinement_parts, shortening_word_limit
+from document_generation.refinement import (
+    RefinementValidationError,
+    refinement_parts,
+    shortening_word_limit,
+    unmet_name_removals,
+)
 from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
 from llm_routing import (
     DOCUMENT_DRAFT_DIRECT_MODEL,
@@ -145,6 +150,7 @@ async def generate_document_from_context(
         template_content = template.get('content', '')
         refinement = refinement_parts(template_content)
         word_limit = shortening_word_limit(*refinement) if refinement else None
+        refinement_instructions = refinement[1] if refinement else ''
         # PRIVACY: the NestJS api sends tokenized identifiers (e.g. [CLIENT_NAME],
         # [PRACTITIONER_NAME]); real names are substituted back only AFTER this
         # LLM call. Default to the tokens so a real name is never the fallback.
@@ -461,12 +467,29 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             raise Exception(error_detail)
         
         for attempt in range(2):
-            if word_limit is None or len(generated_content.split()) <= word_limit:
+            generated_word_count = len(generated_content.split())
+            exceeds_word_limit = word_limit is not None and generated_word_count > word_limit
+            ignored_name_removals = unmet_name_removals(refinement_instructions, generated_content)
+            if not exceeds_word_limit and not ignored_name_removals:
                 break
             logger.info(
-                "Document refinement length retry: original_words=%s result_words=%s max_words=%s attempt=%s",
-                len(refinement[0].split()), len(generated_content.split()), word_limit, attempt + 1,
+                "Document refinement retry: original_words=%s result_words=%s max_words=%s "
+                "unmet_name_removal=%s attempt=%s",
+                len(refinement[0].split()), generated_word_count, word_limit,
+                bool(ignored_name_removals), attempt + 1,
             )
+            retry_requirements = []
+            if exceeds_word_limit:
+                retry_requirements.append(
+                    f"This version has {generated_word_count} words and exceeds the required maximum "
+                    f"of {word_limit}. Rewrite the complete document within that limit."
+                )
+            if ignored_name_removals:
+                retry_requirements.append(
+                    "The requested name removal was not applied. Remove each requested name token "
+                    "wherever it appears. Do not replace a removed first name or surname with the "
+                    "corresponding full-name token."
+                )
             response = await _create_with_outcome(
                 draft_router,
                 lambda: draft_client.chat.completions.create(
@@ -474,10 +497,8 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                     messages=messages + [
                         {"role": "assistant", "content": generated_content},
                         {"role": "user", "content": (
-                            f"This version has {len(generated_content.split())} words and exceeds the required "
-                            f"maximum of {word_limit}. Rewrite the complete document within that limit, "
-                            "preserving clinically relevant meaning and all requested naming changes. "
-                            "Return only the document."
+                            " ".join(retry_requirements) + " Preserve clinically relevant meaning and all "
+                            "other requested changes. Return only the complete document."
                         )},
                     ],
                     temperature=0.3,
@@ -491,6 +512,8 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                 raise RefinementValidationError("Document refinement returned no content. Please try again.")
         if word_limit is not None and len(generated_content.split()) > word_limit:
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
+        if unmet_name_removals(refinement_instructions, generated_content):
+            raise RefinementValidationError("The requested name removal could not be applied. Please try again.")
 
         # Compare only the sources this request actually sent to the provider.
         # For refinement, old transcripts are intentionally absent. Only the
@@ -509,6 +532,8 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
         )
         if word_limit is not None and len(generated_content.split()) > word_limit:
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
+        if unmet_name_removals(refinement_instructions, generated_content):
+            raise RefinementValidationError("The requested name removal could not be applied. Please try again.")
 
         logger.info(f"✅ Document generated: {len(generated_content)} chars")
         

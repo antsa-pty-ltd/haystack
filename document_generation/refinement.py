@@ -1,11 +1,22 @@
 """Read the two supported edit envelopes without treating source text as instructions."""
 import math
 import re
-from typing import Optional, Tuple
+from typing import Optional, Set, Tuple
 
 
 class RefinementValidationError(ValueError):
     """An edit failed a measurable request; it must not be saved as a document."""
+
+
+_NAME_TOKEN = re.compile(
+    r'\[(?P<owner>CLIENT|PRACTITIONER)_(?P<part>FIRST_NAME|LAST_NAME|NAME)(?P<suffix>_\d+)?\]'
+)
+_NAME_REMOVAL = re.compile(
+    r'\b(?:remove|omit|delete|exclude|drop)\b(?:(?![.!?\n]).){0,100}?'
+    + _NAME_TOKEN.pattern,
+    re.IGNORECASE,
+)
+_NEGATED_REMOVAL = re.compile(r"(?:do\s+not|don't|never)\s*$", re.IGNORECASE)
 
 
 def refinement_parts(content: str) -> Optional[Tuple[str, str]]:
@@ -47,5 +58,41 @@ def shortening_word_limit(original: str, instructions: str) -> Optional[int]:
     if (re.search(r'\b(?:shorten|condense)' + target + r'(?=\s*(?:[.!?]|$))', text)
             or re.search(r'\bmake' + target + r'\s+(?:much\s+)?(?:shorter|more concise|less verbose)\b', text)
             or re.fullmatch(r'\s*(?:shorter|more concise|less verbose)[.!?]?\s*', text)):
-        return max(1, math.floor(count * 0.75))
+        # The practitioner requested a qualitative improvement, not a numeric
+        # reduction. Requiring an arbitrary 25% cut rejects genuinely shorter
+        # documents and misrepresents the request as a precise length target.
+        return max(1, count - 1)
     return None
+
+
+def requested_name_removal_tokens(instructions: str) -> Set[str]:
+    """Return privacy tokens which must be absent after an explicit name edit.
+
+    API-side refinement tokenization decomposes a full name into first/last
+    tokens. If the model reintroduces the corresponding full-name token, API
+    rehydration would restore the surname, so that token is forbidden too.
+    """
+    forbidden: Set[str] = set()
+    for match in _NAME_REMOVAL.finditer(instructions):
+        if _NEGATED_REMOVAL.search(instructions[max(0, match.start() - 20):match.start()]):
+            continue
+        owner = match.group('owner').upper()
+        part = match.group('part').upper()
+        suffix = match.group('suffix') or ''
+        forbidden.add(f'[{owner}_{part}{suffix}]')
+        if part in {'FIRST_NAME', 'LAST_NAME'}:
+            forbidden.add(f'[{owner}_NAME{suffix}]')
+        elif part == 'NAME':
+            forbidden.update({
+                f'[{owner}_FIRST_NAME{suffix}]',
+                f'[{owner}_LAST_NAME{suffix}]',
+            })
+    return forbidden
+
+
+def unmet_name_removals(instructions: str, generated_content: str) -> Set[str]:
+    """Return requested name-removal tokens still present in model output."""
+    return {
+        token for token in requested_name_removal_tokens(instructions)
+        if token in generated_content
+    }
