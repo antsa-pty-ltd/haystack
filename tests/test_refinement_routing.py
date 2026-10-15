@@ -218,7 +218,9 @@ def test_first_name_template_explains_name_part_tokens_without_full_name_overrid
 
 @pytest.mark.parametrize('instructions,maximum', [
     ('Shorten by 50%', 150), ('Reduce to 50 percent', 150),
-    ('Make it more concise', 225), ('Cut it in half', 150),
+    # Qualitative concision requests promise a shorter result, not an invented
+    # 25% reduction. Any genuine reduction satisfies the words the user chose.
+    ('Make it more concise', 300), ('Cut it in half', 150),
     ('Shorten to 100 words', 100),
 ])
 def test_shortening_retries_expanded_output_and_measures_against_original(instructions, maximum):
@@ -252,6 +254,82 @@ def test_shortening_does_not_return_or_truncate_an_oversized_result():
             client_info={'name': '[CLIENT_NAME]'}, practitioner_info={'name': '[PRACTITIONER_NAME]'},
             generation_instructions=None, openai_client=client,
         ))
+    assert client.chat.completions.create.await_count == 3
+
+
+def test_qualitative_concision_accepts_a_genuinely_shorter_document_without_an_invented_percentage():
+    client = MagicMock()
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content='word ' * 581), finish_reason='stop')]
+    client.chat.completions.create = AsyncMock(return_value=response)
+
+    result = asyncio.run(generate_document_from_context(
+        segments=[],
+        template={
+            'content': (
+                f"ORIGINAL DOCUMENT:\n{'word ' * 605}\n"
+                'REQUESTED MODIFICATIONS:\nMake it more concise.\nREFINED DOCUMENT:'
+            ),
+        },
+        client_info={'name': '[CLIENT_NAME]'}, practitioner_info={'name': '[PRACTITIONER_NAME]'},
+        generation_instructions=None, openai_client=client,
+    ))
+
+    assert result['metadata']['wordCount'] == 581
+    assert client.chat.completions.create.await_count == 1
+
+
+def test_requested_name_token_removal_retries_instead_of_saving_an_ignored_edit():
+    client = MagicMock()
+    ignored = MagicMock()
+    ignored.choices = [MagicMock(
+        message=MagicMock(content='Client Name: [CLIENT_FIRST_NAME] [CLIENT_LAST_NAME]\nClinical note.'),
+        finish_reason='stop',
+    )]
+    applied = MagicMock()
+    applied.choices = [MagicMock(
+        message=MagicMock(content='Client Name: [CLIENT_FIRST_NAME]\nClinical note.'),
+        finish_reason='stop',
+    )]
+    client.chat.completions.create = AsyncMock(side_effect=[ignored, applied])
+
+    result = asyncio.run(generate_document_from_context(
+        segments=[],
+        template={
+            'content': (
+                'ORIGINAL DOCUMENT:\nClient Name: [CLIENT_FIRST_NAME] [CLIENT_LAST_NAME]\nClinical note.\n'
+                'REQUESTED MODIFICATIONS:\nRemove "[CLIENT_LAST_NAME]".\nREFINED DOCUMENT:'
+            ),
+        },
+        client_info={'name': '[CLIENT_NAME]'}, practitioner_info={'name': '[PRACTITIONER_NAME]'},
+        generation_instructions=None, openai_client=client,
+    ))
+
+    assert result['content'] == 'Client Name: [CLIENT_FIRST_NAME]\nClinical note.'
+    assert client.chat.completions.create.await_count == 2
+    retry = client.chat.completions.create.call_args.kwargs['messages'][-1]['content']
+    assert 'requested name removal' in retry.lower()
+
+
+def test_requested_surname_removal_rejects_reintroducing_the_full_name_token():
+    client = MagicMock()
+    ignored = MagicMock()
+    ignored.choices = [MagicMock(message=MagicMock(content='Client Name: [CLIENT_NAME]'), finish_reason='stop')]
+    client.chat.completions.create = AsyncMock(return_value=ignored)
+
+    with pytest.raises(ValueError, match='name removal could not be applied'):
+        asyncio.run(generate_document_from_context(
+            segments=[],
+            template={
+                'content': (
+                    'ORIGINAL DOCUMENT:\nClient Name: [CLIENT_FIRST_NAME] [CLIENT_LAST_NAME]\n'
+                    'REQUESTED MODIFICATIONS:\nRemove [CLIENT_LAST_NAME].\nREFINED DOCUMENT:'
+                ),
+            },
+            client_info={'name': '[CLIENT_NAME]'}, practitioner_info={'name': '[PRACTITIONER_NAME]'},
+            generation_instructions=None, openai_client=client,
+        ))
+
     assert client.chat.completions.create.await_count == 3
 
 
