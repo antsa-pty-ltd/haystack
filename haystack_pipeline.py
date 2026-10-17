@@ -16,7 +16,7 @@ from haystack.dataclasses import ChatMessage, StreamingChunk
 from haystack.utils import Secret
 
 from config import settings
-from crisis_resources import build_crisis_resources_block
+from crisis_resources import build_crisis_continuity_block, build_crisis_resources_block
 from llm_routing import (
     COMPANION_WORKLOAD,
     LlmRoute,
@@ -630,6 +630,18 @@ class HaystackPipelineManager:
                     or _ctx.get("country")
                 )
                 system_prompt += build_crisis_resources_block(country_code)
+
+            # Card 426: a practitioner-linked client disclosed suicidal intent,
+            # received a safety check, then mentioned a lost phone. The next
+            # response ignored the unanswered safety check and switched to phone
+            # recovery. Keep this service-owned rule outside published persona
+            # configuration so neither client persona can silently lose crisis
+            # context after a topic change.
+            if persona_type in (
+                PersonaType.ANTSABOT_COMPANION,
+                PersonaType.ANTSABOT_THERAPIST,
+            ):
+                system_prompt += build_crisis_continuity_block()
 
             # Practitioner context: inject named-practitioner guidance so the
             # model can give specific recommendations (e.g. "talk to Sally,

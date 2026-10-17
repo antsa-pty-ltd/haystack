@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from crisis_resources import (  # noqa: E402
     DEFAULT_COUNTRY_CODE,
     CRISIS_RESOURCES,
+    build_crisis_continuity_block,
     build_crisis_resources_block,
     get_crisis_resources,
     normalize_country_code,
@@ -96,6 +97,19 @@ def test_block_instructs_using_exact_contacts():
     assert "(AU)" in block
 
 
+def test_block_keeps_crisis_active_across_an_unrelated_follow_up():
+    """A topic change must not silently clear an unanswered safety check."""
+    block = build_crisis_continuity_block().lower()
+
+    assert "crisis continuity" in block
+    assert "remains unresolved" in block
+    assert "changes the subject" in block
+    assert "explicitly confirms" in block
+    assert "i lost my phone" in block
+    assert "plain text" in block
+    assert "i'm glad" in block
+
+
 def test_get_crisis_resources_returns_resource_objects():
     resources: List = get_crisis_resources("us")
     assert resources is CRISIS_RESOURCES["us"]
@@ -160,6 +174,7 @@ def test_companion_pipeline_injects_default_crisis_lines():
     """With no country code, the companion prompt carries AU (default) lines."""
     prompt = _run_companion_prompt(None)
     assert "CRISIS RESOURCES" in prompt
+    assert "CRISIS CONTINUITY" in prompt
     assert "000" in prompt          # AU emergency (default)
     assert "13 11 14" in prompt     # Lifeline
 
