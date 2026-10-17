@@ -11,11 +11,13 @@ B2C persona with no practitioner to escalate to, that left the model to
 hallucinate phone numbers or defer vaguely.
 
 This module owns the concrete crisis lines for the supported countries
-(AU/US/UK — see root CLAUDE.md "Multi-country") and renders them into a block
-that is appended to the companion system prompt at runtime. The receiving end
-for the "crisis lines injected upstream" contract now lives HERE: even if the
-API never sends a country, the companion falls back to the platform default
-(`au`) and always has concrete resources to surface.
+(AU/US/UK — see root CLAUDE.md "Multi-country") and the service-controlled
+crisis-continuity rules appended to the companion system prompt at runtime.
+The receiving end for the "crisis lines injected upstream" contract now lives
+HERE: even if the API never sends a country, the companion falls back to the
+platform default (`au`) and always has concrete resources to surface. Keeping
+the continuity rules here also means a published persona prompt cannot remove
+the requirement to follow an unresolved crisis across topic changes.
 """
 from __future__ import annotations
 
@@ -87,8 +89,8 @@ def build_crisis_resources_block(country_code: str | None) -> str:
     """
     Render the crisis-resources block appended to the companion system prompt.
 
-    The block is self-contained: it both names the country it resolved to and
-    lists concrete contacts, so the model never has to invent a number.
+    The block is self-contained: it names the country it resolved to and lists
+    concrete contacts, so the model never has to invent a number.
     """
     resolved = normalize_country_code(country_code)
     resources = CRISIS_RESOURCES[resolved]
@@ -102,4 +104,30 @@ def build_crisis_resources_block(country_code: str | None) -> str:
         "Samaritans/988 as appropriate and suggest they confirm their local "
         "service.\n"
         f"{lines}"
+    )
+
+
+def build_crisis_continuity_block() -> str:
+    """Keep an unresolved crisis active across later topic changes."""
+    return (
+        "\n\n# CRISIS CONTINUITY (higher priority than a topic change)\n"
+        "Review the recent conversation, not only the latest message. After a "
+        "user discloses current or recent suicidal thoughts, self-harm, intent "
+        "to harm someone, or immediate danger, the crisis remains unresolved "
+        "until the user explicitly confirms they are safe right now and an "
+        "immediate real-world safety step is in place, or emergency/crisis "
+        "support has taken over.\n"
+        "- If the user changes the subject before then, do not treat the topic "
+        "change as evidence that they are safe. Briefly acknowledge the new "
+        "issue, then return to immediate safety and ask one direct safety "
+        "question.\n"
+        "- A practical obstacle such as \"I lost my phone\" is part of the "
+        "safety response: suggest using another person's phone or going directly "
+        "to a trusted person, staffed public place, emergency department, or "
+        "emergency services. Do not switch to an unrelated recovery checklist.\n"
+        "- Use calm, direct acknowledgement such as \"Thank you for telling "
+        "me.\" Do not praise or celebrate the disclosure, and do not say \"I'm "
+        "glad\" in response to it.\n"
+        "- Write crisis replies in plain text. Do not use Markdown emphasis "
+        "markers such as ** because the client chat displays them literally."
     )

@@ -253,6 +253,50 @@ def test_trusted_mobile_prompt_is_appended_to_persona_and_history_limit_is_used(
     assert "CRISIS RESOURCES" in system_prompt
 
 
+def test_therapist_keeps_unresolved_crisis_priority_after_topic_change(monkeypatch):
+    """Reproduce the practitioner-linked card 426 path with safe fixtures."""
+    _install_session_doubles(monkeypatch)
+    generator = _FakeGenerator()
+    manager = HaystackPipelineManager()
+    manager._initialized = True
+    manager.pipelines[PersonaType.ANTSABOT_THERAPIST] = _FakePipeline(generator)
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in manager.generate_response_with_chaining(
+                session_id="mobile-session",
+                persona_type=PersonaType.ANTSABOT_THERAPIST,
+                user_message="I lost my phone",
+                context={
+                    "_trusted_api_proxy": True,
+                    "conversation_history": [
+                        {
+                            "role": "user",
+                            "content": "I am thinking about suicide.",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "Please contact crisis support. Are you safe right now?",
+                        },
+                    ],
+                },
+            )
+        ]
+
+    assert "".join(asyncio.run(collect())) == "A safe response"
+    system_prompt = generator.messages[0].text
+    conversation = [message.text for message in generator.messages[1:]]
+
+    assert "# CRISIS CONTINUITY" in system_prompt
+    assert "the crisis remains unresolved" in system_prompt
+    assert conversation == [
+        "I am thinking about suicide.",
+        "Please contact crisis support. Are you safe right now?",
+        "I lost my phone",
+    ]
+
+
 def test_api_proxy_generation_errors_propagate_instead_of_becoming_fake_success(monkeypatch):
     _install_session_doubles(monkeypatch)
     manager = HaystackPipelineManager()
