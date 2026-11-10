@@ -16,6 +16,7 @@ from utils.session_utils import fetch_session_metadata, estimate_tokens_from_seg
 from agents.document_agent import get_document_agent
 from document_generation.refinement import RefinementValidationError, refinement_parts
 from document_generation.language import DocumentLanguageError
+from document_generation.structure import DocumentStructureError
 from document_generation.generator import generate_document_from_context
 from document_generation.large_context import (
     estimate_session_data_tokens,
@@ -552,7 +553,7 @@ For more information, please review our Terms of Service at www.ANTSA.com.au."""
             metadata=result['metadata']
         )
         
-    except (RefinementValidationError, DocumentLanguageError) as e:
+    except (RefinementValidationError, DocumentLanguageError, DocumentStructureError) as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     except HTTPException:
         raise
