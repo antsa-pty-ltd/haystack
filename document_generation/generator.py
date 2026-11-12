@@ -22,6 +22,11 @@ from document_generation.refinement import (
     unmet_name_removals,
 )
 from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
+from document_generation.structure import (
+    structural_contract,
+    structure_problems,
+    validate_document_structure,
+)
 from llm_routing import (
     DOCUMENT_DRAFT_DIRECT_MODEL,
     DOCUMENT_DRAFT_WORKLOAD,
@@ -151,6 +156,11 @@ async def generate_document_from_context(
         refinement = refinement_parts(template_content)
         word_limit = shortening_word_limit(*refinement) if refinement else None
         refinement_instructions = refinement[1] if refinement else ''
+        # Structural contract: the template — or, for an edit, the document
+        # being edited — names the sections the result must contain. A source
+        # whose headings cannot be parsed fails here, before any provider
+        # call, instead of passing without a structural check.
+        structure_contract = structural_contract(refinement[0] if refinement else template_content)
         # PRIVACY: the NestJS api sends tokenized identifiers (e.g. [CLIENT_NAME],
         # [PRACTITIONER_NAME]); real names are substituted back only AFTER this
         # LLM call. Default to the tokens so a real name is never the fallback.
@@ -470,13 +480,14 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             generated_word_count = len(generated_content.split())
             exceeds_word_limit = word_limit is not None and generated_word_count > word_limit
             ignored_name_removals = unmet_name_removals(refinement_instructions, generated_content)
-            if not exceeds_word_limit and not ignored_name_removals:
+            structure_failures = structure_problems(structure_contract, generated_content)
+            if not exceeds_word_limit and not ignored_name_removals and not structure_failures:
                 break
             logger.info(
                 "Document refinement retry: original_words=%s result_words=%s max_words=%s "
-                "unmet_name_removal=%s attempt=%s",
-                len(refinement[0].split()), generated_word_count, word_limit,
-                bool(ignored_name_removals), attempt + 1,
+                "unmet_name_removal=%s structure_failures=%s attempt=%s",
+                len(refinement[0].split()) if refinement else 0, generated_word_count, word_limit,
+                bool(ignored_name_removals), structure_failures, attempt + 1,
             )
             retry_requirements = []
             if exceeds_word_limit:
@@ -489,6 +500,13 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
                     "The requested name removal was not applied. Remove each requested name token "
                     "wherever it appears. Do not replace a removed first name or surname with the "
                     "corresponding full-name token."
+                )
+            if structure_failures:
+                retry_requirements.append(
+                    "The document does not match the required template structure: "
+                    + "; ".join(structure_failures)
+                    + ". Return the complete document with every required section heading "
+                    "and content beneath it."
                 )
             response = await _create_with_outcome(
                 draft_router,
@@ -514,6 +532,7 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
         if unmet_name_removals(refinement_instructions, generated_content):
             raise RefinementValidationError("The requested name removal could not be applied. Please try again.")
+        validate_document_structure(structure_contract, generated_content)
 
         # Compare only the sources this request actually sent to the provider.
         # For refinement, old transcripts are intentionally absent. Only the
@@ -534,6 +553,9 @@ Focus particularly on preserving the integrity of therapeutic interventions and 
             raise RefinementValidationError("The document could not be shortened to the requested length. Please try again.")
         if unmet_name_removals(refinement_instructions, generated_content):
             raise RefinementValidationError("The requested name removal could not be applied. Please try again.")
+        # The language repair rewrote the document: hold the repaired text to
+        # the same structural contract before it can be returned.
+        validate_document_structure(structure_contract, generated_content)
 
         logger.info(f"✅ Document generated: {len(generated_content)} chars")
         
