@@ -59,4 +59,9 @@ jobs:
             --base master \
             --head develop \
             --title "Promote develop to master: ${{ inputs.reason }}" \
-            --body "${PR_BODY}"
+            --body "${PR_BODY}" \
+          || {
+            echo "Promotion PR already open - leaving the existing one in place:"
+            gh pr list --base master --head develop --state open \
+              --json url -q '.[] | "- \(.title): \(.url)"'
+          }
