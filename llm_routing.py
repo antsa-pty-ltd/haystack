@@ -29,6 +29,10 @@ PREVIOUS_SESSION_SUMMARY_FOUNDRY_ALIAS_ENV = (
 )
 GATEWAY_BASE_URL_ENV = "LLM_GATEWAY_BASE_URL"
 HAYSTACK_GATEWAY_API_KEY_ENV = "HAYSTACK_LLM_GATEWAY_API_KEY"
+LLM_EGRESS_POLICY_ENV = "LLM_EGRESS_POLICY"
+EGRESS_POLICY_UNRESTRICTED = "unrestricted"
+EGRESS_POLICY_REQUIRE_GATEWAY = "require_gateway"
+EGRESS_POLICIES = (EGRESS_POLICY_UNRESTRICTED, EGRESS_POLICY_REQUIRE_GATEWAY)
 MODEL_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 
 WEB_ASSISTANT_WORKLOAD = "web_assistant"
@@ -255,9 +259,31 @@ class LlmWorkloadRouter:
         direct_client: Any,
         gateway_client_factory: GatewayClientFactory,
     ) -> LlmTarget:
-        route_value = self._optional_env(self._route_env) or (
-            LlmRoute.DIRECT_OPENAI.value
+        policy_value = self._optional_env(LLM_EGRESS_POLICY_ENV) or (
+            EGRESS_POLICY_UNRESTRICTED
         )
+        if policy_value not in EGRESS_POLICIES:
+            raise LlmRoutingConfigurationError(
+                f"{LLM_EGRESS_POLICY_ENV} must be one of: "
+                f"{', '.join(EGRESS_POLICIES)}"
+            )
+
+        route_value = self._optional_env(self._route_env)
+        if policy_value == EGRESS_POLICY_REQUIRE_GATEWAY:
+            # No direct/openai fallback while the egress policy is on: an
+            # explicit direct route conflicts with the policy and must be
+            # fixed at the environment level, before any provider call.
+            if route_value == LlmRoute.DIRECT_OPENAI.value:
+                raise LlmRoutingConfigurationError(
+                    f"{LLM_EGRESS_POLICY_ENV}="
+                    f"{EGRESS_POLICY_REQUIRE_GATEWAY} forbids "
+                    f"{self._route_env}={LlmRoute.DIRECT_OPENAI.value}; "
+                    "select a litellm_ gateway route"
+                )
+            if not route_value:
+                route_value = LlmRoute.LITELLM_OPENAI.value
+        else:
+            route_value = route_value or LlmRoute.DIRECT_OPENAI.value
         try:
             route = LlmRoute(route_value)
         except ValueError as error:
