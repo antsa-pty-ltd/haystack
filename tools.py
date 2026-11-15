@@ -2152,6 +2152,18 @@ class ToolManager:
         return timezone.utc, 'UTC'
 
     @staticmethod
+    def _api_error_status(error_message: str) -> Optional[int]:
+        """HTTP status of a failed API call, read from the error prefix only.
+
+        Matching "401"/"404" anywhere in the text misfires on timestamps and
+        ids in the response body (e.g. "...T02:01:14.401Z"), telling a
+        practitioner their login expired when the request was merely invalid.
+        """
+        import re
+        match = re.match(r"\s*API request failed: (\d{3})\b", error_message or "")
+        return int(match.group(1)) if match else None
+
+    @staticmethod
     def _parse_api_datetime(value: Any) -> Optional[datetime]:
         """Parse an API timestamp into an aware UTC datetime."""
         if not value or not isinstance(value, str):
@@ -3461,13 +3473,14 @@ Please refine the following document according to these instructions:
             user_guidance = "Please try again or contact support if the issue persists."
             
             # Detect specific error types
-            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+            status_code = self._api_error_status(error_message)
+            if status_code == 401 or "Unauthorized" in error_message or "authentication" in error_message.lower():
                 error_type = "Authentication Error"
                 user_guidance = "Your session may have expired. Please refresh the page and try again."
-            elif "403" in error_message or "Forbidden" in error_message:
+            elif status_code == 403 or "Forbidden" in error_message:
                 error_type = "Permission Error"
                 user_guidance = "You don't have permission to access this client information."
-            elif "404" in error_message or "Not Found" in error_message:
+            elif status_code == 404 or "Not Found" in error_message:
                 error_type = "Client Not Found"
                 user_guidance = f"No clients found matching '{query}'. Please check the spelling and try again."
             elif "timeout" in error_message.lower() or "timed out" in error_message.lower():
@@ -4775,13 +4788,14 @@ Please refine the following document according to these instructions:
             user_guidance = "Please try again or contact support if the issue persists."
             
             # Detect specific error types
-            if "401" in error_message or "Unauthorized" in error_message or "authentication" in error_message.lower():
+            status_code = self._api_error_status(error_message)
+            if status_code == 401 or "Unauthorized" in error_message or "authentication" in error_message.lower():
                 error_type = "Authentication Error"
                 user_guidance = "Your session may have expired. Please refresh the page and try again."
-            elif "403" in error_message or "Forbidden" in error_message:
+            elif status_code == 403 or "Forbidden" in error_message:
                 error_type = "Permission Error"
                 user_guidance = "You don't have permission to access session information."
-            elif "404" in error_message or "Not Found" in error_message:
+            elif status_code == 404 or "Not Found" in error_message:
                 error_type = "Sessions Not Found"
                 criteria = []
                 if client_name:
