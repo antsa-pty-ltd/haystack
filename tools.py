@@ -18,7 +18,7 @@ from llm_routing import (
     gateway_chat_compatibility,
     router_registry,
 )
-from regions import configured_country_code, get_region
+from regions import configured_country_code, format_date, get_region
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +324,7 @@ class ToolManager:
                             "properties": {
                                 "timezone": {
                                     "type": "string",
-                                    "description": "Optional IANA timezone override (e.g. 'Australia/Sydney'). Omit it — the practitioner's own timezone is used automatically.",
+                                    "description": "Optional IANA timezone override (an 'Area/City' name such as 'Europe/Paris'). Omit it — the practitioner's own timezone is used automatically.",
                                 }
                             }
                         }
@@ -1088,7 +1088,7 @@ class ToolManager:
                                 },
                                 "generation_instructions": {
                                     "type": "string",
-                                    "description": "Optional style or content instructions to apply during generation (e.g., heavy Australian slang)"
+                                    "description": "Optional style or content instructions to apply during generation (e.g., warmer tone, plain language, more detail)"
                                 },
                                 "sessions": {
                                     "type": "array",
@@ -1126,7 +1126,7 @@ class ToolManager:
                                 },
                                 "generation_instructions": {
                                     "type": "string",
-                                    "description": "Optional style or content instructions to apply during generation (e.g., heavy Australian slang)"
+                                    "description": "Optional style or content instructions to apply during generation (e.g., warmer tone, plain language, more detail)"
                                 }
                             },
                             "required": []
@@ -1173,7 +1173,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "refine_document",
-                        "description": "Refine or modify an existing generated document with specific instructions (e.g., make it sound Australian, add more detail, change tone). This will create a new version of the document.",
+                        "description": "Refine or modify an existing generated document with specific instructions (e.g., simplify the language, add more detail, change tone). This will create a new version of the document.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -1183,7 +1183,7 @@ class ToolManager:
                                 },
                                 "refinement_instructions": {
                                     "type": "string",
-                                    "description": "Detailed instructions for how to refine the document (e.g., 'make it sound like outback Australian with slang')"
+                                    "description": "Detailed instructions for how to refine the document (e.g., 'make it more conversational and use plain language')"
                                 },
                                 "new_document_name": {
                                     "type": "string",
@@ -2177,7 +2177,7 @@ class ToolManager:
 
     @staticmethod
     def _day_label(moment: datetime) -> str:
-        return f"{moment.strftime('%A')} {moment.day} {moment.strftime('%B')}"
+        return format_date(moment, "weekday_day_month")
 
     async def _get_practitioner_today(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -4746,7 +4746,7 @@ Please refine the following document according to these instructions:
                 recorded_label = None
                 if recorded_at:
                     local = recorded_at.astimezone(tz)
-                    recorded_label = f"{self._day_label(local)} {local.year}, {self._clock_label(local)}"
+                    recorded_label = f"{format_date(local, 'long')}, {self._clock_label(local)}"
                 normalised_sessions.append({
                     "session_id": item.get("id") or item.get("session_id"),
                     "client_id": item.get("clientId") or item.get("client_id"),
@@ -5308,7 +5308,7 @@ Please refine the following document according to these instructions:
                         dt = self._parse_api_datetime(raw_date)
                         if dt:
                             local = dt.astimezone(self._resolve_timezone()[0])
-                            recording_date = f"{local.day} {local.strftime('%B %Y')}, {self._clock_label(local)}"
+                            recording_date = f"{format_date(local, 'day_month_year')}, {self._clock_label(local)}"
                     except Exception:
                         pass
                 session_summaries.append({

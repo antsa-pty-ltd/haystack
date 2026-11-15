@@ -10,6 +10,10 @@ data in ``REGIONS`` below, never ``if country == ...`` branches in code:
   write in (rendered into prompts via the ``${language_variety}`` placeholder).
 - ``default_timezone`` — the IANA timezone used for schedule maths when neither
   the browser nor the service configuration supplies one.
+- ``locale`` — the BCP 47 locale of the region (``en-AU``, ``en-US``, ...).
+- ``date_formats`` — how dates are written for this region (day-first or
+  month-first, separators). Every human-readable date goes through
+  ``format_date`` so no call site hard-codes an order.
 - ``crisis_resources`` — the concrete crisis contacts surfaced to users. Each
   region needs exactly one ``EMERGENCY`` contact and at least one
   ``CRISIS_LINE``; this is checked at import so a bad entry fails the deploy
@@ -30,8 +34,9 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Tuple
+from dataclasses import dataclass, fields
+from datetime import date, datetime
+from typing import Dict, Mapping, Optional, Tuple, Union
 
 # Used only when the deployment's COUNTRY_CODE is unset or not in REGIONS.
 FALLBACK_COUNTRY_CODE = "au"
@@ -63,6 +68,26 @@ class CrisisResource:
         return line
 
 
+# Tokens available in a date template. Names come from strftime (%A, %B) so
+# they follow the process locale exactly as before.
+DATE_TOKENS = ("weekday", "day", "dd", "month", "mm", "year")
+_DATE_TOKEN = re.compile(r"\{([^{}]*)\}")
+
+
+@dataclass(frozen=True)
+class DateFormats:
+    """
+    Date templates for a region, written with ``{token}`` placeholders from
+    ``DATE_TOKENS``: ``weekday`` (Monday), ``day`` (3), ``dd`` (03),
+    ``month`` (March), ``mm`` (03), ``year`` (2025).
+    """
+
+    numeric: str  # e.g. 03/03/2025
+    long: str  # weekday, day, month and year
+    weekday_day_month: str  # weekday, day and month (no year)
+    day_month_year: str  # day, month and year (no weekday)
+
+
 @dataclass(frozen=True)
 class Region:
     """Everything that differs between country deployments."""
@@ -71,6 +96,8 @@ class Region:
     language_variety: str
     default_timezone: str
     crisis_resources: Tuple[CrisisResource, ...]
+    locale: str
+    date_formats: DateFormats
 
     @property
     def emergency_contact(self) -> CrisisResource:
@@ -93,6 +120,13 @@ REGIONS: Dict[str, Region] = {
         code="au",
         language_variety="Australian English",
         default_timezone="Australia/Sydney",
+        locale="en-AU",
+        date_formats=DateFormats(
+            numeric="{dd}/{mm}/{year}",
+            long="{weekday} {day} {month} {year}",
+            weekday_day_month="{weekday} {day} {month}",
+            day_month_year="{day} {month} {year}",
+        ),
         crisis_resources=(
             CrisisResource("Emergency services", "000", "immediate danger", kind=EMERGENCY),
             CrisisResource("Lifeline", "13 11 14", "24/7 crisis support", kind=CRISIS_LINE),
@@ -105,6 +139,13 @@ REGIONS: Dict[str, Region] = {
         code="us",
         language_variety="American English",
         default_timezone="America/New_York",
+        locale="en-US",
+        date_formats=DateFormats(
+            numeric="{mm}/{dd}/{year}",
+            long="{weekday}, {month} {day}, {year}",
+            weekday_day_month="{weekday}, {month} {day}",
+            day_month_year="{month} {day}, {year}",
+        ),
         crisis_resources=(
             CrisisResource("Emergency services", "911", "immediate danger", kind=EMERGENCY),
             CrisisResource("988 Suicide & Crisis Lifeline", "call or text 988", "24/7 crisis support", kind=CRISIS_LINE),
@@ -115,6 +156,13 @@ REGIONS: Dict[str, Region] = {
         code="uk",
         language_variety="British English",
         default_timezone="Europe/London",
+        locale="en-GB",
+        date_formats=DateFormats(
+            numeric="{dd}/{mm}/{year}",
+            long="{weekday} {day} {month} {year}",
+            weekday_day_month="{weekday} {day} {month}",
+            day_month_year="{day} {month} {year}",
+        ),
         crisis_resources=(
             CrisisResource("Emergency services", "999", "immediate danger", kind=EMERGENCY),
             CrisisResource("Samaritans", "116 123", "free, 24/7", kind=CRISIS_LINE),
@@ -133,6 +181,15 @@ def validate_region(region: Region) -> None:
         raise ValueError(f"Region {region.code!r} has no language_variety")
     if not region.default_timezone.strip():
         raise ValueError(f"Region {region.code!r} has no default_timezone")
+    if not region.locale.strip():
+        raise ValueError(f"Region {region.code!r} has no locale")
+    for field in fields(DateFormats):
+        template = getattr(region.date_formats, field.name)
+        unknown = set(_DATE_TOKEN.findall(template)) - set(DATE_TOKENS)
+        if not template.strip() or unknown:
+            raise ValueError(
+                f"Region {region.code!r} has an invalid {field.name} date format {template!r}"
+            )
     for resource in region.crisis_resources:
         if resource.kind not in _CONTACT_KINDS:
             raise ValueError(f"Region {region.code!r} has unknown contact kind {resource.kind!r}")
@@ -207,3 +264,30 @@ def render_region_text(text: str, region: Region) -> str:
         return values[key]
 
     return _PLACEHOLDER.sub(fill, text)
+
+
+DateStyle = str  # one of the DateFormats field names
+
+
+def format_date(
+    moment: Union[date, datetime],
+    style: DateStyle = "numeric",
+    region: Optional[Region] = None,
+) -> str:
+    """
+    Write a date the way the region writes it. ``style`` names a
+    ``DateFormats`` field; ``region`` defaults to the deployment's region.
+    The caller converts ``moment`` to the right time zone first.
+    """
+    formats = (region or get_region()).date_formats
+    if style not in {f.name for f in fields(DateFormats)}:
+        raise ValueError(f"Unknown date style {style!r}")
+    template = getattr(formats, style)
+    return template.format(
+        weekday=moment.strftime("%A"),
+        day=moment.day,
+        dd=f"{moment.day:02d}",
+        month=moment.strftime("%B"),
+        mm=f"{moment.month:02d}",
+        year=moment.year,
+    )
