@@ -1,6 +1,8 @@
 """
 Tool definitions and implementations for different personas
 """
+import asyncio
+import inspect
 import json
 import logging
 import aiohttp
@@ -55,6 +57,26 @@ CLIENT_MOOD_ACTIVITIES = (
     "Biking",
     "Walking",
 )
+
+# Used only when neither the browser nor the service configuration supplies a
+# timezone. Keyed by the deployment's COUNTRY_CODE.
+COUNTRY_DEFAULT_TIMEZONES = {
+    "AU": "Australia/Sydney",
+    "NZ": "Pacific/Auckland",
+    "UK": "Europe/London",
+    "GB": "Europe/London",
+    "US": "America/New_York",
+}
+
+# Largest page the API accepts on /haystack/search-clients.
+CLIENT_SEARCH_MAX_LIMIT = 50
+
+# Template bodies run to tens of kilobytes. Listings carry a short preview;
+# the full body is resolved server-side when a template is actually used.
+TEMPLATE_PREVIEW_CHARS = 280
+
+API_REQUEST_TIMEOUT_SECONDS = 45
+
 
 class ToolManager:
     """Manages tools for different personas"""
@@ -179,7 +201,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_client_base",
-                        "description": "Get the complete client base information including names, emails, genders, and phone numbers for all clients in the clinic.",
+                        "description": "List the practitioner's whole client roster (name, email, status) with totals per status. Use for 'list my clients' / 'how many clients do I have' questions. For one named client use search_clients instead.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -298,9 +320,10 @@ class ToolManager:
                     "function": {
                         "name": "get_practitioner_today",
                         "description": (
-                            "Returns a structured overview of the logged-in practitioner's TODAY: "
-                            "today's video sessions (with client name, time, status), the next upcoming "
-                            "session (across any future date), and recent unread chat rooms. "
+                            "Returns a structured overview of the logged-in practitioner's TODAY in their "
+                            "local timezone: today's sessions in order (client name, start/end time, type, "
+                            "status), the breaks between them, how many are done and remaining, the next "
+                            "upcoming session (up to a week ahead), and unread client messages. "
                             "Use this whenever the practitioner asks about their day, schedule, or what's next "
                             "(e.g. 'summarise my day', 'who's my next client?', 'what's on today?'). "
                             "Always call this BEFORE answering those questions."
@@ -310,7 +333,7 @@ class ToolManager:
                             "properties": {
                                 "timezone": {
                                     "type": "string",
-                                    "description": "IANA timezone (e.g. 'Australia/Sydney'). Defaults to UTC if absent.",
+                                    "description": "Optional IANA timezone override (e.g. 'Australia/Sydney'). Omit it — the practitioner's own timezone is used automatically.",
                                 }
                             }
                         }
@@ -578,7 +601,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "search_sessions",
-                        "description": "Search transcription sessions by client name, date range, or keywords.",
+                        "description": "Search a client's recorded/transcribed sessions by client, date range, or keywords. Each result carries a session_id — pass that exact value to load_session, analyze_session_content, validate_sessions, load_session_direct, load_multiple_sessions and (as transcript_ids) semantic_search_sessions.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -602,7 +625,7 @@ class ToolManager:
                                 },
                                 "keywords": {
                                     "type": "string",
-                                    "description": "Keywords to search for in session content"
+                                    "description": "One distinctive word or exact phrase to find in the transcript text (case-insensitive). Prefer a single word, e.g. 'investors'."
                                 },
                                 "limit": {
                                     "type": "integer",
@@ -627,7 +650,7 @@ class ToolManager:
                             "properties": {
                                 "session_id": {
                                     "type": "string",
-                                    "description": "Session ID to load (returned by search_sessions)"
+                                    "description": "The session_id returned by search_sessions"
                                 },
                                 "client_id": {
                                     "type": "string", 
@@ -697,7 +720,11 @@ class ToolManager:
                                 "transcript_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "Transcript IDs to search within (get these from search_sessions or load_session results)"
+                                    "description": "The session_id values (from search_sessions) of the sessions to search within"
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "The client_id that owns those sessions (from search_sessions/search_clients)"
                                 },
                                 "limit": {
                                     "type": "integer",
@@ -706,11 +733,11 @@ class ToolManager:
                                 },
                                 "similarity_threshold": {
                                     "type": "number",
-                                    "default": 0.7,
-                                    "description": "Minimum similarity score from 0.0 to 1.0 (default: 0.7)"
+                                    "default": 0.45,
+                                    "description": "Optional minimum similarity from 0.0 to 1.0. Leave it out: the default is tuned for spoken transcripts and widens automatically when nothing matches."
                                 }
                             },
-                            "required": ["query", "transcript_ids"]
+                            "required": ["query", "transcript_ids", "client_id"]
                         }
                     }
                 },
@@ -864,7 +891,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "load_session_direct",
-                        "description": "Load a session directly using existing UI logic (like clicking Load Session button). Call AFTER setting client selection.",
+                        "description": "Open a recorded session in the practitioner's Sessions workspace so it is loaded on screen as context. Only works while the practitioner is on the Sessions page; pass the values returned by search_sessions.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -897,7 +924,7 @@ class ToolManager:
                                     "description": "Average confidence score of the transcript"
                                 }
                             },
-                            "required": ["session_id", "client_id", "client_name", "recording_date", "duration", "total_segments", "average_confidence"]
+                            "required": ["session_id", "client_id", "client_name"]
                         }
                     }
                 },
@@ -948,7 +975,7 @@ class ToolManager:
                                                 "description": "Average confidence score of the transcript"
                                             }
                                         },
-                                        "required": ["session_id", "client_id", "client_name", "recording_date", "duration", "total_segments", "average_confidence"]
+                                        "required": ["session_id", "client_id", "client_name"]
                                     }
                                 }
                             },
@@ -965,7 +992,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "get_templates",
-                        "description": "Get all available document templates from the API for template selection and document generation",
+                        "description": "List the document templates available to the practitioner (id, name, description and a short preview — not the full body). Use the id with set_selected_template, or select_template_by_name.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -991,7 +1018,7 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "set_selected_template",
-                        "description": "Set the active template in the UI for document generation (like clicking on a template in the templates modal)",
+                        "description": "Set the active template in the Sessions workspace for document generation. Pass the template_id from get_templates; the template body is looked up automatically — do not paste it.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -1005,7 +1032,7 @@ class ToolManager:
                                 },
                                 "template_content": {
                                     "type": "string",
-                                    "description": "The template content/body text"
+                                    "description": "Optional. Leave out — the saved template body is loaded from template_id."
                                 },
                                 "template_description": {
                                     "type": "string",
@@ -1013,7 +1040,7 @@ class ToolManager:
                                     "default": ""
                                 }
                             },
-                            "required": ["template_id", "template_name", "template_content"]
+                            "required": ["template_id"]
                         }
                     }
                 },
@@ -1048,13 +1075,17 @@ class ToolManager:
                     "type": "function",
                     "function": {
                         "name": "generate_document_from_loaded",
-                        "description": "Generate a document in the UI using the provided template content and sessions currently loaded in the interface.",
+                        "description": "Generate a document in the Sessions workspace from the sessions currently loaded on screen. By default it uses the template already selected on screen; pass template_id to use a different saved template. Only pass template_content for a one-off custom structure.",
                         "parameters": {
                             "type": "object",
                             "properties": {
+                                "template_id": {
+                                    "type": "string",
+                                    "description": "Optional id of a saved template (from get_templates) to use instead of the one selected on screen"
+                                },
                                 "template_content": {
                                     "type": "string",
-                                    "description": "The full template text to use for generation"
+                                    "description": "Optional custom template text. Omit to use the selected or saved template."
                                 },
                                 "template_name": {
                                     "type": "string",
@@ -1082,7 +1113,7 @@ class ToolManager:
                                     }
                                 }
                             },
-                            "required": ["template_content"]
+                            "required": []
                         }
                     }
                 },
@@ -1568,6 +1599,8 @@ class ToolManager:
                 "search_specific_clients": self.tools["search_specific_clients"]["implementation"],
                 "get_client_base": self.tools["get_client_base"]["implementation"],
                 "get_client_homework_status": self.tools["get_client_homework_status"]["implementation"],
+                "get_homework_result_detail": self.tools["get_homework_result_detail"]["implementation"],
+                "get_homework_results_by_assignment": self.tools["get_homework_results_by_assignment"]["implementation"],
                 "get_clinic_profile": self.tools["get_clinic_profile"]["implementation"],
                 "list_practitioners": self.tools["list_practitioners"]["implementation"],
                 "get_clinic_stats": self.tools["get_clinic_stats"]["implementation"],
@@ -1823,7 +1856,10 @@ class ToolManager:
             if data is not None and method_upper in {'POST', 'PUT', 'PATCH'}:
                 request_kwargs["json"] = data
 
-            async with aiohttp.ClientSession() as session:
+            # A hung backend call must not hold the practitioner's chat open
+            # until the tool wrapper's 120s ceiling.
+            timeout = aiohttp.ClientTimeout(total=API_REQUEST_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.request(method_upper, url, **request_kwargs) as response:
                     response_text = await response.text()
                     if 200 <= response.status < 300:
@@ -1838,6 +1874,9 @@ class ToolManager:
                     # flood application logs or a fail-closed tool response.
                     error_text = response_text[:1000]
                     raise Exception(f"API request failed: {response.status} - {error_text}")
+        except asyncio.TimeoutError:
+            logger.error(f"Timed out making API request to {url}")
+            raise Exception(f"Request timed out after {API_REQUEST_TIMEOUT_SECONDS}s")
         except aiohttp.ClientError as e:
             logger.error(f"Network error making API request to {url}: {e}")
             raise Exception(f"Network error: {e}")
@@ -1848,12 +1887,7 @@ class ToolManager:
     async def _get_clinic_profile(self, include_contacts: bool = True, include_locations: bool = True) -> Dict[str, Any]:
         """Get clinic profile details from API (resolve clinicId from account)."""
         try:
-            # Resolve timezone from context/env with sensible default
-            tz = None
-            if isinstance(self.current_page_context, dict):
-                tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
-            if not tz:
-                tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+            tz = self._resolve_timezone()[1]
 
             # 1) Get account info
             me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
@@ -1914,53 +1948,92 @@ class ToolManager:
             if include_locations:
                 result["locations"] = (clinic_obj or {}).get('locations', [])
 
-            # Include raw for inspection/debug
-            result["raw"] = me
-
             return result
         except Exception as e:
             logger.error(f"Error getting clinic profile: {e}")
             return {"error": f"Failed to fetch clinic profile: {str(e)}"}
 
     async def _list_practitioners(self, status: str = "active", role: str = "", limit: int = 50) -> Dict[str, Any]:
-        """List clinic practitioners via API"""
+        """List the clinic's practitioners.
+
+        Clinic owners can see the full roster. Other roles are not permitted to
+        list colleagues, so they get their own profile plus an explicit note —
+        never a one-person list presented as the whole clinic.
+        """
         try:
-            # Get account info to extract practitioner data
-            tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
-            me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
+            tz_name = self._resolve_timezone()[1]
+            me = await self._make_api_request('GET', '/account/v2/me', params={'timezone': tz_name})
             profiles = me.get('profiles') or []
-            
-            practitioners = []
-            for profile in profiles:
-                # Filter by status if specified
-                profile_status = profile.get('status', 'ACTIVE').lower()
-                if status != "all" and status.lower() != profile_status:
-                    continue
-                    
-                # Filter by role if specified
-                profile_role = profile.get('role', '').lower()
-                if role and role.lower() not in profile_role:
-                    continue
-                
-                practitioner_type = profile.get('practitionerType') or {}
-                practitioners.append({
-                    "practitioner_id": profile.get('id'),
-                    "name": f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
-                    "email": me.get('email'),  # Account level email
-                    "phone": profile.get('phone'),
-                    "role": profile.get('role'),
-                    "title": profile.get('title'),
-                    "practitioner_type": practitioner_type.get('name'),
-                    "address": profile.get('address'),
-                    "status": profile_status.upper(),
-                    "avatar": profile.get('avatar'),
-                    "is_completed": profile.get('isCompleted', False)
-                })
-            
-            return {
-                "count": len(practitioners),
-                "practitioners": practitioners[:limit]  # Apply limit
+            own_profile = next((p for p in profiles if p.get('id') == self.profile_id), None) or (profiles[0] if profiles else {})
+
+            def matches(profile_status: str, profile_role: str, practitioner_type: str) -> bool:
+                if status != "all" and status.lower() != (profile_status or '').lower():
+                    return False
+                if role and role.lower() not in f"{profile_role or ''} {practitioner_type or ''}".lower():
+                    return False
+                return True
+
+            roster: List[Dict[str, Any]] = []
+            scope = "own_profile_only"
+            if (own_profile.get('role') or '').upper() == 'OWNER':
+                try:
+                    page = 1
+                    while len(roster) < 200:
+                        resp = await self._make_api_request('GET', 'owner/practitioners', params={'page': page, 'size': 50})
+                        rows = resp.get('data') or [] if isinstance(resp, dict) else []
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            p_type = row.get('practitionerType')
+                            p_type_name = p_type.get('name') if isinstance(p_type, dict) else p_type
+                            row_status = row.get('status') or 'ACTIVE'
+                            row_role = row.get('role') or 'PRACTITIONER'
+                            if not matches(row_status, row_role, p_type_name or ''):
+                                continue
+                            roster.append({
+                                "practitioner_id": row.get('id') or row.get('profileId'),
+                                "name": f"{row.get('firstName') or ''} {row.get('lastName') or ''}".strip() or None,
+                                "email": row.get('email'),
+                                "role": row_role,
+                                "practitioner_type": p_type_name,
+                                "status": str(row_status).upper(),
+                            })
+                        total_pages = resp.get('totalPage') or 1 if isinstance(resp, dict) else 1
+                        if page >= total_pages or not rows:
+                            break
+                        page += 1
+                    scope = "clinic"
+                except Exception as roster_error:
+                    logger.warning(f"owner/practitioners fetch failed in list_practitioners: {roster_error}")
+                    roster = []
+
+            if scope != "clinic":
+                for profile in ([own_profile] if own_profile else []):
+                    practitioner_type = (profile.get('practitionerType') or {}).get('name')
+                    profile_status = profile.get('status', 'ACTIVE')
+                    if not matches(profile_status, profile.get('role', ''), practitioner_type or ''):
+                        continue
+                    roster.append({
+                        "practitioner_id": profile.get('id'),
+                        "name": f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
+                        "email": me.get('email'),
+                        "role": profile.get('role'),
+                        "practitioner_type": practitioner_type,
+                        "status": str(profile_status).upper(),
+                    })
+
+            result: Dict[str, Any] = {
+                "scope": scope,
+                "count": len(roster[:limit]),
+                "practitioners": roster[:limit],
             }
+            if scope != "clinic":
+                result["note"] = (
+                    "Only the signed-in practitioner's own profile is visible to this role. "
+                    "The full clinic roster is available to the clinic owner on the Practitioners page. "
+                    "Do not present this as the complete list of clinic practitioners."
+                )
+            return result
         except Exception as e:
             logger.error(f"Error listing practitioners: {e}")
             return {"error": f"Failed to list practitioners: {str(e)}", "practitioners": []}
@@ -1968,24 +2041,31 @@ class ToolManager:
     async def _get_clinic_stats(self, date_range: Optional[Dict] = None, include_billing: bool = False, include_appointments: bool = False) -> Dict[str, Any]:
         """Get high-level clinic statistics from API using haystack search-clients and account data."""
         try:
-            # Resolve timezone from context/env with sensible default
-            tz = None
-            if isinstance(self.current_page_context, dict):
-                tz = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
-            if not tz:
-                tz = os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
+            tz = self._resolve_timezone()[1]
 
             # Get account info for practitioner data
             me = await self._make_api_request('GET', '/account/v2/me', params={ 'timezone': tz })
             profiles = me.get('profiles') or []
             
             # Get client data from haystack search (API limit is 50)
-            clients_response = await self._make_api_request('GET', '/haystack/search-clients', params={ 'query': '', 'limit': 50 })
+            clients_response = await self._make_api_request('GET', '/haystack/search-clients', params={ 'query': '', 'limit': CLIENT_SEARCH_MAX_LIMIT })
             clients = clients_response.get('clients', [])
             total_clients = clients_response.get('total', len(clients))
             
             # Calculate client stats
             active_clients = len([c for c in clients if c.get('status') == 'ACTIVE'])
+            status_counts: Optional[Dict[str, Any]] = None
+            try:
+                # The roster endpoint counts every client, not just the first page.
+                roster = await self._make_api_request('GET', 'practitioners/clients', params={'page': 1, 'size': 1})
+                if isinstance(roster, dict):
+                    if isinstance(roster.get('statusCounts'), dict):
+                        status_counts = roster['statusCounts']
+                        active_clients = int(status_counts.get('active') or 0)
+                    if isinstance(roster.get('totalRecord'), int):
+                        total_clients = roster['totalRecord']
+            except Exception as roster_error:
+                logger.debug(f"practitioners/clients unavailable for clinic stats: {roster_error}")
             total_assignments = sum(c.get('assignments', {}).get('total', 0) for c in clients)
             completed_assignments = sum(c.get('assignments', {}).get('completed', 0) for c in clients)
             recent_messages = sum(c.get('recent_messages', 0) for c in clients)
@@ -2002,7 +2082,9 @@ class ToolManager:
                     "active": active_clients,
                     "total_assignments": total_assignments,
                     "completed_assignments": completed_assignments,
-                    "recent_messages": recent_messages
+                    "recent_messages": recent_messages,
+                    "status_counts": status_counts,
+                    "assignment_figures_cover_first_n_clients": len(clients),
                 },
                 "practitioners": {
                     "total": len(profiles),
@@ -2040,44 +2122,95 @@ class ToolManager:
             logger.error(f"Error getting clinic stats: {e}")
             return {"error": f"Failed to fetch clinic stats: {str(e)}"}
 
+    def _resolve_timezone(self, requested: Optional[str] = None):
+        """Resolve the practitioner's timezone for schedule maths.
+
+        Order: an explicit, valid tool argument; the browser timezone sent with
+        the chat request; the service TZ setting; the deployment country's
+        default. UTC is the last resort only — defaulting to it made "today"
+        the wrong calendar day for every Australian practitioner before
+        mid-morning.
+        """
+        from zoneinfo import ZoneInfo
+
+        candidates: List[Optional[str]] = [requested]
+        if isinstance(self.current_page_context, dict):
+            candidates.append(self.current_page_context.get('timezone'))
+            candidates.append(self.current_page_context.get('user_timezone'))
+        candidates.append(os.environ.get('TZ'))
+        candidates.append(os.environ.get('TIMEZONE'))
+        candidates.append(
+            COUNTRY_DEFAULT_TIMEZONES.get((os.environ.get('COUNTRY_CODE') or '').strip().upper())
+        )
+        for name in candidates:
+            if not name or not isinstance(name, str):
+                continue
+            try:
+                return ZoneInfo(name.strip()), name.strip()
+            except Exception:
+                continue
+        return timezone.utc, 'UTC'
+
+    @staticmethod
+    def _parse_api_datetime(value: Any) -> Optional[datetime]:
+        """Parse an API timestamp into an aware UTC datetime."""
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _clock_label(moment: datetime) -> str:
+        """12-hour clock label without a leading zero, e.g. '9:05 am'."""
+        hour = moment.hour % 12 or 12
+        return f"{hour}:{moment.minute:02d} {'am' if moment.hour < 12 else 'pm'}"
+
+    @staticmethod
+    def _day_label(moment: datetime) -> str:
+        return f"{moment.strftime('%A')} {moment.day} {moment.strftime('%B')}"
+
     async def _get_practitioner_today(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
-        Returns the logged-in practitioner's TODAY view: today's video sessions,
-        next upcoming session, and recent unread chat rooms.
+        Returns the logged-in practitioner's TODAY view in their own timezone:
+        today's sessions in order, the breaks between them, what is already
+        done, the next upcoming session, and unread client messages.
 
         Implementation:
-        - GET /api/v1/video-sessions/practitioner?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
-          (today + +7 days so we can pick the next-upcoming after today)
-        - GET /api/v1/messages/rooms (unread + recent activity, capped to 10)
+        - GET /api/v1/video-sessions/practitioner with an explicit UTC window
+          covering local today plus the following week (for "what's next").
+        - GET /api/v1/chat/rooms for unread client messages.
         Both calls are authenticated via the practitioner's token + profileid header.
         """
         try:
-            # Resolve timezone with sensible default
-            tz_name = timezone
-            if not tz_name and isinstance(self.current_page_context, dict):
-                tz_name = self.current_page_context.get('timezone') or self.current_page_context.get('user_timezone')
-            tz_name = tz_name or os.environ.get('TZ') or os.environ.get('TIMEZONE') or 'UTC'
-            try:
-                from zoneinfo import ZoneInfo
-                tz = ZoneInfo(tz_name)
-            except Exception:
-                from datetime import timezone as _utc_tz
-                tz = _utc_tz.utc
-                tz_name = 'UTC'
-
+            tz, tz_name = self._resolve_timezone(timezone)
             now_local = datetime.now(tz)
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-            week_end = today_start + timedelta(days=7)
+            tomorrow_start = today_start + timedelta(days=1)
+            window_end = today_start + timedelta(days=8)
 
-            # Today's + next-7-days video sessions for the current practitioner
+            from datetime import timezone as _dt_timezone
+            _utc = _dt_timezone.utc
+
+            def _utc_iso(moment: datetime) -> str:
+                return moment.astimezone(_utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
             sessions: List[Dict[str, Any]] = []
+            schedule_error: Optional[str] = None
             try:
                 sessions_resp = await self._make_api_request(
                     'GET',
                     'video-sessions/practitioner',
                     params={
-                        'startDate': today_start.strftime('%Y-%m-%d'),
-                        'endDate': week_end.strftime('%Y-%m-%d'),
+                        # Full ISO instants: a bare YYYY-MM-DD is read as UTC
+                        # midnight by the API, which silently dropped every
+                        # session before ~10-11am Australian time.
+                        'startDate': _utc_iso(today_start),
+                        'endDate': _utc_iso(window_end),
                     },
                 )
                 if isinstance(sessions_resp, list):
@@ -2086,72 +2219,168 @@ class ToolManager:
                     sessions = sessions_resp['data']
             except Exception as e:
                 logger.warning(f"video-sessions fetch failed in get_practitioner_today: {e}")
+                schedule_error = "The schedule could not be loaded right now."
 
-            def normalise_session(s: Dict[str, Any]) -> Dict[str, Any]:
+            session_type_labels = {
+                'video': 'video call',
+                'telephone': 'phone call',
+                'in_person': 'in person',
+            }
+
+            def normalise_session(s: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                start_utc = self._parse_api_datetime(
+                    s.get('scheduledStartTime') or s.get('startTime') or s.get('startsAt')
+                )
+                if not start_utc:
+                    return None
+                end_utc = self._parse_api_datetime(
+                    s.get('scheduledEndTime') or s.get('endTime') or s.get('endsAt')
+                )
+                start_local = start_utc.astimezone(tz)
+                end_local = end_utc.astimezone(tz) if end_utc else None
                 client = s.get('client') or {}
                 client_name = ' '.join(filter(None, [client.get('firstName'), client.get('lastName')])).strip() or None
+                status = (s.get('status') or '').lower() or None
+                if status in ('cancelled', 'missed', 'completed'):
+                    timing = status
+                elif end_local and end_local <= now_local:
+                    timing = 'finished'
+                elif start_local <= now_local:
+                    timing = 'in_progress'
+                else:
+                    timing = 'upcoming'
+                session_type = s.get('sessionType') or s.get('type')
                 return {
                     'id': s.get('id'),
-                    'startsAt': s.get('startTime') or s.get('scheduledStartTime') or s.get('startsAt'),
-                    'endsAt': s.get('endTime') or s.get('scheduledEndTime') or s.get('endsAt'),
-                    'status': s.get('status'),
-                    'sessionType': s.get('sessionType') or s.get('type'),
                     'clientId': client.get('id') or s.get('clientId'),
                     'clientName': client_name,
-                    'title': s.get('title') or s.get('subject'),
+                    'startsAt': start_local.isoformat(),
+                    'endsAt': end_local.isoformat() if end_local else None,
+                    'startLabel': self._clock_label(start_local),
+                    'endLabel': self._clock_label(end_local) if end_local else None,
+                    'durationMinutes': (
+                        int((end_local - start_local).total_seconds() // 60) if end_local else None
+                    ),
+                    'status': status,
+                    'timing': timing,
+                    'sessionType': session_type,
+                    'sessionTypeLabel': session_type_labels.get(session_type, session_type),
+                    'notes': s.get('notes') or None,
+                    '_start': start_local,
+                    '_end': end_local,
                 }
 
             normalised: List[Dict[str, Any]] = []
             for s in sessions:
                 if isinstance(s, dict):
-                    normalised.append(normalise_session(s))
+                    item = normalise_session(s)
+                    if item:
+                        normalised.append(item)
+            normalised.sort(key=lambda x: x['_start'])
 
-            today_str = today_start.strftime('%Y-%m-%d')
-            today_sessions = [s for s in normalised if s.get('startsAt') and s['startsAt'][:10] == today_str]
-            today_sessions.sort(key=lambda x: x.get('startsAt') or '')
+            todays = [s for s in normalised if today_start <= s['_start'] < tomorrow_start]
+            active_today = [s for s in todays if s['status'] != 'cancelled']
+            cancelled_today = [s for s in todays if s['status'] == 'cancelled']
+            done_timings = ('completed', 'finished', 'missed')
+            completed_today = [s for s in active_today if s['timing'] in done_timings]
+            remaining_today = [s for s in active_today if s['timing'] in ('upcoming', 'in_progress')]
 
-            future_sessions = [s for s in normalised if s.get('startsAt') and s['startsAt'] > now_local.isoformat()]
-            future_sessions.sort(key=lambda x: x.get('startsAt') or '')
-            next_session = future_sessions[0] if future_sessions else None
+            # Breaks: real gaps between consecutive sessions still relevant today.
+            breaks: List[Dict[str, Any]] = []
+            for earlier, later in zip(active_today, active_today[1:]):
+                if not earlier['_end']:
+                    continue
+                gap_minutes = int((later['_start'] - earlier['_end']).total_seconds() // 60)
+                if gap_minutes >= 10:
+                    breaks.append({
+                        'startLabel': self._clock_label(earlier['_end']),
+                        'endLabel': self._clock_label(later['_start']),
+                        'minutes': gap_minutes,
+                        'alreadyPassed': later['_start'] <= now_local,
+                    })
 
-            # Recent rooms / unread activity — best-effort; the endpoint shape varies
+            upcoming = [
+                s for s in normalised
+                if s['timing'] == 'upcoming' and s['status'] not in ('cancelled',)
+            ]
+            next_session = None
+            if upcoming:
+                nxt = upcoming[0]
+                days_away = (nxt['_start'].date() - now_local.date()).days
+                day_label = 'today' if days_away == 0 else 'tomorrow' if days_away == 1 else self._day_label(nxt['_start'])
+                next_session = {
+                    **{k: v for k, v in nxt.items() if not k.startswith('_')},
+                    'dayLabel': day_label,
+                    'startsInMinutes': max(0, int((nxt['_start'] - now_local).total_seconds() // 60)),
+                }
+
+            def public(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                return [{k: v for k, v in item.items() if not k.startswith('_')} for item in items]
+
+            # Unread client messages — best-effort.
             recent_rooms: List[Dict[str, Any]] = []
-            unread_count = 0
+            unread_count: Optional[int] = 0
             try:
-                rooms_resp = await self._make_api_request('GET', 'messages/rooms', params={'page': 1, 'size': 10})
+                rooms_resp = await self._make_api_request('GET', 'chat/rooms', params={'page': 1, 'limit': 20})
                 rooms_data: List[Any] = []
                 if isinstance(rooms_resp, dict):
                     rooms_data = rooms_resp.get('data') or rooms_resp.get('rooms') or []
                 elif isinstance(rooms_resp, list):
                     rooms_data = rooms_resp
-                for r in rooms_data[:10]:
+                for r in rooms_data:
                     if not isinstance(r, dict):
                         continue
-                    other = r.get('otherProfile') or r.get('client') or {}
-                    name = ' '.join(filter(None, [other.get('firstName'), other.get('lastName')])).strip() or r.get('name')
-                    unread_for_room = r.get('unreadCount') or r.get('unread') or 0
-                    if isinstance(unread_for_room, int) and unread_for_room > 0:
-                        unread_count += unread_for_room
-                    recent_rooms.append({
-                        'roomId': r.get('id') or r.get('roomId'),
-                        'name': name,
-                        'unread': unread_for_room,
-                        'lastMessageAt': r.get('lastMessageAt') or r.get('updatedAt'),
-                    })
+                    user_rooms = [u for u in (r.get('userRooms') or []) if isinstance(u, dict)]
+                    client_side = next((u for u in user_rooms if u.get('client')), None)
+                    own_side = next((u for u in user_rooms if u.get('profile') or not u.get('client')), None)
+                    other = (client_side or {}).get('client') or {}
+                    name = ' '.join(filter(None, [other.get('firstName'), other.get('lastName')])).strip() or None
+                    unread_for_room = (own_side or {}).get('totalUnreadMessages') or 0
+                    if not isinstance(unread_for_room, int):
+                        unread_for_room = 0
+                    unread_count += max(0, unread_for_room)
+                    last_message = r.get('lastMessage') or {}
+                    if unread_for_room > 0:
+                        recent_rooms.append({
+                            'clientName': name,
+                            'unread': unread_for_room,
+                            'lastMessageAt': last_message.get('createdAt') if isinstance(last_message, dict) else None,
+                        })
             except Exception as e:
-                logger.warning(f"messages/rooms fetch failed in get_practitioner_today: {e}")
+                logger.warning(f"chat/rooms fetch failed in get_practitioner_today: {e}")
+                unread_count = None
 
-            return {
+            if schedule_error and unread_count is None:
+                return {"status": "error", "error": "Failed to fetch today's overview: schedule and messages are unavailable."}
+
+            result: Dict[str, Any] = {
                 'status': 'success',
                 'timezone': tz_name,
-                'today': today_str,
+                'today': today_start.strftime('%Y-%m-%d'),
+                'todayLabel': self._day_label(today_start),
                 'currentTime': now_local.isoformat(),
-                'sessionsToday': today_sessions,
-                'todayCount': len(today_sessions),
+                'currentTimeLabel': self._clock_label(now_local),
+                'sessionsToday': public(active_today),
+                'todayCount': len(active_today),
+                'completedCount': len(completed_today),
+                'remainingCount': len(remaining_today),
+                'cancelledToday': public(cancelled_today),
+                'breaks': breaks,
                 'nextSession': next_session,
                 'unreadMessages': unread_count,
-                'recentRooms': recent_rooms[:5],
+                'unreadRooms': recent_rooms[:5],
+                'guidance': (
+                    "Times are already in the practitioner's local timezone — use the "
+                    "startLabel/endLabel values verbatim. Only mention breaks listed in "
+                    "'breaks'. Never show ids."
+                ),
             }
+            if schedule_error:
+                result['scheduleUnavailable'] = True
+                result['scheduleNote'] = schedule_error + " Do not say the day is empty."
+            if unread_count is None:
+                result['messagesUnavailable'] = True
+            return result
         except Exception as e:
             logger.error(f"Error in get_practitioner_today: {e}")
             return {"status": "error", "error": f"Failed to fetch today's overview: {str(e)}"}
@@ -2160,7 +2389,10 @@ class ToolManager:
         """Search for specific clients with detailed information"""
         try:
             # Ensure limit doesn't exceed API maximum
-            limit = min(limit, 50)
+            try:
+                limit = max(1, min(int(limit), CLIENT_SEARCH_MAX_LIMIT))
+            except (TypeError, ValueError):
+                limit = 10
             
             params = {
                 'query': query,
@@ -2349,8 +2581,9 @@ class ToolManager:
                     page_type = ui_state.get("page_type", "unknown")
                     return {
                         "success": False,
-                        "error": f"Tool '{tool_name}' not available on '{page_type}' page",
-                        "suggestion": "Navigate to transcribe page to use this tool",
+                        "error": f"This on-screen action is only available on the Sessions page (the practitioner is on '{page_type}').",
+                        "status": "navigation_required",
+                        "suggestion": "Tell the practitioner this happens on the Sessions page and offer to take them there (page_url '/sessions', page_type 'transcribe_page'). Do not claim the action was done.",
                         "tool": tool_name,
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
@@ -2360,6 +2593,45 @@ class ToolManager:
             # Get tool implementation
             implementation = self.tools[tool_name]["implementation"]
             
+            # Models occasionally send an argument that is not in the schema
+            # (or null for an optional one). Drop those rather than failing
+            # the whole call with a TypeError the practitioner can't act on.
+            arguments = arguments or {}
+            try:
+                signature = inspect.signature(implementation)
+                accepts_kwargs = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+                )
+                if not accepts_kwargs:
+                    unknown = [k for k in arguments if k not in signature.parameters]
+                    if unknown:
+                        logger.warning(f"Tool {tool_name}: ignoring unexpected argument(s) {unknown}")
+                    arguments = {k: v for k, v in arguments.items() if k in signature.parameters}
+                # null for a parameter with a default means "not provided"
+                arguments = {
+                    k: v for k, v in arguments.items()
+                    if not (
+                        v is None
+                        and k in signature.parameters
+                        and signature.parameters[k].default is not inspect.Parameter.empty
+                    )
+                }
+                missing = [
+                    name for name, p in signature.parameters.items()
+                    if p.default is inspect.Parameter.empty
+                    and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                    and name not in arguments
+                ]
+                if missing:
+                    return {
+                        "success": False,
+                        "error": f"Missing required argument(s): {', '.join(missing)}",
+                        "tool": tool_name,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+            except (TypeError, ValueError):
+                pass
+
             # Execute tool
             result = await implementation(**arguments)
             
@@ -2380,44 +2652,88 @@ class ToolManager:
             }
     
     # Tool implementations
+    async def _fetch_templates_full(self, template_type: str = "all", search_query: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch templates with full bodies. Internal use only — never return this to the model."""
+        params: Dict[str, Any] = {}
+        if template_type and template_type in ["all", "private", "clinic", "public"]:
+            params["type"] = template_type
+        if search_query:
+            params["q"] = search_query
+        response = await self._make_api_request('GET', 'templates', params=params)
+        if not response:
+            return []
+        templates = response.get('data', response) if isinstance(response, dict) else response
+        if not isinstance(templates, list):
+            return []
+        templates = [t for t in templates if isinstance(t, dict)]
+
+        if template_type == "private":
+            templates = [t for t in templates if t.get('isPrivate')]
+        elif template_type == "clinic":
+            templates = [t for t in templates if t.get('clinicId') and not t.get('isPrivate')]
+        elif template_type == "public":
+            templates = [t for t in templates if not t.get('isPrivate') and not t.get('clinicId')]
+        if search_query:
+            needle = search_query.strip().lower()
+            words = [w for w in needle.split() if w]
+
+            def hit(t: Dict[str, Any]) -> bool:
+                haystack_text = " ".join([
+                    str(t.get('name') or ''), str(t.get('description') or ''),
+                    " ".join(str(tag) for tag in (t.get('tags') or [])),
+                ]).lower()
+                return needle in haystack_text or all(w in haystack_text for w in words)
+
+            templates = [t for t in templates if hit(t)]
+        return templates
+
+    @staticmethod
+    def _template_body_preview(content: Any) -> str:
+        """Short preview of the template's own structure.
+
+        Stored templates often begin with an injected safety preamble
+        (instruction headings followed by dash bullets); skip it so the preview
+        shows what distinguishes this template.
+        """
+        lines = str(content or '').splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index].strip()
+            is_heading = line.isupper() and line.endswith(':')
+            if not line or is_heading or (line.startswith('- ') and index > 0):
+                index += 1
+                continue
+            break
+        body = lines[index:] if index < len(lines) else lines
+        text = " ".join(" ".join(body).split())
+        return text[:TEMPLATE_PREVIEW_CHARS] + ('…' if len(text) > TEMPLATE_PREVIEW_CHARS else '')
+
     async def _get_templates(self, template_type: str = "all", search_query: Optional[str] = None) -> Dict[str, Any]:
-        """Get all available templates from the API"""
+        """List available templates (metadata + preview, never the full bodies)."""
         try:
             logger.info("🔧 get_templates called - fetching templates from API")
-            # Optional filters (currently not enforced server-side, but accepted to avoid arg errors)
-            params: Dict[str, Any] = {}
-            if template_type and template_type in ["all", "private", "clinic", "public"]:
-                params["type"] = template_type
-            if search_query:
-                params["q"] = search_query
-
-            response = await self._make_api_request('GET', 'templates', params=params)
-            if not response:
-                return {
-                    "templates": [],
-                    "count": 0,
-                    "status": "no_templates_found"
-                }
-            templates = response.get('data', response) if isinstance(response, dict) else response
+            templates = await self._fetch_templates_full(template_type, search_query)
             formatted_templates = []
             for template in templates:
-                formatted_template = {
+                content = template.get('content', '') or ''
+                formatted_templates.append({
                     "id": template.get('id'),
                     "name": template.get('name'),
                     "description": template.get('description', ''),
-                    "content": template.get('content', ''),
+                    "content_preview": self._template_body_preview(content),
+                    "content_length": len(content),
                     "tags": template.get('tags', []),
                     "isPrivate": template.get('isPrivate', False),
-                    "clinicId": template.get('clinicId'),
-                    "createdBy": template.get('createdBy'),
                     "usageCount": template.get('usageCount', 0)
-                }
-                formatted_templates.append(formatted_template)
+                })
             logger.info(f"📋 Retrieved {len(formatted_templates)} templates from API")
+            if not formatted_templates:
+                return {"templates": [], "count": 0, "status": "no_templates_found"}
             return {
                 "templates": formatted_templates,
                 "count": len(formatted_templates),
-                "status": "success"
+                "status": "success",
+                "note": "Bodies are omitted. To use one, call set_selected_template with its id.",
             }
         except Exception as e:
             logger.error(f"Error in get_templates: {e}")
@@ -2428,13 +2744,38 @@ class ToolManager:
                 "status": "error"
             }
 
-    async def _set_selected_template(self, template_id: str, template_name: str, template_content: str, template_description: str = "", page_context: dict = None) -> Dict[str, Any]:
+    async def _fetch_template_by_id(self, template_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            template = await self._make_api_request('GET', f'templates/{template_id}')
+        except Exception as e:
+            logger.warning(f"Template lookup failed: {e}")
+            return None
+        if isinstance(template, dict) and isinstance(template.get('data'), dict):
+            template = template['data']
+        return template if isinstance(template, dict) and template.get('id') else None
+
+    async def _set_selected_template(self, template_id: str, template_name: str = None, template_content: str = None, template_description: str = "", page_context: dict = None) -> Dict[str, Any]:
         """Set the active template in the UI for document generation"""
         try:
-            logger.info(f"🎯 [BACKEND] set_selected_template called: {template_name} (ID: {template_id})")
-            logger.info(f"🎯 [BACKEND] Template content length: {len(template_content)} chars")
-            logger.info(f"🎯 [BACKEND] Page context: {page_context}")
-            
+            logger.info("🎯 [BACKEND] set_selected_template called")
+
+            # The saved template is the source of truth. A body echoed back by
+            # the model may be truncated or paraphrased, and listings only
+            # carry a preview, so resolve it server-side.
+            saved = await self._fetch_template_by_id(template_id) if template_id else None
+            if saved:
+                template_name = saved.get('name') or template_name
+                template_content = saved.get('content') or template_content
+                template_description = saved.get('description') or template_description or ""
+            if not template_content:
+                return {
+                    "template_id": template_id,
+                    "status": "error",
+                    "error": "Template not found. Use get_templates to list the available templates and pass one of their ids.",
+                }
+            template_name = template_name or "Template"
+            template_description = template_description or ""
+
             if page_context:
                 page_type = page_context.get('page_type', 'unknown')
                 available_capabilities = page_context.get('capabilities', [])
@@ -2493,9 +2834,8 @@ class ToolManager:
         """Find a template by name (partial/case-insensitive) and select it via UI action."""
         try:
             logger.info(f"🎯 [BACKEND] select_template_by_name called: '{template_name}'")
-            # Fetch templates
-            templates_result = await self._get_templates()
-            templates = templates_result.get("templates", [])
+            # Fetch templates (full bodies, internal)
+            templates = await self._fetch_templates_full()
             if not templates:
                 return {"status": "error", "error": "No templates available"}
 
@@ -2513,7 +2853,20 @@ class ToolManager:
 
             best = sorted(templates, key=rank)[0]
             if rank(best) == 3:
-                return {"status": "error", "error": f"Template '{template_name}' not found"}
+                # Fall back to matching every word, so "progress note" finds
+                # "Progress Notes (SOAP)".
+                words = [w for w in norm_query.split() if w]
+                word_matches = [
+                    t for t in templates
+                    if words and all(w in (t.get("name") or "").lower() for w in words)
+                ]
+                if not word_matches:
+                    return {
+                        "status": "error",
+                        "error": f"Template '{template_name}' not found",
+                        "available_templates": [t.get("name") for t in templates][:40],
+                    }
+                best = word_matches[0]
 
             # Call existing setter to create the UI action
             return await self._set_selected_template(
@@ -2521,15 +2874,41 @@ class ToolManager:
                 template_name=best.get("name"),
                 template_content=best.get("content", ""),
                 template_description=best.get("description", ""),
-                page_context=self.current_page_context or {}
+                # Page availability is already enforced once, in execute_tool,
+                # from the live UI state. Re-checking here against a second
+                # capability list refused valid requests on the Sessions page.
             )
         except Exception as e:
             logger.error(f"🚨 [BACKEND] Error in select_template_by_name: {e}")
             return {"status": "error", "error": str(e)}
 
-    async def _generate_document_from_loaded(self, template_content: str, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None, generation_instructions: str = None) -> Dict[str, Any]:
+    async def _generate_document_from_loaded(self, template_content: str = None, template_name: str = None, document_name: str = None, sessions: List[Dict[str, Any]] = None, page_context: dict = None, generation_instructions: str = None, template_id: str = None) -> Dict[str, Any]:
         """Generate a document in the UI using template content and loaded sessions"""
         try:
+            # Resolve the template body without making the model echo it:
+            # explicit saved template → explicit custom text → template
+            # currently selected on screen.
+            if template_id:
+                saved = await self._fetch_template_by_id(template_id)
+                if not saved or not saved.get('content'):
+                    return {
+                        "status": "error",
+                        "error": "Template not found. Use get_templates to list the available templates.",
+                    }
+                template_content = saved['content']
+                template_name = template_name or saved.get('name')
+            if not template_content:
+                from ui_state_manager import ui_state_manager as _ui_state_manager
+                selected = _ui_state_manager.get_selected_template_sync(self._require_ui_session_id())
+                if selected and selected.get("templateContent"):
+                    template_content = selected["templateContent"]
+                    template_name = template_name or selected.get("templateName")
+            if not template_content:
+                return {
+                    "status": "no_template_selected",
+                    "error": "No template is selected. Select one first (select_template_by_name or set_selected_template) or pass template_id.",
+                }
+
             # If sessions are not provided, read only this request's UI state.
             # Never infer a user's state by scanning every active Redis key.
             from ui_state_manager import ui_state_manager
@@ -2538,6 +2917,11 @@ class ToolManager:
                 ui_session_id = self._require_ui_session_id()
                 ui_sessions = ui_state_manager.get_loaded_sessions_sync(ui_session_id)
             
+            if sessions:
+                sessions = [
+                    {**item, "session_id": item.get("session_id") or item.get("sessionId")}
+                    for item in sessions if isinstance(item, dict)
+                ]
             selected_sessions = sessions or [
                 {
                     "session_id": s.get("sessionId"),
@@ -3035,9 +3419,14 @@ Please refine the following document according to these instructions:
         try:
             logger.info(f"🔍 search_clients called with query='{query}', limit={limit}")
             
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = 10
             params = {
-                'query': query,
-                'limit': limit
+                'query': query or '',
+                # The API rejects anything above 50 with a 400.
+                'limit': max(1, min(limit, CLIENT_SEARCH_MAX_LIMIT))
             }
             
             response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
@@ -3103,68 +3492,71 @@ Please refine the following document according to these instructions:
             ]
     
     async def _get_client_base(self, limit: int = 100, include_inactive: bool = False) -> Dict[str, Any]:
-        """Get complete client base information including names, emails, genders, and phone numbers"""
+        """Return the practitioner's client roster (name, email, status)."""
         try:
-            # Use search-clients with empty query to get all clients
-            params = {
-                'query': '',  # Empty query returns all clients
-                'limit': min(limit, 500)  # Respect API limits
-            }
-            
-            response = await self._make_api_request('GET', '/haystack/search-clients', params=params)
-            clients = response.get('clients', [])
-            total_clients = response.get('total', len(clients))
-            
-            # Process each client to get detailed information
-            client_base = []
-            active_count = 0
-            inactive_count = 0
-            
-            for client in clients:
-                client_status = client.get('status', '').upper()
-                is_active = client_status == 'ACTIVE'
-                
-                # Skip inactive clients if not requested
-                if not include_inactive and not is_active:
-                    inactive_count += 1
-                    continue
-                
-                if is_active:
-                    active_count += 1
-                else:
-                    inactive_count += 1
-                
-                # Try to get additional client details including email
-                client_details = {
-                    "client_id": client.get("client_id"),
-                    "name": client.get("name", "Unknown Client"),
-                    "gender": client.get("gender", "Not specified"),
-                    "status": client_status,
-                    "phone": client.get("phone"),  # May be None
-                    "email": None,  # Will try to get from detailed call
-                    "age": client.get("age"),
-                    "occupation": client.get("occupation"),
-                    "last_activity": client.get("last_activity"),
-                    "total_assignments": client.get("total_assignments", 0),
-                    "active_assignments": client.get("active_assignments", 0)
-                }
-                
-                # Attempt to get email from detailed client info if available
-                try:
-                    if client.get("client_id"):
-                        # Make a call to get more detailed client info including email
-                        detailed_response = await self._make_api_request('GET', f'/clients/{client.get("client_id")}')
-                        if detailed_response and 'email' in detailed_response:
-                            client_details["email"] = detailed_response.get("email")
-                        elif detailed_response and 'account' in detailed_response:
-                            client_details["email"] = detailed_response.get("account", {}).get("email")
-                except Exception as e:
-                    logger.debug(f"Could not fetch detailed info for client {client.get('client_id')}: {e}")
-                    # Email will remain None
-                
-                client_base.append(client_details)
-            
-            return {
+            try:
+                limit = max(1, min(int(limit), 500))
+            except (TypeError, ValueError):
+                limit = 100
+
+            rows: List[Dict[str, Any]] = []
+            total_clients: Optional[int] = None
+            status_counts: Optional[Dict[str, Any]] = None
+            source = "roster"
+            try:
+                # Paginated roster: the only client listing that carries email
+                # addresses and is not capped at 50 rows.
+                page = 1
+                while True:
+                    resp = await self._make_api_request(
+                        'GET', 'practitioners/clients', params={'page': page, 'size': 50}
+                    )
+                    data = resp.get('data') or []
+                    total_clients = resp.get('totalRecord', total_clients)
+                    status_counts = resp.get('statusCounts') or status_counts
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        rows.append({
+                            "client_id": item.get("clientId") or item.get("id"),
+                            "name": f"{item.get('firstName') or ''} {item.get('lastName') or ''}".strip() or "Unknown Client",
+                            "email": item.get("email"),
+                            "status": str(item.get("statusConvert") or item.get("status") or "").upper(),
+                        })
+                    if not data or page >= (resp.get('totalPage') or 1) or page >= 20:
+                        break
+                    page += 1
+            except Exception as roster_error:
+                # Clinic owners are not permitted on the practitioner roster
+                # route; fall back to the search listing (max 50, no emails).
+                logger.info(f"practitioners/clients unavailable, falling back to search-clients: {roster_error}")
+                source = "search"
+                rows = []
+                response = await self._make_api_request(
+                    'GET', '/haystack/search-clients',
+                    params={'query': '', 'limit': CLIENT_SEARCH_MAX_LIMIT},
+                )
+                total_clients = response.get('total')
+                for client in response.get('clients', []):
+                    rows.append({
+                        "client_id": client.get("client_id"),
+                        "name": client.get("name", "Unknown Client"),
+                        "email": None,
+                        "status": str(client.get('status') or '').upper(),
+                        "gender": client.get("gender"),
+                        "occupation": client.get("occupation"),
+                        "last_activity": client.get("last_activity"),
+                    })
+
+            inactive_statuses = {"INACTIVE", "DISCHARGED", "ARCHIVED"}
+            active_count = len([r for r in rows if r["status"] == "ACTIVE"])
+            inactive_count = len([r for r in rows if r["status"] in inactive_statuses])
+            visible = rows if include_inactive else [r for r in rows if r["status"] not in inactive_statuses]
+            client_base = visible[:limit]
+            if total_clients is None:
+                total_clients = len(rows)
+
+            result: Dict[str, Any] = {
                 "success": True,
                 "client_base": client_base,
                 "summary": {
@@ -3172,12 +3564,19 @@ Please refine the following document according to these instructions:
                     "total_in_system": total_clients,
                     "active_clients": active_count,
                     "inactive_clients": inactive_count,
-                    "included_inactive": include_inactive
+                    "status_counts": status_counts,
+                    "included_inactive": include_inactive,
+                    "truncated": len(visible) > len(client_base) or (total_clients or 0) > len(rows),
                 },
-                "fields_included": ["client_id", "name", "email", "gender", "phone", "status", "age", "occupation", "last_activity", "assignments"],
-                "note": "Email addresses may not be available for all clients depending on API permissions and data availability"
+                "fields_included": sorted({k for row in client_base for k in row.keys()}),
             }
-            
+            if source == "search":
+                result["note"] = (
+                    "Email addresses are not available for this role, and at most "
+                    f"{CLIENT_SEARCH_MAX_LIMIT} clients are listed. Say so if the practitioner asks for more."
+                )
+            return result
+
         except Exception as e:
             logger.error(f"Error getting client base: {e}")
             return {
@@ -4282,6 +4681,10 @@ Please refine the following document according to these instructions:
         try:
             logger.info(f"🔍 search_sessions called with: client_id={client_id}, keywords={keywords}")
             
+            try:
+                limit = max(1, min(int(limit), 50))
+            except (TypeError, ValueError):
+                limit = 10
             params = {'limit': str(limit)}
             
             if client_name:
@@ -4296,16 +4699,71 @@ Please refine the following document according to these instructions:
                 params['keywords'] = keywords
             
             response = await self._make_api_request('GET', '/haystack/search-sessions', params=params)
-            
+
+            # The API keyword filter is a single case-insensitive substring
+            # match. Models often send several terms ("investor, funding");
+            # as one phrase that matches nothing and reads as "never
+            # discussed". Retry each term and merge, so a miss means a miss.
+            matched_terms: List[str] = []
+            if keywords and not (response.get("sessions") or []):
+                import re as _re
+                terms = [t.strip() for t in _re.split(r"[,;|/]|\bor\b|\band\b", keywords, flags=_re.IGNORECASE) if t.strip()]
+                if len(terms) <= 1:
+                    terms = [w for w in keywords.split() if len(w) >= 4]
+                terms = [t for t in dict.fromkeys(terms) if t.lower() != keywords.lower()][:6]
+                merged: Dict[str, Dict[str, Any]] = {}
+                for term in terms:
+                    term_response = await self._make_api_request(
+                        'GET', '/haystack/search-sessions', params={**params, 'keywords': term}
+                    )
+                    hits = term_response.get("sessions") or []
+                    if hits:
+                        matched_terms.append(term)
+                    for hit in hits:
+                        if isinstance(hit, dict) and hit.get("id"):
+                            merged.setdefault(hit["id"], hit)
+                if merged:
+                    response = {**response, "sessions": list(merged.values()), "total": len(merged)}
+
+            # The API returns both the transcript id (`id`) and the recording
+            # id (`sessionId`). Every downstream tool and the web workspace key
+            # on the transcript id, so expose exactly one unambiguous
+            # `session_id`. Handing the model both made it pick the recording
+            # id about half the time, and every follow-up call then failed
+            # with "Session not found".
+            tz, _tz_name = self._resolve_timezone()
+            normalised_sessions = []
+            for item in response.get("sessions", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                recorded_at = self._parse_api_datetime(item.get("recordingDate") or item.get("recording_date"))
+                recorded_label = None
+                if recorded_at:
+                    local = recorded_at.astimezone(tz)
+                    recorded_label = f"{self._day_label(local)} {local.year}, {self._clock_label(local)}"
+                normalised_sessions.append({
+                    "session_id": item.get("id") or item.get("session_id"),
+                    "client_id": item.get("clientId") or item.get("client_id"),
+                    "client_name": item.get("clientName") or item.get("client_name"),
+                    "recording_date": item.get("recordingDate") or item.get("recording_date"),
+                    "recording_date_label": recorded_label,
+                    "duration": item.get("duration"),
+                    "total_segments": item.get("totalSegments", item.get("total_segments")),
+                    "average_confidence": item.get("averageConfidence", item.get("average_confidence")),
+                })
+
             return {
-                "sessions": response.get("sessions", []),
-                "total": response.get("total", 0),
+                "sessions": normalised_sessions,
+                "total": response.get("total", len(normalised_sessions)),
                 "search_criteria": {
                     "client_name": client_name,
                     "client_id": client_id,
                     "date_range": f"{date_from} to {date_to}" if date_from and date_to else None,
-                    "keywords": keywords
-                }
+                    "keywords": keywords,
+                    "matched_keywords": matched_terms or None,
+                },
+                **({"note": "Keyword search is an exact word/phrase match in the transcript text. No match is not proof a topic never came up — try a single distinctive word, or semantic_search_sessions."}
+                   if keywords and not normalised_sessions else {}),
             }
             
         except Exception as e:
@@ -4495,7 +4953,7 @@ Please refine the following document according to these instructions:
                 "status": "error"
             }
 
-    async def _load_session_direct(self, session_id: str, client_id: str, client_name: str, recording_date: str, duration: float, total_segments: int, average_confidence: float, page_context: dict = None) -> Dict[str, Any]:
+    async def _load_session_direct(self, session_id: str, client_id: str, client_name: str, recording_date: str = None, duration: float = 0, total_segments: int = 0, average_confidence: float = 0.0, page_context: dict = None) -> Dict[str, Any]:
         """Load a session directly using existing UI logic (like clicking Load Session button)"""
         try:
             logger.info(f"📂 load_session_direct called with: session_id={session_id}")
@@ -4548,7 +5006,7 @@ Please refine the following document according to these instructions:
                     }
                 },
                 "status": "ui_action_requested",
-                "user_message": f"Loading session for '{client_name}' into a new tab. The session will appear shortly."
+                "user_message": f"Opening the session for '{client_name}' in the Sessions workspace as context. It will appear shortly."
             }
             
         except Exception as e:
@@ -4644,7 +5102,7 @@ Please refine the following document according to these instructions:
                 "sessions_count": len(ui_actions),
                 "ui_action": ui_actions,  # Multiple UI actions
                 "status": "ui_action_requested", 
-                "user_message": f"Loading {len(ui_actions)} sessions into new tabs: {', '.join(session_names)}. The sessions will appear shortly."
+                "user_message": f"Opening {len(ui_actions)} sessions in the Sessions workspace as context: {', '.join(session_names)}. They will appear shortly."
             }
             
         except Exception as e:
@@ -4725,8 +5183,9 @@ Please refine the following document according to these instructions:
         self, 
         query: str, 
         transcript_ids: List[str],
+        client_id: str = None,
         limit: int = 20,
-        similarity_threshold: float = 0.7
+        similarity_threshold: float = 0.45
     ) -> Dict[str, Any]:
         """
         Semantic search across session transcripts using vector embeddings.
@@ -4751,27 +5210,41 @@ Please refine the following document according to these instructions:
                 f"transcripts={len(transcript_ids)}, limit={limit}, threshold={similarity_threshold}"
             )
             
-            # Use synchronous httpx client (safe in thread pool)
-            import httpx
-            
-            # Make synchronous HTTP request to API endpoint
-            with httpx.Client() as client:
-                response = client.post(
-                    f"{self.api_base_url}/ai/semantic-search",
-                    json={
-                        "query": query,
-                        "transcript_ids": transcript_ids,
-                        "limit": limit,
-                        "similarity_threshold": similarity_threshold
-                    },
-                    headers=self._get_auth_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-            
-            # Format response to match expected structure
-            segments = result.get("segments", [])
+            transcript_ids = [str(t) for t in transcript_ids if t]
+            try:
+                similarity_threshold = float(similarity_threshold)
+            except (TypeError, ValueError):
+                similarity_threshold = 0.45
+            # Real matches on short spoken segments score roughly 0.35-0.5 in
+            # this embedding space; the old 0.7 default returned nothing even
+            # for near-verbatim queries.
+            similarity_threshold = max(0.0, min(similarity_threshold, 0.45))
+            if not client_id:
+                return {
+                    "error": "client_id is required (the client who owns these sessions)",
+                    "status": "invalid_request"
+                }
+            body = {
+                "query": query,
+                "clientId": client_id,
+                "transcript_ids": transcript_ids,
+                "limit": max(1, min(int(limit or 20), 50)),
+                "similarity_threshold": similarity_threshold,
+            }
+            result = await self._make_api_request('POST', 'ai/semantic-search', data=body)
+            segments = result.get("segments", []) if isinstance(result, dict) else []
+
+            # Embedding similarity for short clinical utterances often sits
+            # below the default threshold. Retry once, looser, before telling
+            # the practitioner nothing was discussed.
+            relaxed = False
+            if not segments and similarity_threshold > 0.3:
+                relaxed = True
+                body["similarity_threshold"] = 0.3
+                result = await self._make_api_request('POST', 'ai/semantic-search', data=body)
+                segments = result.get("segments", []) if isinstance(result, dict) else []
+                similarity_threshold = 0.3
+
             logger.info(f"✅ Found {len(segments)} matching segments")
             
             return {
@@ -4781,15 +5254,10 @@ Please refine the following document according to these instructions:
                 "transcript_ids_searched": transcript_ids,
                 "similarity_threshold": similarity_threshold,
                 "status": "success",
-                "message": f"Found {len(segments)} segments matching '{query[:50]}...'"
+                "threshold_relaxed": relaxed,
+                "message": f"Found {len(segments)} segments matching '{query[:50]}'"
             }
-            
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error in semantic_search_sessions: {e}", exc_info=True)
-            return {
-                "error": f"Failed to search sessions (HTTP error): {str(e)}",
-                "status": "error"
-            }
+
         except Exception as e:
             logger.error(f"Error in semantic_search_sessions: {e}", exc_info=True)
             return {
@@ -4829,11 +5297,11 @@ Please refine the following document according to these instructions:
                 recording_date = raw_date
                 if raw_date:
                     try:
-                        from dateutil import parser as dateutil_parser
-                        dt = dateutil_parser.parse(raw_date)
-                        day = dt.day
-                        hour = dt.hour % 12 or 12
-                        recording_date = f"{day} {dt.strftime('%B %Y')}, {hour}:{dt.strftime('%M %p')}"
+                        # Show the practitioner's local time, not UTC.
+                        dt = self._parse_api_datetime(raw_date)
+                        if dt:
+                            local = dt.astimezone(self._resolve_timezone()[0])
+                            recording_date = f"{local.day} {local.strftime('%B %Y')}, {self._clock_label(local)}"
                     except Exception:
                         pass
                 session_summaries.append({
@@ -5139,6 +5607,25 @@ Please refine the following document according to these instructions:
                     "status": "Invalid Request"
                 }
 
+            # In-app navigation only. Resolve well-known page types to their
+            # real routes and refuse anything that is not an internal path.
+            known_routes = {
+                "transcribe_page": "/sessions", "sessions_page": "/sessions", "sessions": "/sessions",
+                "dashboard": "/", "clients_list": "/clients", "messages_page": "/messages",
+                "homework_page": "/homework", "files_page": "/files", "calendar": "/calendar",
+                "templates": "/templates", "reports": "/report", "practitioners_page": "/practitioner",
+            }
+            page_url = str(page_url).strip()
+            if page_url in ("/live-transcribe", "/transcribe"):
+                page_url = "/sessions"
+            if not page_url.startswith("/") or page_url.startswith("//") or "://" in page_url:
+                page_url = known_routes.get(str(page_type).strip().lower(), "")
+            if not page_url:
+                return {
+                    "error": "Only pages inside ANTSA can be opened. Use a path such as '/sessions', '/clients', '/calendar' or '/messages'.",
+                    "status": "Invalid Request"
+                }
+
             return {
                 "page_url": page_url,
                 "page_type": page_type,
@@ -5154,7 +5641,12 @@ Please refine the following document according to these instructions:
                     }
                 },
                 "status": "ui_action_requested",
-                "user_message": f"Navigating to {page_type}. {reason}"
+                "user_message": f"Navigating to {page_type}. {reason}",
+                "next_step": (
+                    "The page change only takes effect after this reply. Do not call "
+                    "on-screen tools again in this turn — tell the practitioner you are "
+                    "taking them there and that you will continue once they say go."
+                ),
             }
             
         except Exception as e:
