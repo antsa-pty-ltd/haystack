@@ -1479,6 +1479,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 )
                 if country_code:
                     context_for_pipeline["country_code"] = country_code
+                # Browser timezone: lets schedule tools resolve "today" in the
+                # practitioner's own day. Validated before use; an unknown
+                # value falls back to the deployment default downstream.
+                browser_timezone = incoming_context.get("timezone") or message_data.get("timezone")
+                if isinstance(browser_timezone, str) and 0 < len(browser_timezone) <= 64:
+                    try:
+                        from zoneinfo import ZoneInfo
+                        ZoneInfo(browser_timezone)
+                        context_for_pipeline["timezone"] = browser_timezone
+                    except Exception:
+                        logger.debug("Ignoring unrecognised browser timezone")
                 if incoming_context.get("conversation_history"):
                     context_for_pipeline["conversation_history"] = incoming_context["conversation_history"]
 
