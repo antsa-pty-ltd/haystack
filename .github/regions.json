@@ -1,0 +1,18 @@
+{
+  "au": {
+    "code": "au",
+    "environment": "au-production",
+    "resourceGroup": "PRODUCTION",
+    "haystackApp": "antsa-haystack-au-production",
+    "releaseOnMaster": true,
+    "masterOnly": true
+  },
+  "us": {
+    "code": "us",
+    "environment": "us-production",
+    "resourceGroup": "rg-antsa-us-production",
+    "haystackApp": "antsa-haystack-us-production",
+    "releaseOnMaster": true,
+    "masterOnly": false
+  }
+}
