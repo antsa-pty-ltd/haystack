@@ -32,7 +32,7 @@ OUTPUT LANGUAGE:
 """
 
 
-def language_instructions():
+def output_language_rules():
     """Output-language rules rendered for the deployment's region."""
     return render_region_text(LANGUAGE_INSTRUCTIONS_TEMPLATE, get_region())
 

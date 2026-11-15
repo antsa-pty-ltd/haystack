@@ -29,8 +29,8 @@ Resolution order for "which region applies":
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from string import Template
 from typing import Dict, Mapping, Optional, Tuple
 
 # Used only when the deployment's COUNTRY_CODE is unset or not in REGIONS.
@@ -165,9 +165,14 @@ def _supported_code(country_code: Optional[str]) -> Optional[str]:
     return normalized if normalized in REGIONS else None
 
 
+def configured_country_code() -> Optional[str]:
+    """The region named by COUNTRY_CODE, or None if it is unset or unsupported."""
+    return _supported_code(os.environ.get(COUNTRY_CODE_SETTING))
+
+
 def deployment_country_code() -> str:
     """The deployment's region: COUNTRY_CODE, else the fixed fallback."""
-    return _supported_code(os.environ.get(COUNTRY_CODE_SETTING)) or FALLBACK_COUNTRY_CODE
+    return configured_country_code() or FALLBACK_COUNTRY_CODE
 
 
 def resolve_country_code(country_code: Optional[str] = None) -> str:
@@ -183,9 +188,22 @@ def get_region(country_code: Optional[str] = None) -> Region:
     return REGIONS[resolve_country_code(country_code)]
 
 
+_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 def render_region_text(text: str, region: Region) -> str:
     """
     Fill ``${placeholder}`` tokens in prompt text from the region config.
-    Strict: an unknown placeholder raises rather than shipping a raw token.
+    Only the ``${name}`` form is a placeholder, so a bare ``$`` (e.g. a price)
+    is left alone. Strict: an unknown placeholder raises rather than shipping
+    a raw token to the model.
     """
-    return Template(text).substitute(region.text_values())
+    values = region.text_values()
+
+    def fill(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        if key not in values:
+            raise KeyError(f"Unknown region placeholder ${{{key}}}")
+        return values[key]
+
+    return _PLACEHOLDER.sub(fill, text)

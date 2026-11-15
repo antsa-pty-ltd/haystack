@@ -18,7 +18,7 @@ from llm_routing import (
     gateway_chat_compatibility,
     router_registry,
 )
-from regions import get_region
+from regions import configured_country_code, get_region
 
 logger = logging.getLogger(__name__)
 
@@ -2130,8 +2130,11 @@ class ToolManager:
             candidates.append(self.current_page_context.get('user_timezone'))
         candidates.append(os.environ.get('TZ'))
         candidates.append(os.environ.get('TIMEZONE'))
-        # The deployment region's default (regions.py, keyed by COUNTRY_CODE).
-        candidates.append(get_region().default_timezone)
+        # The deployment region's default (regions.py). Only when COUNTRY_CODE
+        # names a configured region: an unconfigured service keeps UTC.
+        deployment_country = configured_country_code()
+        if deployment_country:
+            candidates.append(get_region(deployment_country).default_timezone)
         for name in candidates:
             if not name or not isinstance(name, str):
                 continue
