@@ -1,8 +1,12 @@
 name: Haystack - CI
 
 # Consolidated workflow: test gate (lint + imports + pytest) runs on every PR
-# and push to develop/master; AU deploy runs after the test job passes on
-# develop or master pushes.
+# and push to develop/master. After the test job passes:
+#   push to develop      -> AU staging
+#   push to master       -> production in every region in .github/regions.json
+#   manual run + region  -> production in that ONE region, from the selected ref
+#                           (AU only from master; see .github/scripts/plan-release.js)
+#   manual run, no region -> tests only, as before
 #
 # Required-check name registered in branch-protection rulesets:
 #   "Lint + Imports + Pytest"
@@ -14,8 +18,47 @@ on:
   push:
     branches: [develop, master]
   workflow_dispatch:
+    inputs:
+      region:
+        description: Production region to release the selected ref to (none = tests only)
+        type: choice
+        default: none
+        options:
+          - none
+          - us
+          - au
 
 jobs:
+  plan:
+    name: Release plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      release: ${{ steps.targets.outputs.release }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Select the production regions this run releases to
+        id: plan
+        if: github.event_name != 'workflow_dispatch' || inputs.region != 'none'
+        env:
+          REQUESTED_REGION: ${{ inputs.region }}
+        run: node .github/scripts/plan-release.js
+      - name: Resolve deployment targets
+        id: targets
+        env:
+          PRODUCTION_REGIONS: ${{ steps.plan.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/develop ]; then
+            # Staging exists for AU only and is not a production region.
+            matrix='[{"code":"au","stage":"staging","environment":"","app":"antsa-haystack-au-staging","resourceGroup":"rg-antsa-staging"}]'
+          else
+            matrix="$(jq -c 'map({code, stage: "production", environment, app: .haystackApp, resourceGroup})' <<< "${PRODUCTION_REGIONS:-[]}")"
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "release=$(jq -r 'length > 0' <<< "$matrix")" >> "$GITHUB_OUTPUT"
+
   test:
     name: Lint + Imports + Pytest
     runs-on: ubuntu-latest
@@ -50,15 +93,20 @@ jobs:
             echo "No tests/ directory with test_*.py files — skipping pytest. Smoke coverage runs post-deploy."
           fi
 
-  deploy-au:
-    name: Deploy to Azure (AU)
-    needs: test
-    # Only deploy on pushes to develop or master; skip on PRs and manual triggers
-    # that did not target those branches.
-    if: >
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master')
+  deploy:
+    name: Deploy to Azure (${{ matrix.target.code }} ${{ matrix.target.stage }})
+    needs: [plan, test]
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      # One region failing must not cancel another.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: haystack-deploy-${{ matrix.target.code }}-${{ matrix.target.stage }}
+      cancel-in-progress: false
+    environment: ${{ matrix.target.environment }}
 
     steps:
       - name: Checkout code
@@ -71,18 +119,9 @@ jobs:
 
       - name: Set environment variables
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-            ENV="production"
-            APP_NAME="antsa-haystack-au-production"
-            RESOURCE_GROUP="PRODUCTION"
-          else
-            ENV="staging"
-            APP_NAME="antsa-haystack-au-staging"
-            RESOURCE_GROUP="rg-antsa-staging"
-          fi
-          echo "DEPLOY_ENV=${ENV}" >> $GITHUB_ENV
-          echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=${RESOURCE_GROUP}" >> $GITHUB_ENV
+          echo "DEPLOY_ENV=${{ matrix.target.stage }}" >> $GITHUB_ENV
+          echo "APP_NAME=${{ matrix.target.app }}" >> $GITHUB_ENV
+          echo "RESOURCE_GROUP=${{ matrix.target.resourceGroup }}" >> $GITHUB_ENV
 
       - name: Validate dependencies
         run: |
@@ -118,7 +157,7 @@ jobs:
       - name: Azure Login
         uses: azure/login@v3
         with:
-          creds: ${{ env.DEPLOY_ENV == 'production' && secrets.AZURE_CREDENTIALS_AU || secrets.AZURE_CREDENTIALS_STAGING }}
+          creds: ${{ matrix.target.stage == 'production' && secrets[format('AZURE_CREDENTIALS_{0}', matrix.target.code)] || secrets.AZURE_CREDENTIALS_STAGING }}
 
       - name: Deploy to Azure Web App (Production)
         if: env.DEPLOY_ENV == 'production'
@@ -192,12 +231,12 @@ jobs:
 
   notify-develop-failure:
     name: Notify Teams — develop workflow failed
-    needs: [test, deploy-au]
+    needs: [test, deploy]
     if: >
       always() &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/develop' &&
-      (needs.test.result == 'failure' || needs.deploy-au.result == 'failure')
+      (needs.test.result == 'failure' || needs.deploy.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
