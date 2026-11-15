@@ -537,3 +537,17 @@ def test_navigate_to_page_only_allows_in_app_routes():
 
     by_type = run(tool_manager._navigate_to_page(page_url="sessions", page_type="transcribe_page", reason="r"))
     assert by_type["ui_action"]["payload"]["page_url"] == "/sessions"
+
+
+def test_error_classification_reads_status_code_not_stray_digits(api):
+    # A validation failure whose body happens to contain "401" in a timestamp
+    # must not be reported as an expired login.
+    api({"haystack/search-clients": Exception(
+        'API request failed: 400 - {"message":["query too long"],"timestamp":"2026-11-15T02:01:14.401Z"}')})
+    result = run(tool_manager._search_clients(query="sam"))
+    assert result[0]["error_type"] != "Authentication Error"
+
+    api({"haystack/search-clients": Exception(
+        'API request failed: 401 - {"message":"Your account is already logged in on another device"}')})
+    result = run(tool_manager._search_clients(query="sam"))
+    assert result[0]["error_type"] == "Authentication Error"
