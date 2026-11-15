@@ -2,6 +2,7 @@
 Haystack-based Pipeline Manager using Declarative Pipeline Architecture
 Following official Haystack recommendations with automatic agent loops
 """
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 import asyncio
 import json
 import logging

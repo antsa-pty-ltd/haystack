@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# No third-party usage telemetry (see privacy_defaults.py).
+ENV HAYSTACK_TELEMETRY_ENABLED=False
+
 # Expose port
 EXPOSE 8001
 

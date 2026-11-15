@@ -4,6 +4,7 @@ FastAPI Haystack Service - Simple Working Version
 Basic OpenAI streaming with template support
 """
 
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 import os
 import asyncio
 import logging

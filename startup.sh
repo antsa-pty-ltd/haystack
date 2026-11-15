@@ -4,6 +4,8 @@ set -euo pipefail
 cd /home/site/wwwroot
 export HOST=${HOST:-0.0.0.0}
 export PORT=${PORT:-8001}
+# No third-party usage telemetry (see privacy_defaults.py).
+export HAYSTACK_TELEMETRY_ENABLED=False
 
 VENV=/tmp/venv
 

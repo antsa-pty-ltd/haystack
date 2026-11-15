@@ -1,4 +1,5 @@
 """Custom Haystack components for UI action collection and message management"""
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 import json
 import logging
 from typing import Any, Dict, List

@@ -15,6 +15,8 @@ No network call is made at construction time, so a dummy token is safe.
 
 import os
 
+import privacy_defaults  # noqa: F401  (tests import haystack modules directly)
+
 if not os.environ.get("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
 
