@@ -3,7 +3,9 @@ Haystack-based Pipeline Manager using Declarative Pipeline Architecture
 Following official Haystack recommendations with automatic agent loops
 """
 import asyncio
+import json
 import logging
+from datetime import datetime
 from contextvars import ContextVar
 from typing import Dict, List, Optional, Any, AsyncGenerator, Callable, Awaitable
 
@@ -67,6 +69,61 @@ TOOL_DISPLAY_NAMES = {
 def get_friendly_tool_name(tool_name: str) -> str:
     """Convert tool name to a friendly display name"""
     return TOOL_DISPLAY_NAMES.get(tool_name, tool_name.replace("_", " ").title())
+
+
+def build_current_time_block(timezone_name: Optional[str] = None) -> str:
+    """System-prompt block stating the practitioner's local date and time."""
+    tz, tz_name = tool_manager._resolve_timezone(timezone_name)
+    now_local = datetime.now(tz)
+    hour = now_local.hour % 12 or 12
+    clock = f"{hour}:{now_local.minute:02d} {'am' if now_local.hour < 12 else 'pm'}"
+    return (
+        "\n\n# RIGHT NOW (practitioner's local time)\n"
+        f"- Date: {now_local.strftime('%A')} {now_local.day} {now_local.strftime('%B %Y')}\n"
+        f"- Time: {clock} ({tz_name})\n"
+        "- Use this for \"today\", \"tomorrow\", \"this afternoon\" and for judging what is "
+        "already done versus still ahead. Schedule tools already return local times."
+    )
+
+
+def slim_ui_action_tool_messages(tool_messages: List[ChatMessage]) -> List[ChatMessage]:
+    """Replace bulky UI-action payloads in tool results before the model sees them.
+
+    UI actions have already been collected for delivery to the browser, so the
+    model only needs to know that the action was dispatched.
+    """
+    slimmed: List[ChatMessage] = []
+    for message in tool_messages:
+        try:
+            tool_result = getattr(message, "tool_call_result", None)
+            raw = getattr(tool_result, "result", None)
+            if not tool_result or not isinstance(raw, str) or '"ui_action"' not in raw:
+                slimmed.append(message)
+                continue
+            content = json.loads(raw)
+            holder = content.get("result") if isinstance(content.get("result"), dict) else content
+            if not isinstance(holder, dict) or "ui_action" not in holder:
+                slimmed.append(message)
+                continue
+            actions = holder["ui_action"]
+            action_list = actions if isinstance(actions, list) else [actions]
+            holder["ui_action"] = {
+                "dispatched_to_browser": True,
+                "types": [a.get("type") for a in action_list if isinstance(a, dict)],
+            }
+            for bulky in ("original_document",):
+                holder.pop(bulky, None)
+            slimmed.append(
+                ChatMessage.from_tool(
+                    tool_result=json.dumps(content, ensure_ascii=False),
+                    origin=tool_result.origin,
+                    error=bool(getattr(tool_result, "error", False)),
+                )
+            )
+        except Exception as slim_error:  # noqa: BLE001 - never block the chat
+            logger.debug(f"Could not slim tool message: {slim_error}")
+            slimmed.append(message)
+    return slimmed
 
 
 class HaystackPipelineManager:
@@ -663,6 +720,12 @@ class HaystackPipelineManager:
                     # tell the model to assume no practitioner if the section
                     # is absent.
 
+            # Practitioner assistant: tell the model what "now" is in the
+            # practitioner's own timezone. Without it the model cannot resolve
+            # "today", "tomorrow" or "this afternoon" and guesses.
+            if persona_type == PersonaType.WEB_ASSISTANT:
+                system_prompt += build_current_time_block((context or {}).get("timezone"))
+
             # Bug 263: embed the currently-loaded ("active") document content
             # in the system prompt so the model can answer questions about a
             # template-generated report visible on the practitioner's screen.
@@ -691,9 +754,10 @@ class HaystackPipelineManager:
                 tool_manager.set_auth_token(session.auth_token, session.profile_id)
             
             # Set page context if available
-            if context and (context.get('page_context') or context.get('page_url')):
-                page_type = context.get('page_context', 'unknown')
+            if context and (context.get('page_context') or context.get('page_url') or context.get('timezone')):
+                page_type = context.get('page_context') or 'unknown'
                 page_context = {
+                    'timezone': context.get('timezone'),
                     'page_type': page_type,
                     'page_display_name': page_type.replace('_', ' ').title(),
                     'page_url': context.get('page_url', ''),
@@ -847,6 +911,12 @@ class HaystackPipelineManager:
                             request_actions = []
                             self._ui_actions_context.set(request_actions)
                         request_actions.extend(ui_result.get("ui_actions", []))
+
+                    # The browser needs the full UI-action payload (template
+                    # bodies, whole documents); the model does not. Feeding
+                    # tens of kilobytes back made the follow-up turn slow
+                    # enough to hit the panel's response timeout.
+                    tool_messages = slim_ui_action_tool_messages(tool_messages)
                     
                     # Add to message history
                     current_messages.extend(replies)
