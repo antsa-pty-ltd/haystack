@@ -1468,8 +1468,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 }
                 # Country code (root CLAUDE.md: x-country-code on every request)
                 # threads through so the B2C companion can surface the correct
-                # country-specific crisis lines. Falls back to the platform
-                # default downstream when absent.
+                # country-specific crisis lines. Falls back to the deployment's
+                # region (COUNTRY_CODE, regions.py) downstream when absent.
                 country_code = (
                     message_data.get("country_code")
                     or message_data.get("countryCode")

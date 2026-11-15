@@ -18,6 +18,12 @@ import os
 if not os.environ.get("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
 
+# Region-dependent text (crisis lines, persona wording, default timezone) is
+# resolved from COUNTRY_CODE. Start every run from the unset state (the AU
+# fallback) so a developer's shell cannot change results; tests that need a
+# region set it with monkeypatch.
+os.environ.pop("COUNTRY_CODE", None)
+
 import pytest
 
 from llm_routing import router_registry  # noqa: E402
