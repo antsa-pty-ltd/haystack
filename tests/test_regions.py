@@ -86,7 +86,9 @@ def test_every_configured_region_is_valid():
 )
 def test_unsafe_region_is_rejected(resources):
     with pytest.raises(ValueError):
-        validate_region(Region("qq", "Q English", "UTC", resources))
+        validate_region(
+            Region("qq", "Q English", "UTC", resources, "en-QQ", REGIONS["au"].date_formats)
+        )
 
 
 # --- text rendering ---------------------------------------------------------

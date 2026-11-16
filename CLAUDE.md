@@ -993,13 +993,13 @@ cd /Users/alec/Projects/haystack-service && gh run list --limit 3
 
 ---
 
-## Australian Spelling
+## Language, Spelling and Regional Formats
 
-The codebase uses Australian English:
-- colour (not color)
-- behaviour (not behavior)
-- analyse (not analyze)
-- organisation (not organization)
+Haystack serves several country deployments from one codebase (`COUNTRY_CODE`), so nothing assumes Australia:
+- User-facing text uses the deployment region's English variety (`language_variety` in `regions.py`, via the `${language_variety}` placeholder). Do not hard-code a variety or spelling convention in prompts.
+- Dates shown to people or models go through `regions.format_date(moment, style)`; the day/month order comes from the region's `date_formats`. Never hand-build `day month year` strings.
+- Time zones fall back to the region's `default_timezone`; examples in tool descriptions stay region-neutral.
+- Adding a country is a `REGIONS` entry in `regions.py`, not code.
 
 ---
 

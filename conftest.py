@@ -58,7 +58,7 @@ TEST_REGION_CODE = "zz"
 @pytest.fixture
 def test_region(monkeypatch):
     """Register the made-up ``zz`` region for the duration of one test."""
-    from regions import CRISIS_LINE, EMERGENCY, REGIONS, CrisisResource, Region, validate_region
+    from regions import CRISIS_LINE, EMERGENCY, REGIONS, CrisisResource, DateFormats, Region, validate_region
 
     region = Region(
         code=TEST_REGION_CODE,
@@ -69,6 +69,15 @@ def test_region(monkeypatch):
             CrisisResource("Testland Helpline", "0100 200 300", "24/7 crisis support", kind=CRISIS_LINE),
             CrisisResource("Testland Textline", "text TEST to 4000", "24/7", kind=CRISIS_LINE),
             CrisisResource("Testland Peer Support", "0100 999 888"),
+        ),
+        locale="en-ZZ",
+        # Year-first with dots and a marker, so no real country's order can
+        # pass a test by accident.
+        date_formats=DateFormats(
+            numeric="{year}.{mm}.{dd}",
+            long="{year} {month} {day} ({weekday})",
+            weekday_day_month="{month} {day} ({weekday})",
+            day_month_year="{year} {month} {day}",
         ),
     )
     validate_region(region)
