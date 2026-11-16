@@ -18,6 +18,7 @@ from llm_routing import (
     gateway_chat_compatibility,
     router_registry,
 )
+from regions import configured_country_code, get_region
 
 logger = logging.getLogger(__name__)
 
@@ -57,16 +58,6 @@ CLIENT_MOOD_ACTIVITIES = (
     "Biking",
     "Walking",
 )
-
-# Used only when neither the browser nor the service configuration supplies a
-# timezone. Keyed by the deployment's COUNTRY_CODE.
-COUNTRY_DEFAULT_TIMEZONES = {
-    "AU": "Australia/Sydney",
-    "NZ": "Pacific/Auckland",
-    "UK": "Europe/London",
-    "GB": "Europe/London",
-    "US": "America/New_York",
-}
 
 # Largest page the API accepts on /haystack/search-clients.
 CLIENT_SEARCH_MAX_LIMIT = 50
@@ -2127,7 +2118,7 @@ class ToolManager:
 
         Order: an explicit, valid tool argument; the browser timezone sent with
         the chat request; the service TZ setting; the deployment country's
-        default. UTC is the last resort only — defaulting to it made "today"
+        default (from the region config). UTC is the last resort only — defaulting to it made "today"
         the wrong calendar day for every Australian practitioner before
         mid-morning.
         """
@@ -2139,9 +2130,11 @@ class ToolManager:
             candidates.append(self.current_page_context.get('user_timezone'))
         candidates.append(os.environ.get('TZ'))
         candidates.append(os.environ.get('TIMEZONE'))
-        candidates.append(
-            COUNTRY_DEFAULT_TIMEZONES.get((os.environ.get('COUNTRY_CODE') or '').strip().upper())
-        )
+        # The deployment region's default (regions.py). Only when COUNTRY_CODE
+        # names a configured region: an unconfigured service keeps UTC.
+        deployment_country = configured_country_code()
+        if deployment_country:
+            candidates.append(get_region(deployment_country).default_timezone)
         for name in candidates:
             if not name or not isinstance(name, str):
                 continue

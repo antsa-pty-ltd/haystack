@@ -678,7 +678,7 @@ class HaystackPipelineManager:
             # has_db_access=False persona. There is NO practitioner to escalate
             # to, so the receiving end for the "crisis lines injected upstream"
             # contract lives here: resolve a country code from the request
-            # context (defaulting to the platform default) and append concrete
+            # context (defaulting to the deployment's region, regions.py) and append concrete
             # contacts so the model never has to hallucinate a number.
             if persona_type == PersonaType.ANTSABOT_COMPANION:
                 _ctx = context or session.context or {}

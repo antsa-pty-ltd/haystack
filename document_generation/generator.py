@@ -21,7 +21,7 @@ from document_generation.refinement import (
     shortening_word_limit,
     unmet_name_removals,
 )
-from document_generation.language import LANGUAGE_INSTRUCTIONS, check_document_language, directive_text, standing_refinement_directives
+from document_generation.language import output_language_rules, check_document_language, directive_text, standing_refinement_directives
 from document_generation.structure import (
     structural_contract,
     structure_problems,
@@ -293,7 +293,7 @@ When asked to shorten, remove repetition and compress wording; do not add inform
 Be professional, accurate, and only include information that was actually discussed in the session.
 Focus particularly on preserving the integrity of therapeutic interventions and strategies as they were actually delivered.
 """
-        system_prompt += LANGUAGE_INSTRUCTIONS
+        system_prompt += output_language_rules()
         
         # Add generation instructions if provided
         if generation_instructions:

@@ -20,6 +20,12 @@ import privacy_defaults  # noqa: F401  (tests import haystack modules directly)
 if not os.environ.get("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
 
+# Region-dependent text (crisis lines, persona wording, default timezone) is
+# resolved from COUNTRY_CODE. Start every run from the unset state (the AU
+# fallback) so a developer's shell cannot change results; tests that need a
+# region set it with monkeypatch.
+os.environ.pop("COUNTRY_CODE", None)
+
 import pytest
 
 from llm_routing import router_registry  # noqa: E402
@@ -41,3 +47,30 @@ def isolate_router_registry():
     router_registry.clear()
     yield
     router_registry.clear()
+
+
+# A made-up region for tests. Tests prove region behaviour against this entry,
+# never against a real country's config, so changing a real region's copy
+# cannot silently rewrite what the tests assert.
+TEST_REGION_CODE = "zz"
+
+
+@pytest.fixture
+def test_region(monkeypatch):
+    """Register the made-up ``zz`` region for the duration of one test."""
+    from regions import CRISIS_LINE, EMERGENCY, REGIONS, CrisisResource, Region, validate_region
+
+    region = Region(
+        code=TEST_REGION_CODE,
+        language_variety="Testland English",
+        default_timezone="Pacific/Chatham",
+        crisis_resources=(
+            CrisisResource("Testland Emergency", "555", "immediate danger", kind=EMERGENCY),
+            CrisisResource("Testland Helpline", "0100 200 300", "24/7 crisis support", kind=CRISIS_LINE),
+            CrisisResource("Testland Textline", "text TEST to 4000", "24/7", kind=CRISIS_LINE),
+            CrisisResource("Testland Peer Support", "0100 999 888"),
+        ),
+    )
+    validate_region(region)
+    monkeypatch.setitem(REGIONS, TEST_REGION_CODE, region)
+    return region
