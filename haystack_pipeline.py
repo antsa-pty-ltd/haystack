@@ -2,6 +2,7 @@
 Haystack-based Pipeline Manager using Declarative Pipeline Architecture
 Following official Haystack recommendations with automatic agent loops
 """
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 import asyncio
 import json
 import logging
@@ -31,6 +32,7 @@ from llm_routing import (
 from practitioner_context import build_practitioner_context_block, fetch_practitioner_context
 from personas import PersonaConfig, PersonaType, normalize_persona_type, persona_manager
 from persona_config_provider import persona_config_provider
+from regions import format_date
 from session_manager import session_manager
 from tools import tool_manager
 from components.ui_actions import UIActionCollector, MessageCollector
@@ -79,7 +81,7 @@ def build_current_time_block(timezone_name: Optional[str] = None) -> str:
     clock = f"{hour}:{now_local.minute:02d} {'am' if now_local.hour < 12 else 'pm'}"
     return (
         "\n\n# RIGHT NOW (practitioner's local time)\n"
-        f"- Date: {now_local.strftime('%A')} {now_local.day} {now_local.strftime('%B %Y')}\n"
+        f"- Date: {format_date(now_local, 'long')}\n"
         f"- Time: {clock} ({tz_name})\n"
         "- Use this for \"today\", \"tomorrow\", \"this afternoon\" and for judging what is "
         "already done versus still ahead. Schedule tools already return local times."
@@ -677,7 +679,7 @@ class HaystackPipelineManager:
             # has_db_access=False persona. There is NO practitioner to escalate
             # to, so the receiving end for the "crisis lines injected upstream"
             # contract lives here: resolve a country code from the request
-            # context (defaulting to the platform default) and append concrete
+            # context (defaulting to the deployment's region, regions.py) and append concrete
             # contacts so the model never has to hallucinate a number.
             if persona_type == PersonaType.ANTSABOT_COMPANION:
                 _ctx = context or session.context or {}

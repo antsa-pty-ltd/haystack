@@ -5,6 +5,7 @@ Uses Haystack's Agent with tool-calling to autonomously explore therapy sessions
 and build context for document generation.
 """
 
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 import asyncio
 import logging
 from contextvars import copy_context

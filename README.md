@@ -161,9 +161,9 @@ uvicorn main:app --reload --port 8001
 
 Tests are scaffolded — `pytest` runs `test_integration.py`. A proper unit-test suite plus CI gate land in Sprint 3 (see `infra/docs/testing-journal.md`).
 
-## Australian English
+## Language and regional formats
 
-We use Australian spelling everywhere — colour, behaviour, organise, recognise, prioritise, analyse.
+Text that reaches people (prompts, persona wording, generated documents) uses the deployment region's English variety — `language_variety` in [`regions.py`](regions.py), rendered through the `${language_variety}` placeholder — never a hard-coded variety. Dates go through `regions.format_date`, which takes the order and separators from the region's `date_formats`. Tool-description examples stay region-neutral (ISO dates, `Area/City` time zones). See the `regions.py` docstring for adding a country.
 
 ## Cross-repo development process
 

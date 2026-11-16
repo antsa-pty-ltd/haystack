@@ -1,5 +1,6 @@
 """Haystack generator adapter with payload-free per-call route telemetry."""
 
+import privacy_defaults  # noqa: F401  (must precede any haystack import)
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from haystack.components.generators.chat import OpenAIChatGenerator
