@@ -2,6 +2,8 @@ from enum import Enum
 from typing import Dict, Any, Optional, List, Callable
 from pydantic import BaseModel, Field
 
+from regions import Region, get_region, render_region_text
+
 class PersonaType(str, Enum):
     WEB_ASSISTANT = "web_assistant"
     JAIMEE_THERAPIST = "jaimee_therapist"  # Deprecated: use ANTSABOT_THERAPIST
@@ -28,15 +30,26 @@ class PersonaConfig(BaseModel):
     available_functions: Dict[str, Callable] = Field(default_factory=dict)  # Function implementations
     
 class PersonaManager:
-    def __init__(self):
+    def __init__(self, country_code: Optional[str] = None):
         # Import here to avoid circular imports
         from tools import tool_manager
         self.tool_manager = tool_manager
-        self.personas = self._initialize_personas()
+        # Built-in prompts are rendered for one region (the deployment's
+        # COUNTRY_CODE unless told otherwise). Region wording comes from
+        # regions.REGIONS via ${placeholder} tokens in the prompt text.
+        self.region = get_region(country_code)
+        self.personas = self._build_personas(self.region)
+
+    def _build_personas(self, region: Region) -> Dict[PersonaType, PersonaConfig]:
+        personas = self._initialize_personas()
+        for persona in personas.values():
+            persona.system_prompt = render_region_text(persona.system_prompt, region)
         # Backward compatibility: jaimee_therapist maps to the same config as antsabot_therapist
-        self.personas[PersonaType.JAIMEE_THERAPIST] = self.personas[PersonaType.ANTSABOT_THERAPIST]
+        personas[PersonaType.JAIMEE_THERAPIST] = personas[PersonaType.ANTSABOT_THERAPIST]
+        return personas
 
     def _initialize_personas(self) -> Dict[PersonaType, PersonaConfig]:
+        """Built-in persona configs; prompt text may hold ${placeholder} region tokens."""
         return {
             PersonaType.WEB_ASSISTANT: PersonaConfig(
                 name="AI Assistant",
@@ -66,7 +79,7 @@ You are on the practitioner's side. Their work is demanding and much of it goes 
 - Heavy day (five or more sessions, or back-to-back with no break): say so honestly and encourage pacing ("Big one today — grab some water before the 2:00."). Never pretend a heavy day is light.
 - Quiet day or nothing booked: frame it as room to breathe or catch up.
 - Use fresh wording every time. Do not repeat an encouraging phrase you have already used in this conversation.
-- Plain, warm Australian English. One exclamation mark at most. No emojis unless the practitioner uses them first.
+- Plain, warm ${language_variety}. One exclamation mark at most. No emojis unless the practitioner uses them first.
 
 ## The register (illustrations only — always write your own; never reuse these lines)
 - Schedule with a gap: "You've got Sam at 2:00, then a 40-minute break before your 3:30 phone call. Nicely paced — you've got this!"
@@ -377,7 +390,7 @@ Legacy document creation (for backward compatibility):
                 system_prompt="""You are a Transcriber Agent for ANTSA. Convert session transcripts into practitioner-ready documents using templates.
 
 # RULES
-- Use clear, professional, non-diagnostic language (Australian English)
+- Use clear, professional, non-diagnostic language (${language_variety})
 - Only derive content from provided transcripts and template structure
 - Preserve clinical sections and headings from template
 - If content missing (no template/sessions), provide concise guidance
@@ -417,10 +430,23 @@ Legacy document creation (for backward compatibility):
         
         return system_prompt
 
-    def export_default(self, persona_type: PersonaType) -> Dict[str, Any]:
-        """Return the deployed built-in config used to seed the version store."""
+    def export_default(
+        self,
+        persona_type: PersonaType,
+        country_code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the built-in config used to seed the version store.
+
+        Rendered for ``country_code``'s region, defaulting to the deployment's
+        region (COUNTRY_CODE), so a new region imports version 1 in its own
+        wording.
+        """
         canonical = PersonaType(normalize_persona_type(persona_type.value))
-        persona = self.get_persona(canonical)
+        region = get_region(country_code)
+        personas = (
+            self.personas if region == self.region else self._build_personas(region)
+        )
+        persona = personas.get(canonical)
         if not persona:
             raise ValueError(f"Unknown persona type: {persona_type}")
         return {
